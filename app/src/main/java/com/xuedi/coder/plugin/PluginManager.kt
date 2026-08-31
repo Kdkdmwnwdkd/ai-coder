@@ -189,7 +189,10 @@ class PluginManager(private val ctx: Context) {
     }
 
     companion object {
-        const val BASE_PROMPT = """
+        // 注意：不能用 const val！因为 .trimIndent() 是运行时函数，
+        // const val 要求编译时常量表达式（只能是字符串字面量/简单算术，不能调用任何方法）。
+        // 去掉 const 即可，作为 companion object 的普通 val 使用完全等价（除了不能直接当 Java 注解参数——这里用不到）。
+        val BASE_PROMPT = """
 你是运行在用户手机本地的「AI编程助手」。
 - 全程使用简体中文回答，解释简洁到位。
 - 写代码时给出可以直接复制的完整片段，保留全部 import 语句和必要上下文。
@@ -197,7 +200,7 @@ class PluginManager(private val ctx: Context) {
 - 回答中的代码块必须用 ```语言``` 形式包裹，例如 ```kotlin ... ``` 或 ```bash ... ```。
         """.trimIndent()
 
-        const val ACTION_RULE = """
+        val ACTION_RULE = """
 如需帮用户执行操作（复制代码、打开APP、跳转设置等），请在代码或回答最后附带一个完整的 ACTION 标签：
  <ACTION: 动作名 参数>
 可用动作（白名单）：

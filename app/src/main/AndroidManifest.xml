@@ -2,7 +2,13 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- M1 最小骨架：先不加任何敏感权限，确保能过编译；后续里程碑按需追加 -->
+    <!-- ============= 【新 M3 UI 层】权限声明（先占位，M4+ 管理层再真正使用） ============= -->
+    <!-- Android 13+：通知栏前台保活/推理通知（后续 llama.cpp 前台服务需要） -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Android 13+：选择照片做背景（其实SAF用Intent不需要权限，先占位） -->
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <!-- 占位：后续下载模型、拉取插件更新用 -->
+    <uses-permission android:name="android.permission.INTERNET" />
 
     <application
         android:name=".App"
@@ -12,6 +18,7 @@
         android:roundIcon="@mipmap/ic_launcher"
         android:supportsRtl="true"
         android:theme="@style/Theme.XuediCoder"
+        android:usesCleartextTraffic="true"
         tools:targetApi="34">
 
         <activity
@@ -23,5 +30,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- ============= FileProvider：SAF 导入 GGUF / 背景照片后 分享文件URI 用 ============= -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
     </application>
 </manifest>

@@ -1,24 +1,18 @@
 // =======================================================
-// M3 · 管理层里程碑（不碰UI！只加逻辑层依赖 + 逻辑层代码）
-// 在 M2 已通过基础上加：
-//   - Kotlinx Serialization（插件配置 JSON 化）
-//   - DataStore Preferences（背景/插件开关等轻量持久化）
-//   - Coil（图片加载 + App 的 ImageLoaderFactory）
-//   - Okio（SAF 导入文件时高性能复制）
-//   - Coroutines ViewModel（viewModelScope 扩展）
-//   - 代码：plugin/（PluginManager/PluginConfig）
-//           model/（ModelManager/LlmEngine/MockLlmEngine）
-//           theme/（ThemeStore 背景持久化）
-//           data/ChatMsg.kt（聊天消息结构）
-//   - App.kt：把以上全部实例化，确保初始化逻辑能编译
-// ——
-// 插件加载方式：全部通过 根build.gradle.kts 的 buildscript classpath 注入真实 JAR，
-// 然后在这里用 apply(plugin="...字符串ID...") 加载。
-// 彻底绕开 Gradle Plugin Portal marker 同步慢导致的 UnknownPluginException。
+// 【新 M3 = UI 层里程碑】
+// 按用户要求把 原M3(管理层) 和 原M4(UI层) 顺序对调了！
+// 本层只做 UI：导航 + 4页面 + 底部Tab + 权限 + FileProvider + 照片背景UI盒子
+// —— 完全不碰管理层（PluginManager/ModelManager/ThemeStore），它们留在 /tmp/m3_logic_backup
+// —— 彻底避开 serialization gradle 插件那个全网找不到 artifact 的坑
+// 依赖：全是纯 runtime（不需要 Gradle 插件），MavenCentral 100% 能拉到
+//   · Navigation Compose（页面导航）
+//   · Material Icons Extended（底部Tab图标）
+//   · Lifecycle ViewModel + Coroutines Flow（聊天状态）
+//   · Coil Compose（照片背景加载）
+//   · Room + KSP（M2 已验证通过保留）
 // =======================================================
 apply(plugin = "com.android.application")
 apply(plugin = "org.jetbrains.kotlin.android")
-// （M3 暂时跳过；等 M4+ 真正需要 JSON 化 PluginConfig 时，要么找对 serialization gradle 插件的仓库/artifactId，要么换 moshi/gson 这类不需要 gradle 插件的 JSON 库）
 apply(plugin = "com.google.devtools.ksp")
 
 android {
@@ -29,8 +23,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 1
-        versionName = "2.0.0-M3"
+        versionCode = 3
+        versionName = "2.0.0-M3-UI"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }
@@ -75,7 +69,7 @@ android {
 }
 
 dependencies {
-    // ————— M1 基础依赖（已验证过）—————
+    // ————— M1 基础依赖（已验证通过）—————
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
@@ -86,24 +80,23 @@ dependencies {
     implementation("androidx.compose.material3:material3")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
-    // ————— M2 Room（已验证过）—————
+    // ————— M2 Room（已验证通过保留，KSP继续工作）—————
     implementation("androidx.room:room-runtime:2.6.1")
     implementation("androidx.room:room-ktx:2.6.1")
     ksp("androidx.room:room-compiler:2.6.1")
 
-    // ————— ✨ M3 新增：管理层依赖 ✨ —————
+    // ————— 🌟 新 M3 = UI 层专属依赖（纯 runtime，不需要 Gradle 插件）—————
+    // 页面导航（BottomTab 切 4 个页面）
+    implementation("androidx.navigation:navigation-compose:2.7.7")
+    // Compose ViewModel（聊天/插件/设置 页面状态）
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
-    // DataStore（背景透明度/插件开关等轻量KV）
-    implementation("androidx.datastore:datastore-preferences:1.0.0")
-    // Serialization（插件配置 JSON 化）
-    // 暂时移除：需要 kotlinx-serialization gradle 插件配合；该插件的真实 artifactId + Maven 仓库组合在当前 GitHub Runner 下全网搜不到，后续用 moshi/gson 替代（不依赖 gradle 插件）
-    // Coroutines Android
+    // 协程（Flow 流式打字效果模拟）
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
-    // Okio（SAF 导入模型/背景时复制文件到私有目录）
-    implementation("com.squareup.okio:okio:3.7.0")
-    // Coil（背景照片加载 + App 全局 ImageLoader）
+    // Material 扩展图标（底部 Tab：聊天/插件/设置/关于）
+    implementation("androidx.compose.material:material-icons-extended:1.6.0")
+    // Compose Foundation（点击/手势/选择器）
+    implementation("androidx.compose.foundation:foundation:1.6.0")
+    // Coil（选择照片做背景 → 用 AsyncImage/SubcomposeAsyncImage 加载）
     implementation("io.coil-kt:coil-compose:2.5.0")
-    implementation("io.coil-kt:coil-gif:2.5.0")
-    implementation("io.coil-kt:coil-svg:2.5.0")
 }

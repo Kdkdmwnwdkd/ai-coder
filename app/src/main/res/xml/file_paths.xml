@@ -1,9 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- FileProvider 允许共享的目录（后续 M3UI / M4 选背景照、导入 GGUF 模型到私有目录用） -->
 <paths>
+    <!-- /data/data/<pkg>/files/ -->
     <files-path name="files" path="." />
-    <files-path name="models" path="models/" />
-    <files-path name="backgrounds" path="backgrounds/" />
-    <files-path name="plugins" path="plugins/" />
+    <!-- /data/data/<pkg>/cache/ -->
     <cache-path name="cache" path="." />
-    <external-files-path name="external" path="." />
+    <!-- /sdcard/Android/data/<pkg>/files/ -->
+    <external-files-path name="external_files" path="." />
+    <!-- /sdcard/Android/data/<pkg>/cache/ -->
+    <external-cache-path name="external_cache" path="." />
 </paths>

@@ -18,7 +18,7 @@
 // =======================================================
 apply(plugin = "com.android.application")
 apply(plugin = "org.jetbrains.kotlin.android")
-apply(plugin = "org.jetbrains.kotlin.plugin.serialization")
+// （M3 暂时跳过；等 M4+ 真正需要 JSON 化 PluginConfig 时，要么找对 serialization gradle 插件的仓库/artifactId，要么换 moshi/gson 这类不需要 gradle 插件的 JSON 库）
 apply(plugin = "com.google.devtools.ksp")
 
 android {
@@ -97,7 +97,7 @@ dependencies {
     // DataStore（背景透明度/插件开关等轻量KV）
     implementation("androidx.datastore:datastore-preferences:1.0.0")
     // Serialization（插件配置 JSON 化）
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.2")
+    // 暂时移除：需要 kotlinx-serialization gradle 插件配合；该插件的真实 artifactId + Maven 仓库组合在当前 GitHub Runner 下全网搜不到，后续用 moshi/gson 替代（不依赖 gradle 插件）
     // Coroutines Android
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
     // Okio（SAF 导入模型/背景时复制文件到私有目录）

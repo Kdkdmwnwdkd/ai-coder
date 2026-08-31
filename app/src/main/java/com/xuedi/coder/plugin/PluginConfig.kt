@@ -1,8 +1,6 @@
 package com.xuedi.coder.plugin
 
-import kotlinx.serialization.Serializable
 
-@Serializable
 data class PluginConfig(
     val id: String,
     val name: String,

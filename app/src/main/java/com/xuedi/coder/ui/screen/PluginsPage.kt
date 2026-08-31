@@ -43,7 +43,7 @@ import kotlinx.coroutines.launch
  * 【新 M4 = 管理层】场景插件页 —— 真正接 App.instance.pluginManager。
  *
  * 数据流：
- *   PluginManager (ensureBuiltinPlugins 写 filesDir plugins/*.json + Room)
+ *   PluginManager (ensureBuiltinPlugins 写 filesDir plugins 下的 plugin.json 到 Room)
  *     → listFlow: Flow<List<Pair<PluginConfig, Boolean>>>
  *       → collectAsStateWithLifecycle
  *         → 渲染卡片 + Switch

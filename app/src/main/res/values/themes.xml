@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <style name="Theme.XuediCoder" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:statusBarColor">@color/x_very_light_gray</item>
+        <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">@color/x_very_light_gray</item>
+        <item name="android:navigationBarColor">@color/x_white</item>
+        <item name="android:windowLightNavigationBar">true</item>
+    </style>
+
+    <style name="Theme.XuediCoder.Splash" parent="Theme.SplashScreen">
+        <item name="windowSplashScreenBackground">@color/x_white</item>
+        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_vector</item>
+        <item name="postSplashScreenTheme">@style/Theme.XuediCoder</item>
+    </style>
+</resources>

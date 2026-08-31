@@ -1,0 +1,21 @@
+# Gradle
+.gradle/
+.gradle-cache/
+build/
+app/build/
+*.iml
+local.properties
+captures/
+.externalNativeBuild/
+.cxx/
+
+# Android Studio / IDE
+.idea/
+*.apk
+*.aab
+*.ap_
+*.idsig
+signing/*.jks
+signing/*.p12
+signing/*.b64
+!signing/README.md

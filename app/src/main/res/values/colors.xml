@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <color name="x_white">#FFFFFFFF</color>
+    <color name="x_very_light_gray">#FFF7F7F8</color>
+    <color name="x_light_gray">#FFE6E7EB</color>
+    <color name="x_mid_gray">#FFA7AAAF</color>
+    <color name="x_dark_gray">#FF4A4B4F</color>
+    <color name="x_black">#FF111214</color>
+    <color name="x_accent">#FF5C7C9A</color>
+    <color name="x_accent_dim">#FFDCE3EB</color>
+    <color name="x_transparent">#00000000</color>
+</resources>

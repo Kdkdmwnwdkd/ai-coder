@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">AI编程助手</string>
+    <string name="nav_chat">聊天</string>
+    <string name="nav_plugins">场景</string>
+    <string name="nav_settings">设置</string>
+    <string name="nav_about">关于</string>
+    <string name="coder_channel_keep">推理保活</string>
+    <string name="coder_channel_action">动作执行</string>
+</resources>

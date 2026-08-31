@@ -12,23 +12,6 @@ pluginManagement {
         repos.forEach { (_, url) -> maven(url = uri(url)) { isAllowInsecureProtocol = true } }
         gradlePluginPortal()
     }
-    // 核心修复：通过 plugin id → 真实 Maven 坐标显式映射，
-    // 避免 Gradle 因 Portal 上 marker artifact 缺失导致 "UnknownPluginException"（尤其是 KSP）。
-    resolutionStrategy {
-        eachPlugin {
-            when (requested.id.id) {
-                "com.android.application",
-                "com.android.library" ->
-                    useModule("com.android.tools.build:gradle:${requested.version}")
-                "com.google.devtools.ksp" ->
-                    useModule("com.google.devtools.ksp:symbol-processing-gradle-plugin:${requested.version}")
-                "org.jetbrains.kotlin.android",
-                "org.jetbrains.kotlin.jvm",
-                "org.jetbrains.kotlin.plugin.serialization" ->
-                    useModule("org.jetbrains.kotlin:kotlin-gradle-plugin:${requested.version}")
-            }
-        }
-    }
 }
 
 dependencyResolutionManagement {

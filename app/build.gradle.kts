@@ -1,10 +1,15 @@
 // =======================================================
-// 【最小可编译基准版本】—— 先确保能在 GitHub Actions 上 100% 产出 APK
-// 之后再逐个加回 Room / KSP / Navigation / Serialization / 插件系统 等功能。
+// M2 · Room 数据库层里程碑
+// 在 M1 已验证通过的基础上，此步只加：
+//   - KSP 插件（编译期生成 Room 代码）
+//   - Room 运行时 + KSP + Kotlin 扩展依赖
+//   - 6 个纯 Room 代码文件（Entity / Dao / Database）
+// 版本矩阵（M1验证过）：Gradle8.2 / AGP8.2.2 / Kotlin1.9.22 / ComposeCompiler1.5.8 / KSP1.9.22-1.0.17
 // =======================================================
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
+    id("com.google.devtools.ksp")
 }
 
 android {
@@ -16,10 +21,15 @@ android {
         minSdk = 26
         targetSdk = 34
         versionCode = 1
-        versionName = "2.0.0-M1"
+        versionName = "2.0.0-M2"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }
+
+        // Room schema 导出目录：编译期会写 .json schema 到 app/schemas/
+        ksp {
+            arg("room.schemaLocation", "$projectDir/schemas")
+        }
     }
 
     buildTypes {
@@ -45,7 +55,6 @@ android {
         compose = true
         buildConfig = true
     }
-    // 官方兼容矩阵：Kotlin 1.9.22 ↔ Compose Compiler 1.5.8
     composeOptions { kotlinCompilerExtensionVersion = "1.5.8" }
     packaging {
         resources.excludes += setOf(
@@ -58,17 +67,19 @@ android {
 }
 
 dependencies {
-    // ————— AndroidX 基础 —————
+    // ————— M1 基础依赖（已验证过）—————
     implementation("androidx.core:core-ktx:1.12.0")
     implementation("androidx.activity:activity-compose:1.8.2")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
-
-    // ————— Compose 基础（官方 BOM 对齐版本，防版本错配）—————
     implementation(platform("androidx.compose:compose-bom:2024.02.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
-
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // ————— ✨ M2 新增：Room（本地数据库）✨ —————
+    implementation("androidx.room:room-runtime:2.6.1")
+    implementation("androidx.room:room-ktx:2.6.1")
+    ksp("androidx.room:room-compiler:2.6.1")
 }

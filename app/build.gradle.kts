@@ -11,9 +11,16 @@
 //   · Coil Compose（照片背景加载）
 //   · Room + KSP（M2 已验证通过保留）
 // =======================================================
-apply(plugin = "com.android.application")
-apply(plugin = "org.jetbrains.kotlin.android")
-apply(plugin = "com.google.devtools.ksp")
+// 关键：必须用 plugins {} 块，不能用 apply(plugin = "...")！
+// 原因：Kotlin DSL 在 *编译脚本时* 就要解析 android { namespace } / dependencies { implementation } 的类型。
+//       apply() 是"运行时动态做的"，编译器不知道会注入什么，会把 android / implementation 全报成 Unresolved reference。
+//       而 plugins {} 块会告诉 Gradle Kotlin DSL 在编译脚本前先应用这些插件，从而生成类型安全访问器。
+// version 省略 → settings.gradle.kts 里 resolutionStrategy.eachPlugin 已经硬编码了坐标，100% 可拉。
+plugins {
+    id("com.android.application")
+    id("org.jetbrains.kotlin.android")
+    id("com.google.devtools.ksp")
+}
 
 android {
     namespace = "com.xuedi.coder"

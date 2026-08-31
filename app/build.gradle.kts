@@ -11,13 +11,15 @@
 //           theme/（ThemeStore 背景持久化）
 //           data/ChatMsg.kt（聊天消息结构）
 //   - App.kt：把以上全部实例化，确保初始化逻辑能编译
+// ——
+// 插件加载方式：全部通过 根build.gradle.kts 的 buildscript classpath 注入真实 JAR，
+// 然后在这里用 apply(plugin="...字符串ID...") 加载。
+// 彻底绕开 Gradle Plugin Portal marker 同步慢导致的 UnknownPluginException。
 // =======================================================
-plugins {
-    id("com.android.application")
-    id("org.jetbrains.kotlin.android")
-    id("org.jetbrains.kotlin.plugin.serialization")
-    id("com.google.devtools.ksp")
-}
+apply(plugin = "com.android.application")
+apply(plugin = "org.jetbrains.kotlin.android")
+apply(plugin = "org.jetbrains.kotlin.plugin.serialization")
+apply(plugin = "com.google.devtools.ksp")
 
 android {
     namespace = "com.xuedi.coder"

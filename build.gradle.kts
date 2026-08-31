@@ -1,28 +1,13 @@
-// 故意不用 plugins{} DSL，改用 buildscript classpath 老语法。
-// 原因：com.google.devtools.ksp 的 Gradle Plugin Portal marker artifact 经常同步不全，
-//       会在 Runner 上反复触发 UnknownPluginException。显式走 Maven JAR 坐标 100% 稳定。
-
-buildscript {
-    repositories {
-        val repos = linkedMapOf(
-            "aliyun-google" to "https://maven.aliyun.com/repository/google",
-            "aliyun-central" to "https://maven.aliyun.com/repository/central",
-            "aliyun-public" to "https://maven.aliyun.com/repository/public",
-            "tencent" to "https://mirrors.cloud.tencent.com/maven/",
-            "google" to "https://dl.google.com/dl/android/maven2/",
-            "central" to "https://repo1.maven.org/maven2/"
-        )
-        repos.forEach { (_, url) -> maven(url = uri(url)) { isAllowInsecureProtocol = true } }
-        mavenLocal()
-    }
-    dependencies {
-        // 版本策略：全部使用经过数百个生产项目验证过的“黄金稳定组合”
-        //   AGP 8.1.4 + Gradle 8.4 + Kotlin 1.9.10 + KSP 1.9.10-1.0.13 + Compose Compiler 1.5.3
-        classpath("com.android.tools.build:gradle:8.1.4")
-        classpath("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.10")
-        classpath("org.jetbrains.kotlin:kotlin-serialization:1.9.10")
-        classpath("com.google.devtools.ksp:symbol-processing-gradle-plugin:1.9.10-1.0.13")
-    }
+// 根 build.gradle.kts：
+// 只声明插件 ID+版本（通过 apply=false），实际 apply 在各子模块的 build.gradle.kts 里做。
+// 版本遵循 Android 官方兼容矩阵（2024Q1 稳定组合）：
+//   AGP 8.2.2  ↔ Gradle 8.2  ↔ Kotlin 1.9.22  ↔ Compose Compiler 1.5.8  ↔ KSP 1.9.22-1.0.17
+plugins {
+    id("com.android.application") version "8.2.2" apply false
+    id("com.android.library") version "8.2.2" apply false
+    id("org.jetbrains.kotlin.android") version "1.9.22" apply false
+    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.22" apply false
+    id("com.google.devtools.ksp") version "1.9.22-1.0.17" apply false
 }
 
 tasks.register("clean", Delete::class) {

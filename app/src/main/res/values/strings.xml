@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">AI编程助手</string>
+    <!-- 注意：app_name 由 build.gradle.kts 的 resValue 声明（区分 debug/release），不要在 strings.xml 里重复定义 -->
     <string name="nav_chat">聊天</string>
     <string name="nav_plugins">场景</string>
     <string name="nav_settings">设置</string>

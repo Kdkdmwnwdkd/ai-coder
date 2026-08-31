@@ -1,33 +1,41 @@
 pluginManagement {
+    // 双保险：先用官方标准仓库，再用国内镜像做 fallback。
+    // GitHub Actions 上官方仓库通常直连很快，而阿里云/mirrors 是给国内用户开发时兜底。
     repositories {
-        val repos = linkedMapOf(
-            "aliyun-google" to "https://maven.aliyun.com/repository/google",
-            "aliyun-central" to "https://maven.aliyun.com/repository/central",
-            "aliyun-public" to "https://maven.aliyun.com/repository/public",
-            "tencent" to "https://mirrors.cloud.tencent.com/gradle/",
-            "google" to "https://dl.google.com/dl/android/maven2/",
-            "central" to "https://repo1.maven.org/maven2/",
-            "gradle-plugin" to "https://plugins.gradle.org/m2/"
-        )
-        repos.forEach { (_, url) -> maven(url = uri(url)) { isAllowInsecureProtocol = true } }
+        google()
+        mavenCentral()
         gradlePluginPortal()
+        maven(url = uri("https://maven.aliyun.com/repository/google"))
+        maven(url = uri("https://maven.aliyun.com/repository/central"))
+        maven(url = uri("https://maven.aliyun.com/repository/public"))
+        maven(url = uri("https://mirrors.cloud.tencent.com/gradle/"))
+    }
+    // 终极兜底：Plugin Portal marker 同步慢时，强制用真实 Maven JAR 坐标
+    resolutionStrategy {
+        eachPlugin {
+            when (requested.id.id) {
+                "com.android.application", "com.android.library" ->
+                    useModule("com.android.tools.build:gradle:${requested.version}")
+                "org.jetbrains.kotlin.android",
+                "org.jetbrains.kotlin.jvm",
+                "org.jetbrains.kotlin.plugin.serialization" ->
+                    useModule("org.jetbrains.kotlin:kotlin-gradle-plugin:${requested.version}")
+                "com.google.devtools.ksp" ->
+                    useModule("com.google.devtools.ksp:symbol-processing-gradle-plugin:${requested.version}")
+            }
+        }
     }
 }
 
 dependencyResolutionManagement {
     repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
     repositories {
-        val repos = linkedMapOf(
-            "aliyun-google" to "https://maven.aliyun.com/repository/google",
-            "aliyun-central" to "https://maven.aliyun.com/repository/central",
-            "aliyun-public" to "https://maven.aliyun.com/repository/public",
-            "tencent" to "https://mirrors.cloud.tencent.com/maven/",
-            "google" to "https://dl.google.com/dl/android/maven2/",
-            "central" to "https://repo1.maven.org/maven2/",
-            "jitpack" to "https://jitpack.io"
-        )
-        repos.forEach { (_, url) -> maven(url = uri(url)) { isAllowInsecureProtocol = true } }
-        mavenLocal()
+        google()
+        mavenCentral()
+        maven(url = uri("https://maven.aliyun.com/repository/google"))
+        maven(url = uri("https://maven.aliyun.com/repository/central"))
+        maven(url = uri("https://maven.aliyun.com/repository/public"))
+        maven(url = uri("https://jitpack.io"))
     }
 }
 

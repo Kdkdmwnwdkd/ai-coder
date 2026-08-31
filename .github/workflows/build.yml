@@ -2,24 +2,22 @@ name: 构建 AI编程助手 APK
 
 on:
   push:
-    branches: [main, master, release/**]
-    tags: ["v*"]
-  pull_request:
     branches: [main, master]
+    tags: ["v*"]
   workflow_dispatch:
 
 jobs:
-  # ---------- Debug APK：无论 Release 成功与否都要产出，保证最低可用 ----------
   build-debug:
     name: 编译 Debug APK (arm64-v8a)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       JAVA_VERSION: "17"
       JAVA_DIST: "temurin"
-      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC -Dfile.encoding=UTF-8"
+      GRADLE_OPTS: >-
+        -Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC -Dfile.encoding=UTF-8
     steps:
       - uses: actions/checkout@v5
-        with: { submodules: false, fetch-depth: 0 }
+        with: { submodules: false, fetch-depth: 1 }
 
       - uses: actions/setup-java@v5
         with:
@@ -27,24 +25,49 @@ jobs:
           distribution: ${{ env.JAVA_DIST }}
           cache: "gradle"
 
-      - name: Gradle 权限
-        run: chmod +x gradlew
-
-      - name: 编译 Debug APK
+      - name: 环境预检（Gradle/Java/磁盘）
         run: |
-          set -o pipefail
-          ./gradlew --no-daemon :app:assembleDebug --stacktrace 2>&1 | tail -n 200
+          set -e
+          echo "JAVA_HOME=$JAVA_HOME"
+          "$JAVA_HOME/bin/java" -version
+          echo ""
+          echo "--- 磁盘剩余 ---"
+          df -h /mnt || df -h /
+          echo ""
+          chmod +x gradlew
+          ./gradlew --version 2>&1 | tail -n 8
+
+      - name: 编译 Debug APK（完整日志，不截断）
+        run: |
+          set -euo pipefail
+          LOG_FILE="build-debug.log"
+          ./gradlew --no-daemon --warning-mode all \
+            :app:assembleDebug \
+            --stacktrace 2>&1 | tee "$LOG_FILE"
+          echo ""
+          echo "=== 构建完成，产物列表 ==="
+          find app/build/outputs -type f \( -name "*.apk" -o -name "*.aab" \) 2>/dev/null || true
+
+      - name: 如果失败，单独打印错误摘要（方便排查）
+        if: failure()
+        run: |
+          echo "=== 🔴 关键错误摘要（FAILURE / Caused by / Could not / e: ）==="
+          grep -nE 'FAILURE|BUILD FAILED| Caused by:|Could not find|Could not resolve|e: [A-Z]|error:|Unresolved reference| not found' build-debug.log 2>/dev/null | head -n 80 || true
 
       - name: 收集 Debug APK
         id: apk
         run: |
           APK="$(find app/build/outputs/apk/debug -name '*.apk' -type f | head -n 1)"
-          if [ -z "$APK" ]; then echo "找不到 Debug APK"; ls -la app/build/outputs/apk/debug; exit 1; fi
+          if [ -z "$APK" ]; then
+            echo "❌ 找不到 Debug APK，当前目录结构："
+            find app/build/outputs -type f 2>/dev/null | head -n 40 || true
+            exit 1
+          fi
           SHA="$(git rev-parse --short HEAD)"
           OUT="AI编程助手-debug-${SHA}-arm64-v8a.apk"
           cp "$APK" "$OUT"
           echo "apk_file=$OUT" >> "$GITHUB_OUTPUT"
-          echo "原 APK：$APK -> $OUT"
+          echo "→ $APK  →  $OUT"
           ls -lh "$OUT"
 
       - uses: actions/upload-artifact@v4
@@ -54,110 +77,11 @@ jobs:
           retention-days: 90
           if-no-files-found: error
 
-  # ---------- Release APK：仅在签名 Secrets 正确配置 + keystore 能打开时才跑 ----------
-  build-release:
-    name: 编译 Release APK (arm64-v8a)
-    runs-on: ubuntu-latest
-    needs: build-debug
-    env:
-      JAVA_VERSION: "17"
-      JAVA_DIST: "temurin"
-      GRADLE_OPTS: "-Dorg.gradle.jvmargs=-Xmx6g -XX:MaxMetaspaceSize=1g -XX:+UseParallelGC -Dfile.encoding=UTF-8"
-    steps:
-      - uses: actions/checkout@v5
-        with: { submodules: false, fetch-depth: 0 }
-
-      - uses: actions/setup-java@v5
-        with:
-          java-version: ${{ env.JAVA_VERSION }}
-          distribution: ${{ env.JAVA_DIST }}
-          cache: "gradle"
-
-      # 严格的签名还原+校验：失败就输出 ready=false，后面 Release 构建自动跳过，不会白跑
-      - name: 还原并校验签名 keystore
-        id: signing
-        run: |
-          mkdir -p signing
-          KS=signing/xuedi_coder_release.jks
-          READY=true
-
-          if [ -z "$B64" ]; then
-            echo "⚠ SIGNING_JKS_BASE64 未配置，跳过 Release 构建。"
-            READY=false
-          else
-            echo "$B64" | base64 -d > "$KS"
-            if [ ! -s "$KS" ] || [ "$(stat -c%s "$KS")" -lt 1000 ]; then
-              echo "❌ 签名文件解码失败或过小"
-              READY=false
-            else
-              # 用 keytool 打开验证密码+alias是否存在
-              if ! keytool -list -keystore "$KS" \
-                     -storepass "$STORE_PASSWORD" \
-                     -alias "$KEY_ALIAS" > /dev/null 2>&1; then
-                echo "❌ keystore 无法打开，请检查密码或别名"
-                READY=false
-              else
-                echo "✅ 签名文件校验通过"
-                keytool -list -keystore "$KS" -storepass "$STORE_PASSWORD" -alias "$KEY_ALIAS" \
-                  | grep -E "指纹|SHA" || true
-              fi
-            fi
-          fi
-          echo "ready=$READY" >> "$GITHUB_OUTPUT"
-          ls -la signing/
-        env:
-          B64: ${{ secrets.SIGNING_JKS_BASE64 }}
-          STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-
-      - name: Gradle 权限
-        run: chmod +x gradlew
-
-      - name: 编译 Release APK
-        if: steps.signing.outputs.ready == 'true'
-        id: build
-        run: |
-          EXTRA_ARGS="-PSIGNING_STORE_PASSWORD=$STORE_PASSWORD \
-                      -PSIGNING_KEY_ALIAS=$KEY_ALIAS \
-                      -PSIGNING_KEY_PASSWORD=$KEY_PASSWORD"
-          set -o pipefail
-          ./gradlew --no-daemon :app:assembleRelease $EXTRA_ARGS --stacktrace 2>&1 | tail -n 250
-        env:
-          STORE_PASSWORD: ${{ secrets.SIGNING_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.SIGNING_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.SIGNING_KEY_PASSWORD }}
-
-      - name: 收集 Release APK
-        id: apk
-        if: steps.signing.outputs.ready == 'true'
-        run: |
-          APK="$(find app/build/outputs/apk/release -name '*.apk' -type f | head -n 1)"
-          if [ -z "$APK" ]; then echo "找不到 Release APK"; ls -la app/build/outputs/apk/release; exit 1; fi
-          SHA="$(git rev-parse --short HEAD)"
-          VER="$(grep -E 'versionName' app/build.gradle.kts | head -n 1 | sed -E 's/.*versionName\s*=\s*"([^"]+)".*/\1/')"
-          OUT="AI编程助手-v${VER}-${SHA}-arm64-v8a-release.apk"
-          cp "$APK" "$OUT"
-          echo "apk_file=$OUT" >> "$GITHUB_OUTPUT"
-          echo "APK: $APK -> $OUT"
-          ls -lh "$OUT"
-
-      - name: 上传 Release APK 产物
-        uses: actions/upload-artifact@v4
-        if: steps.signing.outputs.ready == 'true'
-        with:
-          name: AI编程助手-release-apk
-          path: |
-            ${{ steps.apk.outputs.apk_file }}
-          retention-days: 90
-          if-no-files-found: error
-
-      - name: 上传 mapping / 构建报告
+      - name: 上传完整 Gradle 日志（方便后续排查）
         uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: build-logs-and-mapping
-          path: |
-            app/build/outputs/**/mapping.txt
-            app/build/reports/**/*
+          name: gradle-build-debug-log
+          path: build-debug.log
           retention-days: 30
           if-no-files-found: ignore

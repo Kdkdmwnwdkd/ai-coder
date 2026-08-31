@@ -1,6 +1,7 @@
 package com.xuedi.coder.ui.screen
 
 import android.content.Intent
+import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
@@ -38,7 +39,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
 import coil.request.ImageRequest
+import com.xuedi.coder.App
 import com.xuedi.coder.BuildConfig
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 
 /**
  * 【M3 UI 层】设置页。
@@ -76,12 +80,41 @@ fun SettingsPage(
         }
     }
 
-    // SAF: 选 GGUF / 任意文件（占位）
+    // SAF: 选 GGUF / 任意文件（M4=管理层：真正导入到 filesDir/models + 写 Room）
+    val scope = rememberCoroutineScope()
     val pickModelLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
-        // M4 再真正处理：把这个 URI 流复制到私有目录 + 写 ModelEntity 进 Room + 启动 LlmEngine。
-        requestImportModel()
+        if (uri == null) return@rememberLauncherForActivityResult
+        // 拿长期权限，避免后续权限失效
+        runCatching {
+            ctx.contentResolver.takePersistableUriPermission(
+                uri,
+                Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_GRANT_WRITE_URI_PERMISSION
+            )
+        }
+        scope.launch {
+            val cr = runCatching {
+                App.instance.modelManager.importFromUri(uri)
+            }
+            if (cr.isSuccess) {
+                val e = cr.getOrNull()
+                val mb = (e?.sizeBytes ?: 0L) / 1024 / 1024
+                val validated = e?.validated == true
+                Toast.makeText(
+                    ctx,
+                    "✅ 导入成功：${e?.displayName}（${mb}MB${if (validated) "，GGUF魔数校验通过" else "，未通过GGUF校验"})",
+                    Toast.LENGTH_LONG
+                ).show()
+            } else {
+                Toast.makeText(
+                    ctx,
+                    "❌ 导入失败：${cr.exceptionOrNull()?.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        }
+        requestImportModel()  // 占位回调仍触发，兼容未来需要外部知道导入动作的场景
     }
 
     var alphaLocal: Float by remember(currentAlpha) { mutableFloatStateOf(currentAlpha) }

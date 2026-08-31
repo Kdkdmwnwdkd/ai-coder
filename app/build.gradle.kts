@@ -106,4 +106,15 @@ dependencies {
     implementation("androidx.compose.foundation:foundation:1.6.0")
     // Coil（选择照片做背景 → 用 AsyncImage/SubcomposeAsyncImage 加载）
     implementation("io.coil-kt:coil-compose:2.5.0")
+
+    // ————— 🌟 新 M4 = 管理层专属依赖（全是纯 runtime JAR，绝不加任何 Gradle 插件！）—————
+    // 1) Gson：代替 kotlinx.serialization（那个 gradle 插件全网 404，炸了整个 M3 原顺序）。
+    //    Google 官方出品，2008 年存在至今，MavenCentral 坐标 100% 可拉：
+    //    https://repo1.maven.org/maven2/com/google/code/gson/gson/2.10.1/
+    implementation("com.google.code.gson:gson:2.10.1")
+
+    // 2) DataStore Preferences：ThemeStore 存"背景URI字符串 + 透明度Float"的持久化容器。
+    //    Google 官方（属于 AndroidX），MavenCentral 坐标：
+    //    https://repo1.maven.org/maven2/androidx/datastore/datastore-preferences/1.0.0/
+    implementation("androidx.datastore:datastore-preferences:1.0.0")
 }

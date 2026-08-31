@@ -29,10 +29,12 @@ import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
+import com.xuedi.coder.App
 import com.xuedi.coder.R
 import com.xuedi.coder.ui.theme.AiCoderTheme
 import com.xuedi.coder.vm.ChatViewModel
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.launch
 
 sealed class NavItem(val route: String, val labelRes: Int, val icon: @Composable () -> Unit) {
     data object Chat : NavItem("chat", R.string.nav_chat, { Icon(Icons.Outlined.Code, null) })
@@ -105,11 +107,42 @@ fun AppNavHost(
                         composable(NavItem.Chat.route) { ChatPage(vm = chatVm) }
                         composable(NavItem.Plugins.route) { PluginsPage(appScope = appScope) }
                         composable(NavItem.Settings.route) {
+                            // Toast/错误提示用 App Context（不需要 Activity）
+                            val appCtx = App.instance
                             SettingsPage(
                                 currentBg = bg,
                                 currentAlpha = alpha,
-                                setBg = { UiBackground.setUri(it) },
-                                setAlpha = { UiBackground.setAlpha(it) },
+                                // M4=管理层：不再只改 UiBackground 内存态，
+                                // 而是调 App.instance.themeStore 写入 DataStore 持久化。
+                                // App.kt 里的 Flow 收集会再同步到 UiBackground，所以 UI 同样实时更新。
+                                setBg = { uriStr ->
+                                    if (uriStr.isNullOrBlank()) {
+                                        // 清除背景 → 调 ThemeStore.clearBackground()
+                                        appScope.launch {
+                                            runCatching { App.instance.themeStore.clearBackground() }
+                                        }
+                                        return@SettingsPage
+                                    }
+                                    val uri = android.net.Uri.parse(uriStr)
+                                    appScope.launch {
+                                        runCatching {
+                                            App.instance.themeStore.importBackgroundFromUri(uri)
+                                        }.onFailure { t ->
+                                            android.widget.Toast.makeText(
+                                                appCtx,
+                                                "背景导入失败：${t.message}",
+                                                android.widget.Toast.LENGTH_LONG
+                                            ).show()
+                                        }
+                                    }
+                                },
+                                setAlpha = { a ->
+                                    // 顺便立即更新 UiBackground，避免等 Flow 同步延迟视觉
+                                    UiBackground.setAlpha(a)
+                                    appScope.launch {
+                                        runCatching { App.instance.themeStore.setBackgroundAlpha(a) }
+                                    }
+                                },
                                 requestImportModel = requestImportModel,
                                 requestImportBackground = requestImportBackground
                             )

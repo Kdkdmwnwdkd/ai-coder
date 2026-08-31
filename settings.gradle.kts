@@ -11,7 +11,10 @@ pluginManagement {
         maven(url = uri("https://mirrors.cloud.tencent.com/gradle/"))
     }
     // 终极兜底：Plugin Portal marker 同步慢时，强制用真实 Maven JAR 坐标
-    // 注意：绝对不要依赖 ${requested.version}——子模块 plugins{} 不写 version 时它可能是 null，直接炸 UnknownPluginException。
+    // 注意 1：绝对不要依赖 ${requested.version}——子模块 plugins{} 不写 version 时它可能是 null。
+    // 注意 2：Kotlin 子插件（serialization/allopen/noarg 等）每个都有独立 jar，不要映射到通用 kotlin-gradle-plugin！
+    //   · kotlin.android/jvm → kotlin-gradle-plugin
+    //   · kotlin.plugin.serialization → kotlin-serialization-gradle-plugin（独立 JAR！之前写错就是这个）
     // 版本与根 build.gradle.kts 完全对齐：AGP8.2.2 / Kotlin1.9.22 / KSP1.9.22-1.0.17
     resolutionStrategy {
         eachPlugin {
@@ -19,9 +22,10 @@ pluginManagement {
                 "com.android.application", "com.android.library" ->
                     useModule("com.android.tools.build:gradle:8.2.2")
                 "org.jetbrains.kotlin.android",
-                "org.jetbrains.kotlin.jvm",
-                "org.jetbrains.kotlin.plugin.serialization" ->
+                "org.jetbrains.kotlin.jvm" ->
                     useModule("org.jetbrains.kotlin:kotlin-gradle-plugin:1.9.22")
+                "org.jetbrains.kotlin.plugin.serialization" ->
+                    useModule("org.jetbrains.kotlin:kotlin-serialization-gradle-plugin:1.9.22")
                 "com.google.devtools.ksp" ->
                     useModule("com.google.devtools.ksp:symbol-processing-gradle-plugin:1.9.22-1.0.17")
             }

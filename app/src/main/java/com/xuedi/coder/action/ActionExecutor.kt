@@ -18,11 +18,13 @@ import com.xuedi.coder.data.ActionTag
  *
  * 支持的白名单（对应 PluginManager.ACTION_RULE 里的描述）：
  *   · copy_to_clipboard "要复制的文本"        → ClipboardManager
- *   · open_app "com.xxx.package"              → getLaunchIntentForPackage 或跳转应用信息页
+ *   · open_app "com.xxx.package"              → getLaunchIntentForPackage；找不到 → Toast + 跳应用商店(market://) → 浏览器 Play → 设置页
  *   · open_browser "https://..."              → ACTION_VIEW + Intent.createChooser
+ *   · open_url "https://..."                  → open_browser 别名
+ *   · share "要分享的文本"                    → ACTION_SEND + createChooser
  *   · show_toast "提示文字"                   → Toast
  *   · vibrate_once                            → Vibrator 200ms
- *   · take_screenshot                         → (暂无，需要 MediaProjection；TODO:M5接入)
+ *   · take_screenshot                         → (暂无，需要 MediaProjection；TODO 后续接入)
  *   · set_brightness_low | set_brightness_high → 跳转亮度设置页（WRITE_SETTINGS权限需要用户手动开）
  *
  * 解析语法（宽松匹配）：
@@ -76,13 +78,29 @@ object ActionExecutor {
         return ok to firstError
     }
 
+    /** 给 UI 用的 action 名称友好显示（中文）。未知名称原样返回。 */
+    private val FRIENDLY_NAMES = mapOf(
+        "copy_to_clipboard" to "复制",
+        "open_app" to "打开应用",
+        "open_browser" to "打开链接",
+        "open_url" to "打开链接",
+        "share" to "分享",
+        "show_toast" to "提示",
+        "vibrate_once" to "震动",
+        "take_screenshot" to "截图",
+        "set_brightness_low" to "调暗",
+        "set_brightness_high" to "调亮"
+    )
+
+    fun friendlyName(name: String): String = FRIENDLY_NAMES[name] ?: name
+
     // ------------------------------------------------------------------
     //  private
     // ------------------------------------------------------------------
 
     private val WHITE_LIST = setOf(
-        "copy_to_clipboard", "open_app", "open_browser",
-        "show_toast", "vibrate_once", "take_screenshot",
+        "copy_to_clipboard", "open_app", "open_browser", "open_url",
+        "share", "show_toast", "vibrate_once", "take_screenshot",
         "set_brightness_low", "set_brightness_high"
     )
 
@@ -114,21 +132,45 @@ object ActionExecutor {
                     launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     ctx.startActivity(launch)
                 } else {
-                    // 找不到启动页 → 跳系统应用信息页（让用户手动开）
-                    val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                        .setData(Uri.parse("package:$pkg"))
+                    // 找不到启动页 → Toast 提示 + 跳应用商店让用户下载
+                    Toast.makeText(ctx, "未安装 $pkg，正在跳转应用商店", Toast.LENGTH_SHORT).show()
+                    val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pkg"))
                         .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    runCatching { ctx.startActivity(i) }
-                        .onFailure { throw IllegalStateException("未安装包 $pkg，也无法跳转应用信息页") }
+                    val marketOk = runCatching { ctx.startActivity(market) }.isSuccess
+                    if (!marketOk) {
+                        // 应用商店没装 → 浏览器打开 Google Play
+                        val web = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$pkg"))
+                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                        val webOk = runCatching { ctx.startActivity(Intent.createChooser(web, "安装 $pkg")) }.isSuccess
+                        if (!webOk) {
+                            // 浏览器也没有 → 最后兜底跳系统应用信息页
+                            val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                .setData(Uri.parse("package:$pkg"))
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            runCatching { ctx.startActivity(i) }
+                                .onFailure { throw IllegalStateException("未安装包 $pkg，且无法跳转应用商店/浏览器/设置页") }
+                        }
+                    }
                 }
             }
 
-            "open_browser" -> {
+            "open_browser", "open_url" -> {
                 val url = arg.takeIf { it.startsWith("http://") || it.startsWith("https://") }
-                    ?: throw IllegalArgumentException("open_browser 参数必须是 http(s) URL")
+                    ?: throw IllegalArgumentException("$name 参数必须是 http(s) URL")
                 val i = Intent(Intent.ACTION_VIEW, Uri.parse(url))
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 ctx.startActivity(Intent.createChooser(i, "打开链接"))
+            }
+
+            "share" -> {
+                val text = arg.takeIf { it.isNotBlank() }
+                    ?: throw IllegalArgumentException("share 需要参数=要分享的文本")
+                val send = Intent(Intent.ACTION_SEND).apply {
+                    type = "text/plain"
+                    putExtra(Intent.EXTRA_TEXT, text)
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                }
+                ctx.startActivity(Intent.createChooser(send, "分享"))
             }
 
             "show_toast" -> {

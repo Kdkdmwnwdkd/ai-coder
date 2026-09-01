@@ -145,6 +145,15 @@ android {
         }
     }
 
+    // M6 单测：纯函数（extractActions/friendlyName）走 JVM unit test；
+    // isReturnDefaultValues=true 让 Android stub 方法返回默认值而非抛 "not mocked"，
+    // 即使测试间接碰到 android.* 类也不会炸（extractActions 本身是纯 Kotlin，不调 Android API）。
+    testOptions {
+        unitTests {
+            isReturnDefaultValues = true
+        }
+    }
+
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
@@ -207,6 +216,9 @@ dependencies {
     //    Google 官方（属于 AndroidX），MavenCentral 坐标：
     //    https://repo1.maven.org/maven2/androidx/datastore/datastore-preferences/1.0.0/
     implementation("androidx.datastore:datastore-preferences:1.0.0")
+
+    // ————— M6 单测：JUnit 4（JVM unit test，CI 直接 ./gradlew testDebugUnit）—————
+    testImplementation("junit:junit:4.13.2")
 }
 
 // =======================================================

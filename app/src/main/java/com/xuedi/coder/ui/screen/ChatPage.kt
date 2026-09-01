@@ -12,6 +12,7 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -23,6 +24,7 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -34,10 +36,13 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import android.widget.Toast
+import com.xuedi.coder.action.ActionExecutor
 import com.xuedi.coder.data.ChatRole
 import com.xuedi.coder.vm.ChatViewModel
 
@@ -47,6 +52,7 @@ fun ChatPage(vm: ChatViewModel) {
     val isTyping by vm.isTyping.collectAsStateWithLifecycle()
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
+    val ctx = LocalContext.current
 
     LaunchedEffect(messages.size, isTyping) {
         val idx = (messages.size - 1).coerceAtLeast(0)
@@ -101,6 +107,25 @@ fun ChatPage(vm: ChatViewModel) {
                                 lineHeight = 21.sp,
                                 color = MaterialTheme.colorScheme.onSurface
                             )
+                            if (msg.actions.isNotEmpty()) {
+                                Spacer(Modifier.height(8.dp))
+                                LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                                    items(msg.actions, key = { it.raw }) { act ->
+                                        OutlinedButton(
+                                            onClick = {
+                                                val res = ActionExecutor.executeAll(ctx, listOf(act))
+                                                val t = if (res.second == null)
+                                                    "✅ ${ActionExecutor.friendlyName(act.name)}"
+                                                else
+                                                    "❌ ${res.second}"
+                                                Toast.makeText(ctx, t, Toast.LENGTH_SHORT).show()
+                                            }
+                                        ) {
+                                            Text(ActionExecutor.friendlyName(act.name), fontSize = 12.sp)
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }

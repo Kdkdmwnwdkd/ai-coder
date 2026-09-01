@@ -1,3 +1,5 @@
+import java.io.File
+
 // =======================================================
 // 【M5 = JNI llama.cpp 里程碑】
 // 新增：NDK / CMake / preBuild 自动拉 llama.cpp-b4812 源码（避免子模块/手工拷贝坑）
@@ -14,8 +16,9 @@ android {
     namespace = "com.xuedi.coder"
     compileSdk = 34
 
-    // ---- M5 新增：NDK（Android 官方镜像 setup-java@v5 默认会带 27.x）----
-    ndkVersion = "27.0.12077973"
+    // ---- M5 NDK：与 workflow build.yml 里安装的版本保持一致 ----
+    //      （ubuntu-24.04 Runner 默认不装 NDK，Actions 前一步 sdkmanager --install "ndk;26.1.10909125"）
+    ndkVersion = "26.1.10909125"
 
     defaultConfig {
         applicationId = "com.xuedi.coder"
@@ -82,9 +85,9 @@ android {
                 ?: project.findProperty("RELEASE_KEY_PASSWORD")?.toString()
                 ?: envStorePassword
 
-            if (envStoreFile != null && java.io.File(envStoreFile).exists() &&
+            if (envStoreFile != null && File(envStoreFile).exists() &&
                 !envStorePassword.isNullOrBlank() && !envKeyAlias.isNullOrBlank()) {
-                storeFile = java.io.File(envStoreFile)
+                storeFile = File(envStoreFile)
                 storePassword = envStorePassword
                 keyAlias = envKeyAlias
                 keyPassword = envKeyPassword
@@ -92,17 +95,17 @@ android {
                 enableV2Signing = true
                 enableV3Signing = true
                 enableV4Signing = true
-                @Suppress("DEPRECATION")
-                this.v2SigningEnabled = true
+                // —— 注意：AGP 8.x 已删除 signingConfig.v2SigningEnabled（deprecated 属性）
+                //    只需要 enableV1Signing / enableV2Signing / enableV3Signing / enableV4Signing = true
             }
         }
 
         create("fixedDebug") {
             val envStore = System.getenv("XUEDI_DEBUG_STORE_FILE")?.takeIf { it.isNotBlank() }
                 ?: rootProject.file("keystore/xuedi-debug.jks").absolutePath
-                    .takeIf { java.io.File(it).exists() }
+                    .takeIf { File(it).exists() }
                 ?: rootProject.file("../keystore/xuedi-debug.jks").absolutePath
-                    .takeIf { java.io.File(it).exists() }
+                    .takeIf { File(it).exists() }
 
             val envStorePassword = System.getenv("XUEDI_DEBUG_STORE_PASSWORD")
                 ?.takeIf { it.isNotBlank() }
@@ -114,8 +117,8 @@ android {
                 ?.takeIf { it.isNotBlank() }
                 ?: envStorePassword
 
-            if (envStore != null && java.io.File(envStore).exists()) {
-                storeFile = java.io.File(envStore)
+            if (envStore != null && File(envStore).exists()) {
+                storeFile = File(envStore)
                 storePassword = envStorePassword
                 keyAlias = envKeyAlias
                 keyPassword = envKeyPassword
@@ -216,15 +219,15 @@ tasks.register("ensureLlamaCppSource") {
     group = "build"
     description = "确保 llama.cpp 源码存在于 app/src/main/cpp/llama.cpp/（首次构建自动下载 b4812 压缩包）"
     val cppDir = file("src/main/cpp")
-    val llamaDir = java.io.File(cppDir, "llama.cpp")
-    val marker = java.io.File(llamaDir, "CMakeLists.txt")
+    val llamaDir = File(cppDir, "llama.cpp")
+    val marker = File(llamaDir, "CMakeLists.txt")
     outputs.upToDateWhen { marker.exists() && marker.length() > 40_000 }  // b4812 CMakeLists.txt 60KB+
     doLast {
         if (marker.exists() && marker.length() > 40_000) return@doLast
         cppDir.mkdirs()
         val TAG = "b4812"
         val URL = "https://github.com/ggerganov/llama.cpp/archive/refs/tags/$TAG.tar.gz"
-        val tmpTgz = java.io.File(cppDir, "_dl_llama_$TAG.tar.gz")
+        val tmpTgz = File(cppDir, "_dl_llama_$TAG.tar.gz")
         println("[ensureLlamaCppSource] llama.cpp 源码缺失，下载 $URL ...")
         // curl -L 跟随重定向；-f 失败返回非 0；--retry 重试；--max-time 300s
         val curlResult = exec {
@@ -240,7 +243,7 @@ tasks.register("ensureLlamaCppSource") {
                 "${llamaDir.absolutePath}/（目标目录下必须直接有 CMakeLists.txt / ggml.c / llama.cpp 等文件，不能嵌套一层 llama.cpp-b4812）"
         }
         // 清理旧目录
-        listOf(llamaDir, java.io.File(cppDir, "llama.cpp-$TAG")).forEach { d ->
+        listOf(llamaDir, File(cppDir, "llama.cpp-$TAG")).forEach { d ->
             if (d.exists()) d.deleteRecursively()
         }
         // tar xzf → 默认解压出 llama.cpp-b4812/
@@ -253,7 +256,7 @@ tasks.register("ensureLlamaCppSource") {
             it.isDirectory && (it.name == "llama.cpp-$TAG" ||
                 (it.name.startsWith("llama.cpp") && it.name != "llama.cpp"))
         }
-        check(extracted != null && java.io.File(extracted, "CMakeLists.txt").exists()) {
+        check(extracted != null && File(extracted, "CMakeLists.txt").exists()) {
             "解压后找不到 llama.cpp 目录（应包含 CMakeLists.txt）。cppDir 下目录：" +
                 cppDir.listFiles()?.filter { it.isDirectory }?.map { it.name }
         }

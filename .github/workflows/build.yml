@@ -26,6 +26,38 @@ jobs:
           cache: "gradle"
 
       # =====================================================
+      # M5 JNI 前置：确保 Android SDK 已装 NDK + CMake 3.22.1
+      #  —— AGP 8.x externalNativeBuild 配置期需要这两个组件，
+      #     ubuntu-24.04 Runner 默认不装。sdkmanager --install 一步搞定
+      # =====================================================
+      - name: 安装 Android NDK + CMake 3.22.1（M5 JNI 必需）
+        run: |
+          set -euo pipefail
+          [ -z "$ANDROID_HOME" ] && export ANDROID_HOME="$HOME/Android/Sdk"
+          [ -z "$ANDROID_SDK_ROOT" ] && export ANDROID_SDK_ROOT="$ANDROID_HOME"
+          SDKMANAGER="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          if [ ! -x "$SDKMANAGER" ]; then
+            SDKMANAGER="$ANDROID_HOME/cmdline-tools/tools/bin/sdkmanager"
+          fi
+          if [ ! -x "$SDKMANAGER" ]; then
+            echo "⚠️ sdkmanager 不存在，尝试用 which sdkmanager"
+            SDKMANAGER=$(which sdkmanager || true)
+          fi
+          echo "Using sdkmanager at: $SDKMANAGER"
+          echo "yes | $SDKMANAGER --install 'ndk;26.1.10909125' 'cmake;3.22.1' 'platform-tools' 'platforms;android-34' 'build-tools;34.0.0'"
+          yes | "$SDKMANAGER" --licenses || true
+          yes | "$SDKMANAGER" --install \
+            "ndk;26.1.10909125" \
+            "cmake;3.22.1" \
+            "platform-tools" \
+            "platforms;android-34" \
+            "build-tools;34.0.0" \
+            2>&1 | tail -n 20 || true
+          # 确认安装后路径存在
+          ls -lh "$ANDROID_HOME/ndk/" 2>/dev/null || true
+          ls -lh "$ANDROID_HOME/cmake/" 2>/dev/null || true
+
+      # =====================================================
       # 🛡️ 解决"每次出新包都要卸载旧版才能装"的根因：签名固定
       # —— 之前每轮 Actions 的 debug keystore 都是 Runner 临时生成的，SHA1 不同 → 覆盖失败。
       # 现在从 GitHub Secrets 读固定的 keystore（base64 编码的 xuedi-debug.jks），decode 成文件，
@@ -44,12 +76,13 @@ jobs:
           set -euo pipefail
           mkdir -p keystore
           if [ -n "${XUEDI_DEBUG_KS_B64}" ]; then
-            echo "$XUEDI_DEBUG_KS_B64" | base64 -d > keystore/xuedi-debug.jks
+            # 🔴 关键：printf '%s' 而不是 echo —— echo 默认加换行 \n，
+            #    导致 base64 decode 后 keystore 尾部多 1 字节，SHA1 对不上，签名直接废。
+            printf '%s' "$XUEDI_DEBUG_KS_B64" | base64 --decode > keystore/xuedi-debug.jks
             echo "✅ 已从 Secrets 解码 debug keystore：keystore/xuedi-debug.jks ($(wc -c < keystore/xuedi-debug.jks) B)"
           else
             echo "⚠️ XUEDI_DEBUG_KS_B64 secret 未设置，将回退到 Gradle Runner 临时生成的 keystore（可能导致覆盖安装失败）"
           fi
-          # 把签名信息注入环境变量，Gradle 脚本里 System.getenv() 能读到
           echo "XUEDI_DEBUG_STORE_FILE=$PWD/keystore/xuedi-debug.jks" >> "$GITHUB_ENV"
           echo "XUEDI_DEBUG_STORE_PASSWORD=$XUEDI_DEBUG_STORE_PASSWORD" >> "$GITHUB_ENV"
           echo "XUEDI_DEBUG_KEY_ALIAS=$XUEDI_DEBUG_KEY_ALIAS"                >> "$GITHUB_ENV"

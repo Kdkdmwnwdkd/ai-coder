@@ -30,6 +30,7 @@ class MockLlmEngine : LlmEngine {
     }
 
     override fun release() {}
+    override fun cancel() { /* Mock 是纯协程 flow，chatFlow 的 collect 取消时 flow builder 自动 cancel，不用手动做 */ }
 
     private fun buildDemoAnswer(user: String): String {
         val q = user.trim()

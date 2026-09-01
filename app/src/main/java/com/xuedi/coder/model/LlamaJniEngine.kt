@@ -166,6 +166,14 @@ class LlamaJniEngine : LlmEngine {
         runCatching { fallback?.release() }
     }
 
+    override fun cancel() {
+        // 只取消正在跑的推理，不释放模型权重。
+        // JNI 端：nativeChatCancel 置原子 flag → C++ while(decode) 下次判断跳出；
+        // callbackFlow 的 invokeOnCompletion 会取消 job 并在 awaitClose 后自动关流。
+        if (ctx != 0L) runCatching { nativeChatCancel(ctx) }
+        runCatching { fallback?.cancel() }
+    }
+
     // =================================================================
     // JNI native 方法（M5-4 在 llama_jni.cpp 中补实现）
     // 注意：native 函数签名必须和 C++ 的 JavaVM FindClass/GetMethodID 严格一致！

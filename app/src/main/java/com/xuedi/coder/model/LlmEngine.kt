@@ -8,6 +8,9 @@ import kotlinx.coroutines.flow.Flow
  */
 interface LlmEngine {
     fun chatFlow(system: String, user: String): Flow<ChatChunk>
+    /** 取消当前正在跑的推理（只停推理，不释放模型权重，后续还能继续发新问题）。 */
+    fun cancel()
+    /** 完全释放：取消推理 + 释放模型权重内存（进程退出或切模型前调用）。 */
     fun release()
 }
 

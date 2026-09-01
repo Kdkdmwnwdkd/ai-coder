@@ -62,10 +62,10 @@ fun PluginsPage(appScope: CoroutineScope) {
     Column(
         Modifier
             .fillMaxSize()
-            // 🔴 同样补上：场景页 4 个卡片（每个展开开关 + Prompt 说明），
-            //    小屏手机（魅族20 20:9 FHD+）场景 3+4 就容易出屏幕外，没滚动
-            //    直接被底部 TabBar 盖掉，用户看不到第 4 个场景开关。
-            .verticalScroll(rememberScrollState())
+            // ✅ 场景页本身内容在 LazyColumn(L119)，LazyColumn 自带垂直滚动，
+            //    外层 Column 绝对不能再套 .verticalScroll()，
+            //    否则一打开场景页就崩：IllegalStateException:
+            //    Vertically scrollable component was measured with an infinity maximum height constraints
             .padding(
                 start = 14.dp,
                 end = 14.dp,

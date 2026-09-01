@@ -65,9 +65,9 @@ fun PluginsPage(appScope: CoroutineScope) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(
                 "场景 · 插件开关",
-                fontSize = 18.sp,
+                fontSize = 15.sp,
                 fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface
+                color = MaterialTheme.colorScheme.primary
             )
             if (refreshing) {
                 Spacer(Modifier.height(12.dp))

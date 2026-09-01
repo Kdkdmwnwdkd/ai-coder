@@ -18,10 +18,10 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.Delete
 import androidx.compose.material.icons.outlined.Edit
 import androidx.compose.material.icons.outlined.Menu
@@ -52,7 +52,6 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -65,6 +64,7 @@ import kotlinx.coroutines.launch
 import com.xuedi.coder.action.ActionExecutor
 import com.xuedi.coder.data.ChatRole
 import com.xuedi.coder.vm.ChatViewModel
+import com.xuedi.coder.vm.InfStatus
 
 /**
  * 【M8 多话题】ChatPage：左侧 ModalNavigationDrawer 显示话题列表 + 右侧当前话题消息。
@@ -79,6 +79,11 @@ fun ChatPage(vm: ChatViewModel) {
     val isTyping by vm.isTyping.collectAsStateWithLifecycle()
     val topics by vm.topics.collectAsStateWithLifecycle()
     val currentTopicId by vm.currentTopicId.collectAsStateWithLifecycle()
+    // 🔴 TODO-2 状态条 4 个流：推理状态 / 已生成字数 / 已用秒数 / 失败原因
+    val infStatus by vm.inferenceStatus.collectAsStateWithLifecycle()
+    val tokenCount by vm.currentTokenCount.collectAsStateWithLifecycle()
+    val elapsedSec by vm.inferenceElapsedSec.collectAsStateWithLifecycle()
+    val failMsg by vm.failMsgFlow.collectAsStateWithLifecycle()
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val ctx = LocalContext.current
@@ -241,43 +246,14 @@ fun ChatPage(vm: ChatViewModel) {
                         Modifier
                             .fillMaxWidth()
                             .padding(horizontal = 2.dp),
-                        verticalAlignment = Alignment.Bottom  // 头像与气泡底部对齐（TRAE 风格，头像贴底）
+                        verticalAlignment = Alignment.Bottom  // 多行气泡底部对齐（TRAE 风格）
                     ) {
-                        // 🔵 TRAE 风格固定两列：头像列(40.dp) + 气泡列(weight, max 320dp)
-                        //    用户：Spacer 占左侧 → 气泡(偏右小角) → 8dp → 头像(右)
-                        //    AI ：头像(左) → 8dp → 气泡(偏左小角)
-                        if (isUser) {
-                            Spacer(Modifier.weight(1f, fill = true))   // 撑左侧，让头像+气泡整体靠右
-                        } else {
-                            // AI 头像（左列）：深青色圆圈 + "AI"字样（不搞图片，省流量省代码）
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    "AI",
-                                    color = Color.White,
-                                    fontSize = 13.sp,
-                                    fontWeight = FontWeight.Bold
-                                )
-                            }
-                            Spacer(Modifier.width(8.dp))
-                        }
-
-                        // 气泡本体：不同角色不同圆角方向（TRAE风格——靠头像的那一侧圆角偏小）
-                        //   加 role 语义的"小徽章"只用颜色/圆角区分，不用文字名字（满足你"上面有个我字，我觉得完全没必要"）
-                        val bubbleShape = if (isUser) {
-                            RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 4.dp)
-                        } else {
-                            RoundedCornerShape(topStart = 4.dp,  topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 18.dp)
-                        }
+                        // 🔵 TODO-1 TRAE 极简：删掉所有圆形头像 Box / 名字文字 / 左右占位 Spacer
+                        //    用户气泡：右对齐淡蓝；AI 气泡：左对齐白；统一 18dp 圆角，纯极简
+                        val bubbleShape = RoundedCornerShape(18.dp)
+                        if (isUser) Spacer(Modifier.weight(1f))  // 用户气泡靠右
                         Card(
-                            modifier = Modifier.widthIn(max = 300.dp),
+                            modifier = Modifier.widthIn(max = 320.dp),
                             shape = bubbleShape,
                             colors = CardDefaults.cardColors(
                                 containerColor = when (msg.role) {
@@ -319,59 +295,79 @@ fun ChatPage(vm: ChatViewModel) {
                                 }
                             }
                         }
-
-                        if (isUser) {
-                            Spacer(Modifier.width(8.dp))
-                            // 用户头像（右列）：灰色圆圈 + "我"
-                            Box(
-                                modifier = Modifier
-                                    .size(40.dp)
-                                    .clip(CircleShape)
-                                    .background(
-                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
-                                    ),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    "我",
-                                    color = MaterialTheme.colorScheme.onSurface,
-                                    fontSize = 14.sp,
-                                    fontWeight = FontWeight.SemiBold
-                                )
-                            }
-                        } else {
-                            Spacer(Modifier.weight(0.4f, fill = true))  // AI 侧气泡不贴到最右
-                        }
+                        if (!isUser) Spacer(Modifier.weight(1f))  // AI 气泡靠左，不贴右
                     }
                 }
+            }
 
-                if (isTyping) {
-                    item {
-                        Row(Modifier.fillMaxWidth()) {
-                            Box(
-                                Modifier
-                                    .padding(8.dp)
-                                    .background(
-                                        MaterialTheme.colorScheme.surface.copy(alpha = 0.86f),
-                                        RoundedCornerShape(16.dp)
-                                    )
-                                    .padding(12.dp)
-                            ) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier
-                                            .height(16.dp)
-                                            .padding(end = 10.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.primary
-                                    )
-                                    Text(
-                                        "AI 正在思考并打字...",
-                                        fontSize = 13.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
+            // 🔴 TODO-2 推理状态条（Idle 隐藏 / Preparing 准备 / Running 回复中 / Failed 失败 / Timeout 超时）
+            //   取代旧「AI 正在思考并打字…」气泡，用户能看到已用秒数 + 已生成字数 + ✕ 取消
+            if (infStatus != InfStatus.Idle) {
+                val (bg, fg, statusText) = when (infStatus) {
+                    InfStatus.Preparing -> Triple(
+                        MaterialTheme.colorScheme.surfaceVariant,
+                        MaterialTheme.colorScheme.onSurfaceVariant,
+                        "正在准备推理…${formatElapsed(elapsedSec)}"
+                    )
+                    InfStatus.Running -> Triple(
+                        MaterialTheme.colorScheme.primary,
+                        MaterialTheme.colorScheme.onPrimary,
+                        "AI 正在回复…${formatElapsed(elapsedSec)} · 已生成 $tokenCount 字"
+                    )
+                    InfStatus.Failed -> Triple(
+                        MaterialTheme.colorScheme.error,
+                        MaterialTheme.colorScheme.onError,
+                        "推理失败：${(failMsg ?: "未知错误").take(80)}"
+                    )
+                    InfStatus.Timeout -> Triple(
+                        MaterialTheme.colorScheme.error,
+                        MaterialTheme.colorScheme.onError,
+                        "启动超时(15s)：建议减少场景开关数量或重启手机释放内存后重试"
+                    )
+                    InfStatus.Idle -> Triple(Color.Transparent, Color.Transparent, "")
+                }
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(bottom = 6.dp),
+                    shape = RoundedCornerShape(14.dp),
+                    colors = CardDefaults.cardColors(containerColor = bg)
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(42.dp)
+                            .padding(horizontal = 14.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            if (infStatus == InfStatus.Preparing || infStatus == InfStatus.Running) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier
+                                        .size(16.dp)
+                                        .padding(end = 8.dp),
+                                    strokeWidth = 2.dp,
+                                    color = fg
+                                )
                             }
+                            Text(
+                                statusText,
+                                color = fg,
+                                fontSize = 13.sp,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                        }
+                        IconButton(onClick = { vm.cancelInference() }) {
+                            Icon(
+                                Icons.Outlined.Close, "取消",
+                                tint = fg,
+                                modifier = Modifier.size(18.dp)
+                            )
                         }
                     }
                 }
@@ -461,4 +457,11 @@ fun ChatPage(vm: ChatViewModel) {
 private fun formatTime(ms: Long): String {
     val sdf = java.text.SimpleDateFormat("MM-dd HH:mm", java.util.Locale.CHINA)
     return sdf.format(java.util.Date(ms))
+}
+
+/** 推理已耗时格式化：m:ss（00:12） */
+private fun formatElapsed(sec: Int): String {
+    val m = sec / 60
+    val s = sec % 60
+    return String.format("%02d:%02d", m, s)
 }

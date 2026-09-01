@@ -3,6 +3,7 @@ package com.xuedi.coder.model
 import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
@@ -202,6 +203,9 @@ class LlamaJniEngine : LlmEngine {
             // 累积所有 token 拼成 full text：Done(reason) 时需要 final 正文，
             // 因为 C++ 层 onDone 只传 stop reason，不传完整回复（流式已经 onToken 吐过了）
             val fullSb = StringBuilder()
+            // 🔴 TODO-4e 首 token 15s 超时标志（AtomicBoolean 跨线程可见：cb 在 nativeChat 线程写，
+            //    超时定时器在另一个 Default 协程读）
+            val firstTokenReceived = java.util.concurrent.atomic.AtomicBoolean(false)
             // 取消时顺便让 C++ 端跳出 decode 循环（用户在聊天页中途按取消/关闭APP场景）
             // 🔴 🔴 ANR 致命修复：nativeChat(curCtx,...) 是阻塞式 JNI C++ while 循环（几分钟 CPU 密集），
             //    绝对不能在主线程跑！之前 callbackFlow 继承了 ViewModel 的 Main.immediate，
@@ -210,14 +214,31 @@ class LlamaJniEngine : LlmEngine {
             val job = launch(Dispatchers.Default) {
                 val cb = object : TokenCallback {
                     override fun onToken(piece: String) {
+                        // 🔴 TODO-4f 并发安全：ctx 被并发 release/loadModel 改变时，旧推理不再回调，
+                        //    避免 JNI 拿到已释放的旧 ctx 指针 → SIGSEGV 闪退
+                        if (this@LlamaJniEngine.ctx != curCtx) {
+                            Log.w(TAG, "onToken 丢弃：ctx 已变（并发 release/loadModel），旧推理不再回调防 SIGSEGV")
+                            return
+                        }
+                        firstTokenReceived.set(true)
                         fullSb.append(piece)
                         trySend(ChatChunk.Token(piece))
                     }
                     override fun onDone(reason: String) {
+                        if (this@LlamaJniEngine.ctx != curCtx) {
+                            Log.w(TAG, "onDone 丢弃：ctx 已变，旧推理不再回调防 SIGSEGV")
+                            channel.close()
+                            return
+                        }
                         trySend(ChatChunk.Done(fullSb.toString(), reason))
                         channel.close()
                     }
                     override fun onError(message: String) {
+                        if (this@LlamaJniEngine.ctx != curCtx) {
+                            Log.w(TAG, "onError 丢弃：ctx 已变，旧推理不再回调防 SIGSEGV")
+                            channel.close()
+                            return
+                        }
                         trySend(ChatChunk.Error(RuntimeException(message), message))
                         channel.close()
                     }
@@ -234,12 +255,31 @@ class LlamaJniEngine : LlmEngine {
                     mkFallbackIfNeed().chatFlow(system, user).collect { send(it) }
                 }
             }
+            // 🔴 TODO-4e 首 token 15s 超时：等 15s 还没出第一个 token（prefill 卡住/内存爆），
+            //    就发 ChatChunk.Error + cancel nativeChat + close 流，避免用户以为"一直转卡死"
+            val timeoutJob = launch(Dispatchers.Default) {
+                delay(15_000L)
+                if (!firstTokenReceived.get()) {
+                    Log.w(TAG, "chatFlow 首 token 超时(15s)，cancel nativeChat + 发 Error")
+                    runCatching { nativeChatCancel(curCtx) }
+                    trySend(ChatChunk.Error(
+                        RuntimeException("首 token 超时(15s)"),
+                        "首 token 超时(15s)：建议减少场景开关数量或重启手机释放内存后重试"
+                    ))
+                    channel.close()
+                }
+            }
             job.invokeOnCompletion { cause ->
                 // 取消（聊天页用户停/切后台）：C++ 端 decode while 循环判断 cancel flag
+                timeoutJob.cancel()  // 推理结束/取消时停掉首 token 超时定时器
                 runCatching { nativeChatCancel(curCtx) }
                 cause?.let { Log.w(TAG, "chatFlow cancel：${it.message}") }
             }
-            awaitClose()
+            awaitClose {
+                // 流被外层 collect 取消：停超时定时器 + 通知 C++ 跳出 decode 循环
+                timeoutJob.cancel()
+                runCatching { nativeChatCancel(curCtx) }
+            }
         }
     }
 

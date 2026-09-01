@@ -11,13 +11,32 @@ import com.xuedi.coder.data.ChatRole
 import com.xuedi.coder.data.ChatTopicEntity
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.InferenceForegroundService
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.util.UUID
+
+/**
+ * 推理状态（TODO-4）：UI 顶部状态条据此渲染 + ✕ 取消按钮。
+ *   - Idle      → 状态条隐藏
+ *   - Preparing → 灰底「正在准备推理…00:0X」+ 转 + ✕
+ *   - Running   → 蓝底「AI 正在回复…00:XX · 已生成 N 字」+ ✕
+ *   - Failed    → 红底「推理失败：…」+ ✕
+ *   - Timeout   → 红底「启动超时(15s)…」+ ✕
+ */
+enum class InfStatus { Idle, Preparing, Running, Failed, Timeout }
 
 /**
  * 【M8 多话题】ChatViewModel —— 类 ChatGPT 侧边栏多会话。
@@ -61,6 +80,29 @@ class ChatViewModel : ViewModel() {
 
     private val _isTyping = MutableStateFlow(false)
     val isTyping: StateFlow<Boolean> = _isTyping.asStateFlow()
+
+    // ---------- 推理状态流（TODO-4：防闪退 + UX 状态条）----------
+    /** UI 顶部状态条据此渲染（Idle 隐藏 / Preparing 准备中 / Running 回复中 / Failed 失败 / Timeout 启动超时）*/
+    private val _infStatus = MutableStateFlow(InfStatus.Idle)
+    val inferenceStatus: StateFlow<InfStatus> = _infStatus.asStateFlow()
+
+    /** 已生成 token 累计字数（Running 时显示「已生成 N 字」）*/
+    private val _currentTokenCount = MutableStateFlow(0)
+    val currentTokenCount: StateFlow<Int> = _currentTokenCount.asStateFlow()
+
+    /** 推理已耗时毫秒（Preparing/Running 时 ticker 每 500ms 更新；UI 用 inferenceElapsedSec 显示秒）*/
+    private val _infElapsedMs = MutableStateFlow(0L)
+    val inferenceElapsedSec: StateFlow<Int> = _infElapsedMs
+        .map { (it / 1000).toInt() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), 0)
+
+    /** Failed/Timeout 时的具体原因文案（UI 状态条红底显示）*/
+    private val _failMsgFlow = MutableStateFlow<String?>(null)
+    val failMsgFlow: StateFlow<String?> = _failMsgFlow.asStateFlow()
+
+    // 🔴 TODO-4b 互斥锁：防连点两次发送同时起两个 nativeChat → OOM 闪退
+    private val inferenceMutex = Mutex()
+    private var inferenceJob: Job? = null
 
     // ---------- init: 订阅 topics 列表 + 冷启动自动选最近一个话题 ----------
     init {
@@ -119,6 +161,7 @@ class ChatViewModel : ViewModel() {
             runCatching { app.llmEngine.cancel() }
             runCatching { InferenceForegroundService.stop(app) }
             _isTyping.value = false
+            _infStatus.value = InfStatus.Idle
             switchTopicInternal(topicId)
         }
     }
@@ -137,6 +180,7 @@ class ChatViewModel : ViewModel() {
             runCatching { app.llmEngine.cancel() }
             runCatching { InferenceForegroundService.stop(app) }
             _isTyping.value = false
+            _infStatus.value = InfStatus.Idle
             createTopic(firstUserMsg = null)
         }
     }
@@ -158,6 +202,7 @@ class ChatViewModel : ViewModel() {
                 runCatching { app.llmEngine.cancel() }
                 runCatching { InferenceForegroundService.stop(app) }
                 _isTyping.value = false
+                _infStatus.value = InfStatus.Idle
             }
             chatDao.deleteByTopic(topicId)
             topicDao.deleteById(topicId)
@@ -184,6 +229,24 @@ class ChatViewModel : ViewModel() {
         //         → 默认 Main.immediate → callbackFlow 也继承 Main → launch 在主线程阻塞 native → ANR。
         //    现在：顶层就在 Default，所有子协程继承它；StateFlow.value setter 是线程安全的，UI 不会崩。
         viewModelScope.launch(Dispatchers.Default) {
+            // 🔴 TODO-4b 互斥防连点：连点两次发送时先取消旧推理再起新的，
+            //    保证同一时间只有一个 nativeChat（否则两个并发 nativeChat → OOM 闪退）
+            val oldJob: Job? = inferenceMutex.withLock {
+                val ex = inferenceJob
+                if (ex != null && ex.isActive) {
+                    runCatching { ex.cancel() }
+                    runCatching { app.llmEngine.cancel() }
+                    runCatching { InferenceForegroundService.stop(app) }
+                }
+                ex
+            }
+            // 在锁外等旧 job 真正退出（不阻塞下一次加锁；join 自身可被取消）
+            oldJob?.let { runCatching { it.join() } }
+
+            // 注册自己为当前 inferenceJob（锁内原子写）
+            val myJob = coroutineContext[Job]!!
+            inferenceMutex.withLock { inferenceJob = myJob }
+
             // 当前没话题 → 用首条用户消息自动创建一个
             val topicId = _currentTopicId.value ?: createTopic(firstUserMsg = content)
 
@@ -197,6 +260,23 @@ class ChatViewModel : ViewModel() {
             viewModelScope.launch(Dispatchers.IO) {
                 chatDao.upsert(ChatMsgEntity.from(userMsg, topicId))
                 topicDao.touchActive(topicId, System.currentTimeMillis())
+            }
+
+            // 🔴 TODO-4c/4d 推理状态流：
+            //   Preparing（启动 ticker）→ 首个 Token 转 Running → Done 转 Idle / Error 转 Failed|Timeout
+            _infStatus.value = InfStatus.Preparing
+            _currentTokenCount.value = 0
+            _infElapsedMs.value = 0L
+            _failMsgFlow.value = null
+            val startedAt = System.currentTimeMillis()
+            val tickerJob = viewModelScope.launch(Dispatchers.Default) {
+                while (isActive) {
+                    delay(500)
+                    val s = _infStatus.value
+                    if (s == InfStatus.Preparing || s == InfStatus.Running) {
+                        _infElapsedMs.value = System.currentTimeMillis() - startedAt
+                    }
+                }
             }
 
             _isTyping.value = true
@@ -219,7 +299,7 @@ class ChatViewModel : ViewModel() {
             }
 
             var sb = StringBuilder()
-            runCatching {
+            try {
                 // 🔴 致命修复：chatFlow 是 token 串行流，绝对不能用 collectLatest！
                 // 之前：.collectLatest { chunk -> ... }
                 //   collectLatest 的语义是：上游发新值时，取消上一个值还没处理完的协程体。
@@ -229,10 +309,13 @@ class ChatViewModel : ViewModel() {
                 app.llmEngine.chatFlow(system, content).collect { chunk ->
                     when (chunk) {
                         is ChatChunk.Token -> {
+                            // 🔴 TODO-4d 首个 Token → Running
+                            if (_infStatus.value == InfStatus.Preparing) _infStatus.value = InfStatus.Running
                             // 🛡️ 防闪退/内存炸：单条回复累积 token 上限 5 万字；再多就丢弃新 token，保证 UI/sb 不 OOM
                             // （之前没限制：极端情况下 sb 无限 append 几 MB 字符串 → LazyColumn 渲染时 kill 进程）
                             if (sb.length < 50000) {
                                 sb.append(chunk.text)
+                                _currentTokenCount.value = sb.length
                                 _messages.value = _messages.value.map { m ->
                                     if (m.id == answerId) m.copy(content = sb.toString()) else m
                                 }
@@ -268,6 +351,10 @@ class ChatViewModel : ViewModel() {
                             }
                         }
                         is ChatChunk.Error -> {
+                            // 🔴 TODO-4d：超时 vs 普通失败 区分（LlamaJniEngine 首 token 15s 超时发的 hint 含「超时」）
+                            val hint = chunk.hint
+                            _infStatus.value = if (hint.contains("超时")) InfStatus.Timeout else InfStatus.Failed
+                            _failMsgFlow.value = hint
                             _messages.value = _messages.value
                                 .map { m -> if (m.id == answerId) m.copy(pending = false) else m } +
                                 ChatMsg(
@@ -277,13 +364,17 @@ class ChatViewModel : ViewModel() {
                                     createdAtMs = System.currentTimeMillis()
                                 )
                             viewModelScope.launch(Dispatchers.IO) {
-                                val cur = _messages.value.first { it.id == answerId }
+                                val cur = _messages.value.firstOrNull { it.id == answerId } ?: return@launch
                                 chatDao.upsert(ChatMsgEntity.from(cur.copy(pending = false), topicId))
                             }
                         }
                     }
                 }
-            }.onFailure { t ->
+            } catch (t: Throwable) {
+                // CancellationException 必须重新抛出，否则会破坏协程取消语义
+                if (t is CancellationException) throw t
+                _infStatus.value = InfStatus.Failed
+                _failMsgFlow.value = "推理崩溃：${t.message ?: t.javaClass.simpleName}"
                 _messages.value = _messages.value
                     .map { m -> if (m.id == answerId) m.copy(pending = false) else m } +
                     ChatMsg(
@@ -293,19 +384,25 @@ class ChatViewModel : ViewModel() {
                         createdAtMs = System.currentTimeMillis()
                     )
                 viewModelScope.launch(Dispatchers.IO) {
-                    val cur = _messages.value.first { it.id == answerId }
+                    val cur = _messages.value.firstOrNull { it.id == answerId } ?: return@launch
                     chatDao.upsert(ChatMsgEntity.from(cur.copy(pending = false), topicId))
                 }
+            } finally {
+                tickerJob.cancel()
+                runCatching { InferenceForegroundService.stop(app) }
+                _isTyping.value = false
+                // 兜底：若异常/取消退出时还停留在 Preparing/Running（没机会设终态），清回 Idle
+                val s = _infStatus.value
+                if (s == InfStatus.Preparing || s == InfStatus.Running) _infStatus.value = InfStatus.Idle
+                inferenceMutex.withLock { if (inferenceJob === myJob) inferenceJob = null }
             }
-
-            runCatching { InferenceForegroundService.stop(app) }
-            _isTyping.value = false
         }
     }
 
     /** 退出聊天页 / 回桌面时取消推理 + 清 pending + 释放前台服务 */
     fun cancelInference() {
         _isTyping.value = false
+        _infStatus.value = InfStatus.Idle
         viewModelScope.launch(Dispatchers.Default) {
             runCatching { app.llmEngine.cancel() }
         }

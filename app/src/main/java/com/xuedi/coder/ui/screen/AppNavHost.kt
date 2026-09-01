@@ -15,8 +15,6 @@ import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
@@ -62,15 +60,8 @@ fun AppNavHost(
             val alpha by UiBackground.alpha.collectAsStateWithLifecycle()
 
             Scaffold(
-                topBar = {
-                    TopAppBar(
-                        title = { Text(stringResource(R.string.app_name)) },
-                        colors = TopAppBarDefaults.topAppBarColors(
-                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
-                            titleContentColor = MaterialTheme.colorScheme.onSurface
-                        )
-                    )
-                },
+                // 🔴 v1.3.0 TRAE 极简：删掉全局 TopAppBar「AI 编程助手」大字横条，
+                //    各页面自己用小号标题行（15sp primary SemiBold），不再占一整块顶部
                 bottomBar = {
                     NavigationBar(
                         containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)

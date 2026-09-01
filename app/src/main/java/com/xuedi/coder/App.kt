@@ -81,10 +81,10 @@ class App : Application(), ImageLoaderFactory, CoroutineScope {
             val eng = llmEngine
             Log.i(TAG, "LlmEngine 预热完成：implementation=${eng.javaClass.simpleName}")
             if (eng is LlamaJniEngine) {
-                val current = runCatching { modelManager.getCurrent() }.getOrNull()
+                val current = runCatching { modelManager.getSelected() }.getOrNull()
                 if (current != null) {
                     Log.i(TAG, "尝试预热加载 GGUF：${current.displayName}")
-                    runCatching { eng.loadModel(ggufAbsolutePath = current.localPath) }
+                    runCatching { eng.loadModel(ggufAbsolutePath = current.filePath) }
                 } else {
                     Log.i(TAG, "尚无选中的 GGUF 模型（Settings 里先导入并设为当前）")
                 }

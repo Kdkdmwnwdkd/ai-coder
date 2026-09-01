@@ -220,24 +220,37 @@ class ChatViewModel : ViewModel() {
 
             var sb = StringBuilder()
             runCatching {
-                app.llmEngine.chatFlow(system, content).collectLatest { chunk ->
+                // 🔴 致命修复：chatFlow 是 token 串行流，绝对不能用 collectLatest！
+                // 之前：.collectLatest { chunk -> ... }
+                //   collectLatest 的语义是：上游发新值时，取消上一个值还没处理完的协程体。
+                //   onToken 每 ~30ms 发 1 个 token → collectLatest 永远在取消前一个
+                //   → _messages.value.map 还没跑完就被 cancel → 正文累积不到气泡里 → UI 显示空气泡（你截图里的"AI 编程助手"空回复就是这个）。
+                // 现在：.collect { chunk -> ... }，严格串行，一个 token 不丢；处理也很轻（map 一个 list + set 一个 StateFlow value）不会阻塞后续 token。
+                app.llmEngine.chatFlow(system, content).collect { chunk ->
                     when (chunk) {
                         is ChatChunk.Token -> {
-                            sb.append(chunk.text)
-                            _messages.value = _messages.value.map { m ->
-                                if (m.id == answerId) m.copy(content = sb.toString()) else m
+                            // 🛡️ 防闪退/内存炸：单条回复累积 token 上限 5 万字；再多就丢弃新 token，保证 UI/sb 不 OOM
+                            // （之前没限制：极端情况下 sb 无限 append 几 MB 字符串 → LazyColumn 渲染时 kill 进程）
+                            if (sb.length < 50000) {
+                                sb.append(chunk.text)
+                                _messages.value = _messages.value.map { m ->
+                                    if (m.id == answerId) m.copy(content = sb.toString()) else m
+                                }
                             }
                             if (sb.length and 0x3F == 0) {
                                 viewModelScope.launch(Dispatchers.IO) {
-                                    val cur = _messages.value.first { it.id == answerId }
+                                    val cur = _messages.value.firstOrNull { it.id == answerId } ?: return@launch
                                     chatDao.upsert(ChatMsgEntity.from(cur, topicId))
                                 }
                             }
                         }
                         is ChatChunk.Done -> {
-                            sb = StringBuilder(chunk.full)
-                            val (cleaned, actions) = ActionExecutor.extractActions(chunk.full)
-                            val finalText = cleaned.ifBlank { chunk.full }
+                            // 🛡️ 防闪退/内存炸：截断超长 finalText（Llama 偶尔会输出几十上百 MB 的乱码循环回复）
+                            val safeFull = if (chunk.full.length > 20000) chunk.full.take(20000) + "\n\n...[回复过长已截断]" else chunk.full
+                            sb = StringBuilder(safeFull)
+                            val (cleaned, actions) = ActionExecutor.extractActions(safeFull)
+                            val safeCleaned = if (cleaned.length > 20000) cleaned.take(20000) + "\n\n...[内容过长]" else cleaned
+                            val finalText = safeCleaned.ifBlank { safeFull }
                             val finalMsg = ChatMsg(
                                 id = answerId,
                                 role = ChatRole.Assistant,

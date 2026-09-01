@@ -24,8 +24,11 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 9
-        versionName = "2.2.0-M8-NoANR"      // v1.2.7：修复真推理ANR（sendMessage + chatFlow 都切 Dispatchers.Default）
+        versionCode = 10
+        versionName = "2.2.0-M9-TRAE-UI+NoMoreLostToken"
+        // v1.2.8：① 卡/空气泡致命修：collectLatest→collect（之前永远cancel前一个token更新）
+        //        ② 闪退保险：Token<5w / Done<2w 截断 + firstOrNull 防NPE
+        //        ③ UI 正式 TRAE 风：去气泡内「我/AI编程助手」发送者名 → 左右圆形头像+正文；TopBar fallback=新对话 + 右➕新对话
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

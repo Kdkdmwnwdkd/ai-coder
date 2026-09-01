@@ -2,6 +2,7 @@ package com.xuedi.coder.ui.screen
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.clip
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,11 +12,14 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Add
@@ -198,25 +202,29 @@ fun ChatPage(vm: ChatViewModel) {
                 .fillMaxSize()
                 .padding(horizontal = 14.dp, vertical = 8.dp)
         ) {
-            // 顶部条：汉堡 + 当前话题标题
+            // 顶部条：汉堡（开话题Drawer）+ 中间当前话题名（不再用"AI编程助手"做大标题，而是和 TRAE 一样用话题名/「新对话」）+ 右侧➕新对话
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 6.dp),
+                    .padding(bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(0.dp)
             ) {
                 IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                    Icon(Icons.Outlined.Menu, "对话列表", tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Outlined.Menu, "话题列表", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Text(
-                    text = topics.firstOrNull { it.id == currentTopicId }?.title ?: "AI 编程助手",
+                    modifier = Modifier.weight(1f),
+                    text = topics.firstOrNull { it.id == currentTopicId }?.title ?: "新对话",
                     fontSize = 16.sp,
                     fontWeight = FontWeight.SemiBold,
                     color = MaterialTheme.colorScheme.onSurface,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis
                 )
+                IconButton(onClick = { vm.newTopic() }) {
+                    Icon(Icons.Outlined.Add, "新建对话", tint = MaterialTheme.colorScheme.primary)
+                }
             }
 
             // 消息列表
@@ -228,38 +236,67 @@ fun ChatPage(vm: ChatViewModel) {
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 items(messages, key = { it.id }) { msg ->
+                    val isUser = msg.role == ChatRole.User
                     Row(
-                        Modifier.fillMaxWidth(),
-                        horizontalArrangement = if (msg.role == ChatRole.User) Arrangement.End else Arrangement.Start
+                        Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 2.dp),
+                        verticalAlignment = Alignment.Bottom  // 头像与气泡底部对齐（TRAE 风格，头像贴底）
                     ) {
+                        // 🔵 TRAE 风格固定两列：头像列(40.dp) + 气泡列(weight, max 320dp)
+                        //    用户：Spacer 占左侧 → 气泡(偏右小角) → 8dp → 头像(右)
+                        //    AI ：头像(左) → 8dp → 气泡(偏左小角)
+                        if (isUser) {
+                            Spacer(Modifier.weight(1f, fill = true))   // 撑左侧，让头像+气泡整体靠右
+                        } else {
+                            // AI 头像（左列）：深青色圆圈 + "AI"字样（不搞图片，省流量省代码）
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.85f)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "AI",
+                                    color = Color.White,
+                                    fontSize = 13.sp,
+                                    fontWeight = FontWeight.Bold
+                                )
+                            }
+                            Spacer(Modifier.width(8.dp))
+                        }
+
+                        // 气泡本体：不同角色不同圆角方向（TRAE风格——靠头像的那一侧圆角偏小）
+                        //   加 role 语义的"小徽章"只用颜色/圆角区分，不用文字名字（满足你"上面有个我字，我觉得完全没必要"）
+                        val bubbleShape = if (isUser) {
+                            RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 4.dp)
+                        } else {
+                            RoundedCornerShape(topStart = 4.dp,  topEnd = 18.dp, bottomStart = 18.dp, bottomEnd = 18.dp)
+                        }
                         Card(
-                            modifier = Modifier.widthIn(max = 320.dp),
-                            shape = RoundedCornerShape(18.dp),
+                            modifier = Modifier.widthIn(max = 300.dp),
+                            shape = bubbleShape,
                             colors = CardDefaults.cardColors(
                                 containerColor = when (msg.role) {
-                                    ChatRole.User -> MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-                                    else -> MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
+                                    ChatRole.User      -> MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                    ChatRole.Error     -> MaterialTheme.colorScheme.error.copy(alpha = 0.10f)
+                                    ChatRole.System    -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f)
+                                    else               -> MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
                                 }
                             )
                         ) {
-                            Column(Modifier.padding(12.dp)) {
-                                Text(
-                                    text = when (msg.role) {
-                                        ChatRole.User -> "我"
-                                        ChatRole.Assistant -> "AI 编程助手"
-                                        ChatRole.Error -> "❌ 错误"
-                                        ChatRole.System -> "System"
-                                    },
-                                    fontSize = 12.sp,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                                Spacer(Modifier.height(4.dp))
+                            Column(Modifier.padding(horizontal = 14.dp, vertical = 10.dp)) {
                                 Text(
                                     text = msg.content.ifBlank { " " },
                                     fontSize = 15.sp,
-                                    lineHeight = 21.sp,
-                                    color = MaterialTheme.colorScheme.onSurface
+                                    lineHeight = 22.sp,
+                                    color = when (msg.role) {
+                                        ChatRole.Error  -> MaterialTheme.colorScheme.error
+                                        else            -> MaterialTheme.colorScheme.onSurface
+                                    }
                                 )
                                 if (msg.actions.isNotEmpty()) {
                                     Spacer(Modifier.height(8.dp))
@@ -281,6 +318,29 @@ fun ChatPage(vm: ChatViewModel) {
                                     }
                                 }
                             }
+                        }
+
+                        if (isUser) {
+                            Spacer(Modifier.width(8.dp))
+                            // 用户头像（右列）：灰色圆圈 + "我"
+                            Box(
+                                modifier = Modifier
+                                    .size(40.dp)
+                                    .clip(CircleShape)
+                                    .background(
+                                        MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Text(
+                                    "我",
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontSize = 14.sp,
+                                    fontWeight = FontWeight.SemiBold
+                                )
+                            }
+                        } else {
+                            Spacer(Modifier.weight(0.4f, fill = true))  // AI 侧气泡不贴到最右
                         }
                     }
                 }

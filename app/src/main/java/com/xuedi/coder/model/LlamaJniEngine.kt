@@ -131,6 +131,16 @@ class LlamaJniEngine : LlmEngine {
             lastLoadError = "模型文件过小（${f.length()} bytes），非有效 GGUF"
             return false
         }
+        // 🔴 闪退修复：loadModel 前先 cancel + release 旧 ctx，
+        //    防止旧 nativeChat 还在跑时新 nativeInit 覆盖 ctx → SIGSEGV 闪退
+        val oldCtx = ctx
+        if (oldCtx != 0L) {
+            runCatching { nativeChatCancel(oldCtx) }
+            Thread.sleep(50)  // 给 C++ while 循环时间跳出
+            runCatching { nativeRelease(oldCtx) }
+            ctx = 0L
+            Log.i(TAG, "loadModel: 旧 ctx=$oldCtx 已释放")
+        }
         val newCtx = runCatching {
             nativeInit(ggufAbsolutePath, nCtx, nThreads, nGpuLayers)
         }.getOrElse { t ->
@@ -147,7 +157,6 @@ class LlamaJniEngine : LlmEngine {
             Log.e(TAG, "loadModel ❌ ctx=0，原因：$lastLoadError")
             return false
         }
-        if (ctx != 0L) runCatching { nativeRelease(ctx) }
         ctx = newCtx
         Log.i(TAG, "loadModel ✅ GGUF 已加载 ctx=$ctx；线程=$nThreads nCtx=$nCtx 文件=${f.name} size=${f.length()/1024/1024}MB")
         lastLoadError = null
@@ -203,8 +212,8 @@ class LlamaJniEngine : LlmEngine {
             // 累积所有 token 拼成 full text：Done(reason) 时需要 final 正文，
             // 因为 C++ 层 onDone 只传 stop reason，不传完整回复（流式已经 onToken 吐过了）
             val fullSb = StringBuilder()
-            // 🔴 TODO-4e 首 token 15s 超时标志（AtomicBoolean 跨线程可见：cb 在 nativeChat 线程写，
-            //    超时定时器在另一个 Default 协程读）
+            // 🔴 首 token 45s 超时（从 15s 拉长：手机 CPU 上 3B 模型预填充 500 token 要 20-30s，
+            //    15s 会把正常推理也杀掉。45s 留足余量，极端内存紧张场景仍能报错而非一直转圈圈）
             val firstTokenReceived = java.util.concurrent.atomic.AtomicBoolean(false)
             // 取消时顺便让 C++ 端跳出 decode 循环（用户在聊天页中途按取消/关闭APP场景）
             // 🔴 🔴 ANR 致命修复：nativeChat(curCtx,...) 是阻塞式 JNI C++ while 循环（几分钟 CPU 密集），
@@ -255,16 +264,17 @@ class LlamaJniEngine : LlmEngine {
                     mkFallbackIfNeed().chatFlow(system, user).collect { send(it) }
                 }
             }
-            // 🔴 TODO-4e 首 token 15s 超时：等 15s 还没出第一个 token（prefill 卡住/内存爆），
+            // 🔴 首 token 45s 超时：等 45s 还没出第一个 token（prefill 卡住/内存爆），
             //    就发 ChatChunk.Error + cancel nativeChat + close 流，避免用户以为"一直转卡死"
             val timeoutJob = launch(Dispatchers.Default) {
-                delay(15_000L)
+                delay(45_000L)
                 if (!firstTokenReceived.get()) {
-                    Log.w(TAG, "chatFlow 首 token 超时(15s)，cancel nativeChat + 发 Error")
+                    Log.w(TAG, "chatFlow 首 token 超时(45s)，cancel nativeChat + 发 Error")
                     runCatching { nativeChatCancel(curCtx) }
                     trySend(ChatChunk.Error(
-                        RuntimeException("首 token 超时(15s)"),
-                        "首 token 超时(15s)：建议减少场景开关数量或重启手机释放内存后重试"
+                        RuntimeException("首 token 超时(45s)"),
+                        "首 token 超时(45s)：预填充太慢（可能场景插件太多或内存紧张）。" +
+                            "建议：① 关掉不必要的场景 ② 重启手机释放内存 ③ 用更短的提问"
                     ))
                     channel.close()
                 }

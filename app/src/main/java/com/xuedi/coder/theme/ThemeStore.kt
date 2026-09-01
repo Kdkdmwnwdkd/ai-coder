@@ -18,11 +18,17 @@ import java.util.UUID
 private val Context.dataStore: DataStore<Preferences> by preferencesDataStore(name = "theme_store")
 
 /**
+ * 主题模式枚举：浅色 / 深色 / 跟随系统
+ */
+enum class ThemeMode { LIGHT, DARK, FOLLOW_SYSTEM }
+
+/**
  * 照片背景 + UI 偏好持久化：
  * - backgroundPath: 保存在 filesDir/backgrounds/ 下的拷贝文件绝对路径；null 表示不启用照片背景。
  * - backgroundAlpha: 前景半透明遮罩透明度（0=无遮罩，1=完全盖掉），
  *   实际背景照片显示强度 = 1 - alpha；所以 alpha 越大照片越淡。
  *   默认 0.18f = 照片很淡、只当点缀，不影响阅读。
+ * - themeMode: 主题模式（LIGHT / DARK / FOLLOW_SYSTEM），默认 FOLLOW_SYSTEM
  */
 class ThemeStore(private val ctx: Context) {
 
@@ -31,17 +37,28 @@ class ThemeStore(private val ctx: Context) {
     companion object {
         private val KEY_BG_PATH = stringPreferencesKey("bg_path")
         private val KEY_BG_ALPHA = floatPreferencesKey("bg_alpha")
+        private val KEY_THEME_MODE = stringPreferencesKey("theme_mode")
         const val DEFAULT_BG_ALPHA = 0.18f
+        const val DEFAULT_THEME_MODE = "FOLLOW_SYSTEM"
     }
 
     val backgroundPathFlow: Flow<String?> =
         ctx.dataStore.data.map { it[KEY_BG_PATH]?.takeIf { p -> File(p).exists() } }
     val backgroundAlphaFlow: Flow<Float> =
         ctx.dataStore.data.map { it[KEY_BG_ALPHA] ?: DEFAULT_BG_ALPHA }
+    val themeModeFlow: Flow<ThemeMode> =
+        ctx.dataStore.data.map { raw ->
+            raw[KEY_THEME_MODE]?.let { runCatching { ThemeMode.valueOf(it) }.getOrNull() }
+                ?: ThemeMode.FOLLOW_SYSTEM
+        }
 
     suspend fun setBackgroundAlpha(alpha: Float) {
         val clamped = alpha.coerceIn(0f, 1f)
         ctx.dataStore.edit { it[KEY_BG_ALPHA] = clamped }
+    }
+
+    suspend fun setThemeMode(mode: ThemeMode) {
+        ctx.dataStore.edit { it[KEY_THEME_MODE] = mode.name }
     }
 
     /**

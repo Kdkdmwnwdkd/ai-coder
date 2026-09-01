@@ -6,6 +6,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -59,6 +60,7 @@ import com.xuedi.coder.R
 import com.xuedi.coder.data.ModelEntity
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
+import com.xuedi.coder.theme.ThemeMode
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.res.stringResource
@@ -239,6 +241,11 @@ private fun AppearanceCard(
     onAlphaChanged: (Float) -> Unit,
     onAlphaCommit: () -> Unit
 ) {
+    val ctx = LocalContext.current
+    val scope = rememberCoroutineScope()
+    val themeStore = App.instance.themeStore
+    val themeMode by themeStore.themeModeFlow.collectAsState(initial = ThemeMode.FOLLOW_SYSTEM)
+
     Card(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
@@ -247,6 +254,38 @@ private fun AppearanceCard(
         )
     ) {
         Column(Modifier.padding(14.dp)) {
+            // -------- 主题模式选择（3 按钮：浅色 / 深色 / 跟随系统） --------
+            Text(
+                "主题模式",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.primary
+            )
+            Spacer(Modifier.height(8.dp))
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ThemeModeChip(
+                    label = "浅色",
+                    selected = themeMode == ThemeMode.LIGHT,
+                    onClick = { scope.launch { themeStore.setThemeMode(ThemeMode.LIGHT) } }
+                )
+                ThemeModeChip(
+                    label = "深色",
+                    selected = themeMode == ThemeMode.DARK,
+                    onClick = { scope.launch { themeStore.setThemeMode(ThemeMode.DARK) } }
+                )
+                ThemeModeChip(
+                    label = "跟随系统",
+                    selected = themeMode == ThemeMode.FOLLOW_SYSTEM,
+                    onClick = { scope.launch { themeStore.setThemeMode(ThemeMode.FOLLOW_SYSTEM) } }
+                )
+            }
+
+            Spacer(Modifier.height(14.dp))
+
+            // -------- 背景照片 --------
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
@@ -752,3 +791,41 @@ private data class LoadDiagSnapshot(
     val lastLoadError: String?,
     val lastLoadedPath: String?
 )
+
+// ===================================================================
+// 主题模式选择 Chip（3 个：浅色 / 深色 / 跟随系统）
+// ===================================================================
+@Composable
+private fun ThemeModeChip(
+    label: String,
+    selected: Boolean,
+    onClick: () -> Unit
+) {
+    Surface(
+        modifier = Modifier
+            .weight(1f)
+            .height(38.dp),
+        shape = RoundedCornerShape(10.dp),
+        color = if (selected) {
+            MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
+        } else {
+            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+        },
+        border = BorderStroke(
+            width = if (selected) 1.2.dp else 0.4.dp,
+            color = if (selected) MaterialTheme.colorScheme.primary
+                    else MaterialTheme.colorScheme.outline
+        ),
+        onClick = onClick
+    ) {
+        Box(contentAlignment = Alignment.Center) {
+            Text(
+                label,
+                fontSize = 13.sp,
+                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
+                color = if (selected) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant
+            )
+        }
+    }
+}

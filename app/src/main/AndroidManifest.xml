@@ -2,13 +2,19 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- ============= 【新 M3 UI 层】权限声明（先占位，M4+ 管理层再真正使用） ============= -->
-    <!-- Android 13+：通知栏前台保活/推理通知（后续 llama.cpp 前台服务需要） -->
+    <!-- ============= 【M3 UI 层占位 + M5 JNI 正式启用】权限 ============= -->
+    <!-- Android 13+：通知栏（推理前台服务Notification + 剪贴板Toast提示） -->
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <!-- Android 13+：选择照片做背景（其实SAF用Intent不需要权限，先占位） -->
+    <!-- Android 13+：选择照片做背景（SAF Intent不需要，占位保留） -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
-    <!-- 占位：后续下载模型、拉取插件更新用 -->
+    <!-- 占位：下载模型、拉取插件更新 -->
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- M5 新增：推理期间启动前台Service（防 Flyme 后台杀） -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <!-- Android 14 (API 34) 新增：前台Service类型必选。llama.cpp推理没有精确匹配的官方分类，用 specialUse + 属性说明 -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <!-- M6 ACTION 标签：震动反馈 -->
+    <uses-permission android:name="android.permission.VIBRATE" />
 
     <application
         android:name=".App"
@@ -31,7 +37,21 @@
             </intent-filter>
         </activity>
 
-        <!-- ============= FileProvider：SAF 导入 GGUF / 背景照片后 分享文件URI 用 ============= -->
+        <!-- M5 新增：推理前台保活 Service。魅族 Flyme 后台策略严格，
+             推理中常驻通知栏"AI编程助手推理中…"。
+             foregroundServiceType=specialUse 是 Android 14 对 "LLM推理" 这一新场景的折中：
+             没有官方的 remoteMessaging/health/playback 等精确匹配类型，specialUse +
+             property:android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE 给出明确文字说明即可过审。 -->
+        <service
+            android:name=".model.InferenceForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="本地GGUF大模型推理(llama.cpp-JNI)前台保活，防止系统在长时间推理期间回收进程。" />
+        </service>
+
+        <!-- FileProvider：SAF 导入 GGUF / 背景照片后 分享文件URI 用 -->
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

@@ -1,21 +1,9 @@
 // =======================================================
-// 【新 M3 = UI 层里程碑】
-// 按用户要求把 原M3(管理层) 和 原M4(UI层) 顺序对调了！
-// 本层只做 UI：导航 + 4页面 + 底部Tab + 权限 + FileProvider + 照片背景UI盒子
-// —— 完全不碰管理层（PluginManager/ModelManager/ThemeStore），它们留在 /tmp/m3_logic_backup
-// —— 彻底避开 serialization gradle 插件那个全网找不到 artifact 的坑
-// 依赖：全是纯 runtime（不需要 Gradle 插件），MavenCentral 100% 能拉到
-//   · Navigation Compose（页面导航）
-//   · Material Icons Extended（底部Tab图标）
-//   · Lifecycle ViewModel + Coroutines Flow（聊天状态）
-//   · Coil Compose（照片背景加载）
-//   · Room + KSP（M2 已验证通过保留）
+// 【M5 = JNI llama.cpp 里程碑】
+// 新增：NDK / CMake / preBuild 自动拉 llama.cpp-b4812 源码（避免子模块/手工拷贝坑）
+// —— 严格遵循 190155 经验：缺失 llama.cpp/CMakeLists.txt 时，
+//    下游 CMakeLists.txt 直接 FATAL_ERROR，绝不生成"可运行但永远stub/假回复"的APK
 // =======================================================
-// 关键：必须用 plugins {} 块，不能用 apply(plugin = "...")！
-// 原因：Kotlin DSL 在 *编译脚本时* 就要解析 android { namespace } / dependencies { implementation } 的类型。
-//       apply() 是"运行时动态做的"，编译器不知道会注入什么，会把 android / implementation 全报成 Unresolved reference。
-//       而 plugins {} 块会告诉 Gradle Kotlin DSL 在编译脚本前先应用这些插件，从而生成类型安全访问器。
-// version 省略 → settings.gradle.kts 里 resolutionStrategy.eachPlugin 已经硬编码了坐标，100% 可拉。
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -26,18 +14,45 @@ android {
     namespace = "com.xuedi.coder"
     compileSdk = 34
 
+    // ---- M5 新增：NDK（Android 官方镜像 setup-java@v5 默认会带 27.x）----
+    ndkVersion = "27.0.12077973"
+
     defaultConfig {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "2.0.0-M3-UI"
+        versionCode = 4
+        versionName = "2.1.0-M5-JNI"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }
 
         ksp {
             arg("room.schemaLocation", "$projectDir/schemas")
+        }
+
+        // ---- M5 新增：CMake 编译参数（llama.cpp 需要 C++17）----
+        externalNativeBuild {
+            cmake {
+                cppFlags += listOf(
+                    "-std=c++17",
+                    "-O3",
+                    "-fvisibility=hidden",
+                    "-fvisibility-inlines-hidden"
+                )
+                arguments += listOf(
+                    "-DANDROID_STL=c++_static",
+                    "-DANDROID_ARM_NEON=ON"
+                )
+            }
+        }
+    }
+
+    // ---- M5 新增：CMake 入口（防stub：缺失 llama.cpp 时 FATAL_ERROR）----
+    externalNativeBuild {
+        cmake {
+            path = file("src/main/cpp/CMakeLists.txt")
+            version = "3.22.1"
         }
     }
 
@@ -117,4 +132,69 @@ dependencies {
     //    Google 官方（属于 AndroidX），MavenCentral 坐标：
     //    https://repo1.maven.org/maven2/androidx/datastore/datastore-preferences/1.0.0/
     implementation("androidx.datastore:datastore-preferences:1.0.0")
+}
+
+// =======================================================
+// M5 新增：preBuild 前确保 llama.cpp-b4812 源码就位（避免 git submodule 空目录的坑）
+// —— 对应经验 190155 / 190266：绝不依赖 submodule 初始化是否成功；
+//    缺失时直接用 curl -L 从 GitHub 官方 archive 下固定 tag tar.gz。
+//    如果网络失败，Gradle 直接 fail（而不是生成一个"功能全stub的假APK"来骗用户）。
+// =======================================================
+tasks.register("ensureLlamaCppSource") {
+    group = "build"
+    description = "确保 llama.cpp 源码存在于 app/src/main/cpp/llama.cpp/（首次构建自动下载 b4812 压缩包）"
+    val cppDir = file("src/main/cpp")
+    val llamaDir = java.io.File(cppDir, "llama.cpp")
+    val marker = java.io.File(llamaDir, "CMakeLists.txt")
+    outputs.upToDateWhen { marker.exists() && marker.length() > 40_000 }  // b4812 CMakeLists.txt 60KB+
+    doLast {
+        if (marker.exists() && marker.length() > 40_000) return@doLast
+        cppDir.mkdirs()
+        val TAG = "b4812"
+        val URL = "https://github.com/ggerganov/llama.cpp/archive/refs/tags/$TAG.tar.gz"
+        val tmpTgz = java.io.File(cppDir, "_dl_llama_$TAG.tar.gz")
+        println("[ensureLlamaCppSource] llama.cpp 源码缺失，下载 $URL ...")
+        // curl -L 跟随重定向；-f 失败返回非 0；--retry 重试；--max-time 300s
+        val curlResult = exec {
+            isIgnoreExitValue = true
+            commandLine(
+                "sh", "-c",
+                "curl -L -f --retry 3 --retry-delay 2 --max-time 300 -o '${tmpTgz.absolutePath}' '$URL'"
+            )
+        }
+        check(curlResult.exitValue == 0 && tmpTgz.exists() && tmpTgz.length() > 1_000_000) {
+            "llama.cpp 源码下载失败（curl exit=${curlResult.exitValue}，文件大小=${tmpTgz.length()}B）。" +
+                "请手动将 https://github.com/ggerganov/llama.cpp/archive/refs/tags/$TAG.tar.gz 解压后内容放到 " +
+                "${llamaDir.absolutePath}/（目标目录下必须直接有 CMakeLists.txt / ggml.c / llama.cpp 等文件，不能嵌套一层 llama.cpp-b4812）"
+        }
+        // 清理旧目录
+        listOf(llamaDir, java.io.File(cppDir, "llama.cpp-$TAG")).forEach { d ->
+            if (d.exists()) d.deleteRecursively()
+        }
+        // tar xzf → 默认解压出 llama.cpp-b4812/
+        val tarResult = exec {
+            isIgnoreExitValue = true
+            commandLine("tar", "xzf", tmpTgz.absolutePath, "-C", cppDir.absolutePath)
+        }
+        check(tarResult.exitValue == 0) { "llama.cpp 解压失败 tar exit=${tarResult.exitValue}" }
+        val extracted = cppDir.listFiles()?.firstOrNull {
+            it.isDirectory && (it.name == "llama.cpp-$TAG" ||
+                (it.name.startsWith("llama.cpp") && it.name != "llama.cpp"))
+        }
+        check(extracted != null && java.io.File(extracted, "CMakeLists.txt").exists()) {
+            "解压后找不到 llama.cpp 目录（应包含 CMakeLists.txt）。cppDir 下目录：" +
+                cppDir.listFiles()?.filter { it.isDirectory }?.map { it.name }
+        }
+        check(extracted.renameTo(llamaDir)) { "重命名 ${extracted.name} → llama.cpp 失败" }
+        tmpTgz.delete()
+        println("[ensureLlamaCppSource] 完成：源码就位 ${llamaDir.absolutePath}，CMakeLists.txt=${marker.length()}B")
+    }
+}
+
+// 保证所有 NDK CMake 配置任务、preBuild 在跑之前源码先到位
+tasks.named("preBuild").configure { dependsOn("ensureLlamaCppSource") }
+tasks.whenTaskAdded {
+    if (name.startsWith("configureCMake") || name.startsWith("buildCMake")) {
+        dependsOn("ensureLlamaCppSource")
+    }
 }

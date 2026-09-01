@@ -1,15 +1,11 @@
 # =====================================================
 # 【M5-2】xuedi-coder JNI 入口 CMakeLists.txt
-# —— 对应 Experience 190155 / 190266 的教训 ——
-#   1. llama.cpp/CMakeLists.txt 不存在时直接 FATAL_ERROR
-#      （绝不生成"功能是 stub、永远假回复"的 APK 骗用户）
-#   2. 因为是 Android NDK 交叉编译（目标 ARM64），
-#      所有 x86 SIMD 指令 (AVX/AVX2/FMA/F16C/AVX512) 强制 OFF，
-#      否则 CMake 在 configure 阶段就会炸（llama.cpp 默认检测主机 CPU）
-#   3. LLAMA_NATIVE / GGML_NATIVE 都 OFF，
-#      避免针对 GitHub Runner x86_64 做 -march=native
-#   4. GGML_OPENMP=ON（手机 8 核 ARM，4线程推理比单线程快 3-4x）
-#   5. 不编 tests/examples/server，只拿 llama + ggml + common 三个静态库
+# —— 对应 #26 失败教训（2026/09/01 Run#26 ld.lld error: unable to find library -lcommon）——
+#   1. llama.cpp b4835 在 LLAMA_BUILD_EXAMPLES=OFF 时不编 common target，
+#      链接写 -lcommon 直接炸 → target_link_libraries 中移除 common。
+#   2. 强制所有依赖编译为静态库（BUILD_SHARED_LIBS=OFF），
+#      最终只有一个 libxuedi-llama.so 打进 APK，避免多 .so 拆分后的加载路径/符号问题。
+#   3. 其他 ARM64 交叉编策略（x86 SIMD 全关 + GGML_OPENMP + ARM NEON）保留。
 # =====================================================
 
 cmake_minimum_required(VERSION 3.22.1)
@@ -18,6 +14,12 @@ project(xuedi-llama C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# —— 关键：让 ggml / llama / ggml-cpu / ggml-base 全部编译为 STATIC（.a），
+#        最终合并进 libxuedi-llama.so。否则默认 BUILD_SHARED_LIBS=Not Set，
+#        add_subdirectory 里的 add_library() 会按 STATIC 还是 SHARED 取决于
+#        llama.cpp 自己的 BUILD_SHARED_LIBS 设置，且不同 target 不一致。
+set(BUILD_SHARED_LIBS  OFF CACHE BOOL "" FORCE)
 
 # ---- 防stub · 关键检查 ----
 set(LLAMA_DIR "${CMAKE_CURRENT_SOURCE_DIR}/llama.cpp")
@@ -78,8 +80,9 @@ set(LLAMA_WERRORS         OFF CACHE BOOL "" FORCE)
 
 # =====================================================
 # 把 llama.cpp 作为子目录拉进来
-# —— 会产出 3 个 static lib target：ggml、llama、common
-#    （common 里有 tokenize / chat_template 等辅助）
+# —— 会产出 4 个 static lib target：ggml-base、ggml-cpu、ggml、llama
+#    （b4835 版本 ggml 拆分了 base/cpu 两级架构；LLAMA_BUILD_EXAMPLES=OFF，
+#     因此 common 子模块不编，链接时不能写 common，否则 ld 找不到 -lcommon）
 # =====================================================
 add_subdirectory(${LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama_build)
 
@@ -97,10 +100,13 @@ target_include_directories(xuedi-llama PRIVATE
     ${LLAMA_DIR}/common
 )
 
+# 注意：target_link_libraries 里严禁再写 common！
+#      b4835 + LLAMA_BUILD_EXAMPLES=OFF 时该 target 不存在。
 target_link_libraries(xuedi-llama PRIVATE
     llama
     ggml
-    common
+    ggml-cpu
+    ggml-base
     log          # Android NDK __android_log_print
     z            # 部分 llama.cpp 版本可能需要
 )

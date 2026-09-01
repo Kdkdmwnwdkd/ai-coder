@@ -9,8 +9,11 @@ import kotlinx.coroutines.flow.Flow
 @Dao
 interface ChatDao {
 
-    @Query("SELECT * FROM chat_message ORDER BY createdAtMs ASC")
-    fun observeAll(): Flow<List<ChatMsgEntity>>
+    @Query("SELECT * FROM chat_message WHERE topicId = :topicId ORDER BY createdAtMs ASC")
+    fun observeByTopic(topicId: String): Flow<List<ChatMsgEntity>>
+
+    @Query("SELECT * FROM chat_message WHERE topicId = :topicId ORDER BY createdAtMs ASC")
+    suspend fun getByTopic(topicId: String): List<ChatMsgEntity>
 
     @Query("SELECT * FROM chat_message ORDER BY createdAtMs ASC")
     suspend fun getAll(): List<ChatMsgEntity>
@@ -23,6 +26,9 @@ interface ChatDao {
 
     @Query("DELETE FROM chat_message WHERE id = :id")
     suspend fun deleteById(id: String)
+
+    @Query("DELETE FROM chat_message WHERE topicId = :topicId")
+    suspend fun deleteByTopic(topicId: String)
 
     @Query("DELETE FROM chat_message")
     suspend fun deleteAll()

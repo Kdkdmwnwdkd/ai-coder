@@ -18,6 +18,8 @@ import androidx.room.PrimaryKey
 @Entity(tableName = "chat_message")
 data class ChatMsgEntity(
     @PrimaryKey val id: String,
+    /** 所属话题 id（外键关联 chat_topic.id，但不强制 FOREIGN KEY 约束以简化迁移） */
+    val topicId: String,
     /** 0=User 1=Assistant 2=Error 3=System（对应 ChatRole ordinal） */
     val roleOrdinal: Int,
     val content: String,
@@ -31,8 +33,9 @@ data class ChatMsgEntity(
         const val SEP_ACTIONS = ";;;;"
         const val SEP_FIELDS = "|||"
 
-        fun from(msg: ChatMsg): ChatMsgEntity = ChatMsgEntity(
+        fun from(msg: ChatMsg, topicId: String): ChatMsgEntity = ChatMsgEntity(
             id = msg.id,
+            topicId = topicId,
             roleOrdinal = msg.role.ordinal,
             content = msg.content,
             createdAtMs = msg.createdAtMs,

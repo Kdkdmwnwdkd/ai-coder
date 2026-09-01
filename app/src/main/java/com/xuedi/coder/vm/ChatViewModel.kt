@@ -5,9 +5,10 @@ import androidx.lifecycle.viewModelScope
 import com.xuedi.coder.App
 import com.xuedi.coder.action.ActionExecutor
 import com.xuedi.coder.data.ChatDatabase
-import com.xuedi.coder.data.ChatMsgEntity
 import com.xuedi.coder.data.ChatMsg
+import com.xuedi.coder.data.ChatMsgEntity
 import com.xuedi.coder.data.ChatRole
+import com.xuedi.coder.data.ChatTopicEntity
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.InferenceForegroundService
 import kotlinx.coroutines.Dispatchers
@@ -16,31 +17,44 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import java.util.UUID
 
 /**
- * 【修复 4 Bug】：
- *   ① 聊天消息持久化（init 时从 ChatDatabase 加载；所有变动同步 upsert；死要求 welcome 消息内置不入库）
- *   ② 推理结束后清空 pending 标记，避免下次读取还在"打字中"
- *   ③ 开始推理前调 InferenceForegroundService.start(ctx) — 避免 Flyme 后台 3 分钟被杀
- *   ④ 推理 Done / Error / 取消 调 stop 释放前台保活
+ * 【M8 多话题】ChatViewModel —— 类 ChatGPT 侧边栏多会话。
+ *
+ * 数据模型：
+ *   - ChatTopicEntity（chat_topic 表）：id/title/createdAtMs/lastActiveMs
+ *   - ChatMsgEntity（chat_message 表）：加 topicId 外键字段
+ *
+ * 状态：
+ *   - topics: StateFlow<List<ChatTopicEntity>>：侧边栏话题列表，按 lastActiveMs DESC
+ *   - currentTopicId: StateFlow<String?>：当前选中的话题 id（null=还没话题，UI 显示空状态）
+ *   - messages: StateFlow<List<ChatMsg>>：当前话题的消息列表
+ *
+ * 操作：
+ *   - newTopic(firstUserMsg): 创建新话题（首条用户消息作默认标题）
+ *   - switchTopic(id): 切换当前话题，加载该 topic 的消息
+ *   - renameTopic(id, title): 重命名
+ *   - deleteTopic(id): 删除话题 + 级联删该 topic 所有消息
+ *
+ * 持久化策略：
+ *   - send 消息时如果当前无 topic，自动 newTopic
+ *   - 每条消息 send / streaming 中每 64 字节 / Done / Error 时 upsert
+ *   - Done 后 touchActive(topicId, now)
  */
 class ChatViewModel : ViewModel() {
 
     private val app get() = App.instance
-    private val chatDao by lazy { ChatDatabase.get(app).dao() }
+    private val db by lazy { ChatDatabase.get(app) }
+    private val chatDao by lazy { db.dao() }
+    private val topicDao by lazy { db.topicDao() }
 
-    // ---------- 欢迎消息（id=welcome，不入库，每次构造都重新加；入库会造成 welcome createdAtMs 陈旧）----------
-    private val welcomeMsg = ChatMsg(
-        id = "welcome",
-        role = ChatRole.Assistant,
-        content = "你好！我是 AI 编程助手 🤖\n\n接入了真 JNI llama.cpp 推理 + ACTION 按钮 + 聊天记录持久化。\n\n" +
-            "用法：\n" +
-            "  1. 设置 → 导入 GGUF 模型（推荐 Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf）→ 设为当前\n" +
-            "  2. 聊天页输入问题 → 气泡**逐字跳出**（真推理），结束后下方出「复制/打开链接」等 ACTION 按钮\n" +
-            "  3. 退出 APP / 锁屏再回来，消息列表还在 ✅\n\n" +
-            "提示：如提示「进入 fallback 模式」，说明 JNI 没加载成功（或还没设模型），先去设置页导入 GGUF。",
-        createdAtMs = System.currentTimeMillis() - 60_000
-    )
+    // ---------- StateFlows ----------
+    private val _topics = MutableStateFlow<List<ChatTopicEntity>>(emptyList())
+    val topics: StateFlow<List<ChatTopicEntity>> = _topics.asStateFlow()
+
+    private val _currentTopicId = MutableStateFlow<String?>(null)
+    val currentTopicId: StateFlow<String?> = _currentTopicId.asStateFlow()
 
     private val _messages = MutableStateFlow<List<ChatMsg>>(emptyList())
     val messages: StateFlow<List<ChatMsg>> = _messages.asStateFlow()
@@ -48,55 +62,132 @@ class ChatViewModel : ViewModel() {
     private val _isTyping = MutableStateFlow(false)
     val isTyping: StateFlow<Boolean> = _isTyping.asStateFlow()
 
-    // ---------- 1. 从 ChatDatabase 恢复持久化消息（异步，不阻塞 UI）----------
+    // ---------- init: 订阅 topics 列表 + 自动选最近一个话题 ----------
     init {
         viewModelScope.launch(Dispatchers.IO) {
-            val persisted = runCatching { chatDao.getAll() }.getOrDefault(emptyList())
-            // ChatMsgEntity -> ChatMsg：强制设 pending=false（上次杀进程可能是 pending=true）
-            val recovered = persisted
-                .filter { it.id != "welcome" }
-                .map { e ->
-                    val m = ChatMsgEntity.toMsg(e)
-                    m.copy(pending = false)
+            topicDao.observeAll().collectLatest { list ->
+                _topics.value = list
+                // 启动时如果没选 topic，自动选最近活跃的那个
+                if (_currentTopicId.value == null && list.isNotEmpty()) {
+                    switchTopicInternal(list.first().id)
                 }
-            _messages.value = listOf(welcomeMsg) + recovered
+                // 当前 topic 被删了 → 清空 messages，UI 显示空状态
+                if (_currentTopicId.value != null && list.none { it.id == _currentTopicId.value }) {
+                    _currentTopicId.value = null
+                    _messages.value = emptyList()
+                }
+            }
         }
     }
 
-    // ---------- 2. 所有变动同步保存 ----------
-    private suspend fun save(m: ChatMsg) {
-        if (m.id == "welcome") return  // welcome 不存
-        runCatching { chatDao.upsert(ChatMsgEntity.from(m)) }
+    // ---------- 话题操作 ----------
+
+    /** 创建新话题，返回 topicId；可选首条用户消息用于自动生成标题 */
+    private suspend fun createTopic(firstUserMsg: String? = null): String {
+        val now = System.currentTimeMillis()
+        val id = "t_${now}_${UUID.randomUUID().toString().take(8)}"
+        val title = firstUserMsg
+            ?.takeIf { it.isNotBlank() }
+            ?.let { it.trim().take(24) + if (it.trim().length > 24) "…" else "" }
+            ?: "新对话 ${now % 100000}"
+        topicDao.upsert(ChatTopicEntity(
+            id = id, title = title, createdAtMs = now, lastActiveMs = now
+        ))
+        _currentTopicId.value = id
+        _messages.value = emptyList()
+        return id
     }
-    private suspend fun saveAll(list: List<ChatMsg>) {
-        val toStore = list.filter { it.id != "welcome" }.map { ChatMsgEntity.from(it) }
-        if (toStore.isEmpty()) return
-        runCatching { chatDao.upsertAll(toStore) }
+
+    /** 切换当前话题 → 重新加载该 topic 的消息 */
+    fun switchTopic(topicId: String) {
+        if (_currentTopicId.value == topicId) return
+        viewModelScope.launch(Dispatchers.IO) {
+            // 先取消当前正在跑的推理（避免旧 topic 的 token 流到新 topic）
+            runCatching { app.llmEngine.cancel() }
+            runCatching { InferenceForegroundService.stop(app) }
+            _isTyping.value = false
+            switchTopicInternal(topicId)
+        }
     }
+
+    private suspend fun switchTopicInternal(topicId: String) {
+        _currentTopicId.value = topicId
+        val msgs = runCatching { chatDao.getByTopic(topicId) }.getOrDefault(emptyList())
+        _messages.value = msgs.map { e ->
+            ChatMsgEntity.toMsg(e).copy(pending = false)  // 强制清 pending（上次杀进程可能残留）
+        }
+    }
+
+    /** 新建话题：UI 点「+ 新对话」按钮 → 立即创建空 topic + 切过去 */
+    fun newTopic() {
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { app.llmEngine.cancel() }
+            runCatching { InferenceForegroundService.stop(app) }
+            _isTyping.value = false
+            createTopic(firstUserMsg = null)
+        }
+    }
+
+    /** 重命名话题 */
+    fun renameTopic(topicId: String, title: String) {
+        val t = title.trim().take(60)
+        if (t.isEmpty()) return
+        viewModelScope.launch(Dispatchers.IO) {
+            topicDao.rename(topicId, t)
+        }
+    }
+
+    /** 删除话题 + 级联删该 topic 所有消息 */
+    fun deleteTopic(topicId: String) {
+        viewModelScope.launch(Dispatchers.IO) {
+            // 如果删的是当前话题，先取消推理
+            if (_currentTopicId.value == topicId) {
+                runCatching { app.llmEngine.cancel() }
+                runCatching { InferenceForegroundService.stop(app) }
+                _isTyping.value = false
+            }
+            chatDao.deleteByTopic(topicId)
+            topicDao.deleteById(topicId)
+            // 删完后如果没话题了，自动建一个新空 topic 让 UI 不至于显示"无话题"
+            val remain = topicDao.getAll()
+            if (remain.isEmpty()) {
+                createTopic(firstUserMsg = null)
+            } else if (_currentTopicId.value == topicId) {
+                // 当前话题被删 → 切到最近活跃的
+                switchTopicInternal(remain.first().id)
+            }
+        }
+    }
+
+    // ---------- 发送消息 ----------
 
     fun sendMessage(text: String) {
         val content = text.trim()
         if (content.isEmpty()) return
 
-        val userMsg = ChatMsg(
-            id = "u_${System.currentTimeMillis()}",
-            role = ChatRole.User,
-            content = content,
-            createdAtMs = System.currentTimeMillis()
-        )
-        _messages.value = _messages.value + userMsg
-        viewModelScope.launch(Dispatchers.IO) { save(userMsg) }
-
         viewModelScope.launch {
+            // 当前没话题 → 用首条用户消息自动创建一个
+            val topicId = _currentTopicId.value ?: createTopic(firstUserMsg = content)
+
+            val userMsg = ChatMsg(
+                id = "u_${System.currentTimeMillis()}",
+                role = ChatRole.User,
+                content = content,
+                createdAtMs = System.currentTimeMillis()
+            )
+            _messages.value = _messages.value + userMsg
+            viewModelScope.launch(Dispatchers.IO) {
+                chatDao.upsert(ChatMsgEntity.from(userMsg, topicId))
+                topicDao.touchActive(topicId, System.currentTimeMillis())
+            }
+
             _isTyping.value = true
             val answerId = "a_${System.currentTimeMillis()}"
             val system = runCatching { app.pluginManager.buildMergedSystemPrompt() }
-                .getOrDefault(PluginManagerFallback.BASE_PROMPT)
+                .getOrDefault(BASE_PROMPT)
 
-            // ---------- ③ 前台保活：开始推理前启动 ----------
             runCatching { InferenceForegroundService.start(app) }
 
-            // 先插一条空的 assistant 消息（pending=true）
             val answer = ChatMsg(
                 id = answerId,
                 role = ChatRole.Assistant,
@@ -105,7 +196,9 @@ class ChatViewModel : ViewModel() {
                 pending = true
             )
             _messages.value = _messages.value + answer
-            viewModelScope.launch(Dispatchers.IO) { save(answer) }
+            viewModelScope.launch(Dispatchers.IO) {
+                chatDao.upsert(ChatMsgEntity.from(answer, topicId))
+            }
 
             var sb = StringBuilder()
             runCatching {
@@ -116,21 +209,16 @@ class ChatViewModel : ViewModel() {
                             _messages.value = _messages.value.map { m ->
                                 if (m.id == answerId) m.copy(content = sb.toString()) else m
                             }
-                            // 流式过程中每 50 个 token 持久化一次（避免 OOM 时整段丢失）
                             if (sb.length and 0x3F == 0) {
                                 viewModelScope.launch(Dispatchers.IO) {
-                                    chatDao.upsert(
-                                        ChatMsgEntity.from(
-                                            _messages.value.first { it.id == answerId }
-                                        )
-                                    )
+                                    val cur = _messages.value.first { it.id == answerId }
+                                    chatDao.upsert(ChatMsgEntity.from(cur, topicId))
                                 }
                             }
                         }
                         is ChatChunk.Done -> {
                             sb = StringBuilder(chunk.full)
                             val (cleaned, actions) = ActionExecutor.extractActions(chunk.full)
-                            runCatching { ActionExecutor.executeAll(App.instance, actions) }
                             val finalText = cleaned.ifBlank { chunk.full }
                             val finalMsg = ChatMsg(
                                 id = answerId,
@@ -143,7 +231,10 @@ class ChatViewModel : ViewModel() {
                             _messages.value = _messages.value.map { m ->
                                 if (m.id == answerId) finalMsg else m
                             }
-                            viewModelScope.launch(Dispatchers.IO) { save(finalMsg) }
+                            viewModelScope.launch(Dispatchers.IO) {
+                                chatDao.upsert(ChatMsgEntity.from(finalMsg, topicId))
+                                topicDao.touchActive(topicId, System.currentTimeMillis())
+                            }
                         }
                         is ChatChunk.Error -> {
                             _messages.value = _messages.value
@@ -155,7 +246,8 @@ class ChatViewModel : ViewModel() {
                                     createdAtMs = System.currentTimeMillis()
                                 )
                             viewModelScope.launch(Dispatchers.IO) {
-                                saveAll(_messages.value)
+                                val cur = _messages.value.first { it.id == answerId }
+                                chatDao.upsert(ChatMsgEntity.from(cur.copy(pending = false), topicId))
                             }
                         }
                     }
@@ -169,26 +261,18 @@ class ChatViewModel : ViewModel() {
                         content = "❌ 推理崩溃：${t.message ?: t.javaClass.simpleName}",
                         createdAtMs = System.currentTimeMillis()
                     )
-                viewModelScope.launch(Dispatchers.IO) { saveAll(_messages.value) }
+                viewModelScope.launch(Dispatchers.IO) {
+                    val cur = _messages.value.first { it.id == answerId }
+                    chatDao.upsert(ChatMsgEntity.from(cur.copy(pending = false), topicId))
+                }
             }
 
-            // ---------- ④ 前台保活：结束/取消后释放 ----------
             runCatching { InferenceForegroundService.stop(app) }
             _isTyping.value = false
         }
     }
 
-    // 如果 PluginManager 还没初始化完（race），用这个兜底 BASE_PROMPT
-    private object PluginManagerFallback {
-        const val BASE_PROMPT = "你是运行在用户手机本地的 AI编程助手。请用简体中文回答。"
-    }
-
-    /**
-     * 【Step 4/5 关键：退出聊天页 / 回桌面 时取消推理 + 释放前台服务】
-     * - 调 LlmEngine.cancel()（底层 LlamaJniEngine.nativeChatCancel → C++ cancel=true → while 循环跳出）
-     * - 把所有 pending 消息的 pending 位清掉（避免下次进来看见"打字中"永久挂在那里）
-     * - 立即释放前台保活（START_STICKY 重启的 service 也能被 stopService 关掉）
-     */
+    /** 退出聊天页 / 回桌面时取消推理 + 清 pending + 释放前台服务 */
     fun cancelInference() {
         _isTyping.value = false
         viewModelScope.launch(Dispatchers.Default) {
@@ -197,11 +281,19 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { InferenceForegroundService.stop(app) }
         }
-        // 同步清 UI 上的 pending 标记
         val cur = _messages.value
         if (cur.any { it.pending }) {
             _messages.value = cur.map { if (it.pending) it.copy(pending = false) else it }
-            viewModelScope.launch(Dispatchers.IO) { saveAll(_messages.value) }
+            val tid = _currentTopicId.value ?: return@launch
+            viewModelScope.launch(Dispatchers.IO) {
+                _messages.value.filter { it.id != "welcome" }.forEach {
+                    chatDao.upsert(ChatMsgEntity.from(it, tid))
+                }
+            }
         }
+    }
+
+    private companion object {
+        const val BASE_PROMPT = "你是运行在用户手机本地的 AI编程助手。请用简体中文回答。"
     }
 }

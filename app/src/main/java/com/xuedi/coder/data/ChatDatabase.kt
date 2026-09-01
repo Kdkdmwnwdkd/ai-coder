@@ -6,16 +6,19 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 
 /**
- * 聊天消息独立 Database（避免干扰 ModelDatabase v1 / PluginDatabase）。
- *  fallbackToDestructiveMigration：聊天数据丢失=退回"欢迎消息"，无业务副作用。
+ * 聊天 Database：chat_topic + chat_message 两张表。
+ *  v2：新增 ChatTopicEntity；ChatMsgEntity 加 topicId 字段。
+ *  fallbackToDestructiveMigration：旧 v1 库（只有 chat_message 没字段）→ 重启库，
+ *  旧消息会丢失（多话题功能上线时一次性的，用户已验证 v1 OK 可接受）。
  */
 @Database(
-    entities = [ChatMsgEntity::class],
-    version = 1,
+    entities = [ChatMsgEntity::class, ChatTopicEntity::class],
+    version = 2,
     exportSchema = true
 )
 abstract class ChatDatabase : RoomDatabase() {
     abstract fun dao(): ChatDao
+    abstract fun topicDao(): ChatTopicDao
 
     companion object {
         @Volatile

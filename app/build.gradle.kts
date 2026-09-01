@@ -140,8 +140,13 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             resValue("string", "app_name", "AI编程助手")
-            signingConfig = signingConfigs.runCatching { getByName("release") }
-                .getOrNull() ?: signingConfigs.getByName("fixedDebug")
+            // release 优先用 release signingConfig（需要 storeFile 已配）；
+            // 没配正式 release keystore 时 fallback 到 fixedDebug（能出包能覆盖安装）。
+            // 注意：signingConfigs.create("release") 总会创建对象（哪怕属性没设全），
+            // 所以不能靠 getByName 抛异常来 fallback——必须显式判断 storeFile != null。
+            val releaseCfg = signingConfigs.runCatching { getByName("release") }.getOrNull()
+            signingConfig = if (releaseCfg?.storeFile != null) releaseCfg
+                            else signingConfigs.getByName("fixedDebug")
         }
     }
 

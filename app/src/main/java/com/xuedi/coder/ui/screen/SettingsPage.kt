@@ -192,7 +192,18 @@ fun SettingsPage(
     Column(
         Modifier
             .fillMaxSize()
-            .padding(horizontal = 14.dp, vertical = 10.dp)
+            // 🔴🔴 必加：整个页面内容超过屏幕高度时，允许手势上下滚查看。
+            //  上一版漏掉了 verticalScroll → ModelsCard 之后的「🔍 推理诊断」分组、
+            //  Build 版本信息，永远在屏幕外（静默 clip），并且根本滚不到，
+            //  用户就以为"没有诊断的按键"。这是 UI 层最大的一个遗漏。
+            .verticalScroll(rememberScrollState())
+            // 左右 14dp、顶 10dp、底 34dp：底部多留 24dp 避免最后一项紧贴 TabBar 上沿看不清
+            .padding(
+                start = 14.dp,
+                end = 14.dp,
+                top = 10.dp,
+                bottom = 34.dp
+            )
     ) {
         // --------- 分组 1：外观与主题 ----------
         SectionHeader(title = stringResource(R.string.settings_group_appearance))

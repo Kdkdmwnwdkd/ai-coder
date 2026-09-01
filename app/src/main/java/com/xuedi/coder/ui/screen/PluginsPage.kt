@@ -60,7 +60,16 @@ fun PluginsPage(appScope: CoroutineScope) {
     Column(
         Modifier
             .fillMaxSize()
-            .padding(14.dp)
+            // 🔴 同样补上：场景页 4 个卡片（每个展开开关 + Prompt 说明），
+            //    小屏手机（魅族20 20:9 FHD+）场景 3+4 就容易出屏幕外，没滚动
+            //    直接被底部 TabBar 盖掉，用户看不到第 4 个场景开关。
+            .verticalScroll(rememberScrollState())
+            .padding(
+                start = 14.dp,
+                end = 14.dp,
+                top = 14.dp,
+                bottom = 34.dp
+            )
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text(

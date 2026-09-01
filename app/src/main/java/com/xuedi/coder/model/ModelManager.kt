@@ -107,19 +107,28 @@ class ModelManager(private val ctx: Context) {
      *   3) 如果目标模型和当前已加载的路径相同 → 跳过加载，省 nativeInit 耗时
      *   4) LlamaJniEngine 调用 `loadModel(path, nCtx=defaultNCtx)`
      *
-     * @return Pair(是否成功, 提示文案)
+     * @return Pair(是否成功, 提示文案 —— 含 ctx/错误码诊断信息，Toast 直接给用户看)
      */
     suspend fun switchAndLoadModel(id: String, engine: LlamaEngineHolder): Pair<Boolean, String> = withContext(Dispatchers.IO) {
         val m = dao.getById(id)
             ?: return@withContext false to "❌ 模型不存在，请重新导入"
         dao.selectOnly(id)
 
-        val eng = engine.llama() ?: return@withContext false to "❌ JNI 引擎不可用（使用 Mock）"
+        val eng = engine.llama() ?: return@withContext false to run {
+            val (libOk, libErr) = LlamaJniEngine.libStatus()
+            buildString {
+                append("❌ JNI 引擎不可用\n")
+                append(" · libLoaded=").append(libOk).append("\n")
+                if (libErr != null) append(" · 原因：").append(libErr).append("\n")
+                append("\n建议：重启 APP 或重新安装 v1.2.3+ APK（确认 arm64-v8a 架构）")
+            }
+        }
 
         // 如果新模型路径 = 已加载路径，就不重复 load（防止重复分配内存卡死）
         val prev = lastLoadedPath.get()
         if (prev != null && prev == m.filePath) {
-            return@withContext true to "✅ 已选中：${m.displayName}"
+            val ctx = eng.currentCtx()
+            return@withContext true to "✅ 已选中：${m.displayName}（ctx=$ctx，已驻留内存）"
         }
 
         // 释放旧模型权重 + 取消推理
@@ -131,17 +140,41 @@ class ModelManager(private val ctx: Context) {
         lastLoadedPath.set(null)
         Thread.sleep(100)  // 让系统回收内存页
 
+        // 【诊断】加载前先打日志：文件是否存在、大小、nCtx
+        val f = runCatching { java.io.File(m.filePath) }.getOrNull()
+        val existSize = f?.let { if (it.exists()) "${it.length()/1024/1024}MB" else "文件不存在" } ?: "?"
+        Log.i(TAG, "switchAndLoadModel 开始加载：${m.displayName} 文件状态=$existSize nCtx=$defaultNCtx")
+
         val ok = runCatching {
             eng.loadModel(ggufAbsolutePath = m.filePath, nCtx = defaultNCtx)
         }.getOrDefault(false)
 
+        val ctx = eng.currentCtx()
+        val diagErr = eng.lastLoadError()
         if (ok) {
             lastLoadedPath.set(m.filePath)
-            Log.i(TAG, "switchAndLoadModel ✅ ${m.displayName} 已加载（nCtx=$defaultNCtx）")
-            true to "✅ 已加载：${m.displayName}"
+            Log.i(TAG, "switchAndLoadModel ✅ ${m.displayName} 已加载 ctx=$ctx nCtx=$defaultNCtx")
+            true to buildString {
+                append("✅ 加载成功：").append(m.displayName).append("\n")
+                append(" · ctx=0x").append(ctx.toString(16))
+                append(" · nCtx=").append(defaultNCtx)
+                append(" · ").append(existSize)
+            }
         } else {
-            Log.e(TAG, "switchAndLoadModel ❌ 加载失败：${m.displayName}")
-            false to "❌ 加载失败（GGUF 损坏？文件不存在？请重新导入）"
+            Log.e(TAG, "switchAndLoadModel ❌ 加载失败 ctx=$ctx：${m.displayName} diag=$diagErr")
+            false to buildString {
+                append("❌ 加载失败：").append(m.displayName).append("\n\n")
+                append("【诊断】\n")
+                append(" · ctx=").append(ctx).append("（0=未初始化）\n")
+                append(" · 文件状态：").append(existSize).append("\n")
+                append(" · nCtx=").append(defaultNCtx).append("\n")
+                if (diagErr != null) append(" · 错误：").append(diagErr).append("\n")
+                append("\n【建议（按顺序尝试）】\n")
+                append("1. 关闭所有后台 App（微信/QQ/浏览器等）→ 再点一次「设为当前模型」\n")
+                append("2. 重启手机 → 打开 APP 直接设置，不要先开其他 App\n")
+                append("3. 删除该模型 → 重新下载 GGUF（Qwen2.5-3B-Instruct-Q4_K_M，2.1GB）→ 重新导入\n")
+                append("4. 若仍失败，请截图此 Toast + 手机型号 + RAM 大小，到 GitHub Issue 反馈")
+            }
         }
     }
 

@@ -5,6 +5,7 @@ import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
 /**
@@ -33,33 +34,48 @@ class LlamaJniEngine : LlmEngine {
 
         /** libxuedi-llama.so 是否已经 System.loadLibrary 成功（单进程只需要 load 一次） */
         @Volatile private var libLoaded: Boolean? = null
+        /** lib 加载失败时的错误信息（给 SettingsPage / chatFlow 诊断用） */
+        @Volatile private var libLoadError: String? = null
 
-        /** 尝试加载 .so；返回 true=已加载可用；false=加载失败（后续调用自动 fallback Mock）。 */
+        /** 尝试加载 .so；返回 true=已加载可用；false=加载失败。 */
         fun ensureLibLoaded(): Boolean = synchronized(this) {
             libLoaded?.let { return it }
-            val ok = runCatching {
+            val result = runCatching {
                 System.loadLibrary("xuedi-llama")
                 Log.i(TAG, "System.loadLibrary(\"xuedi-llama\") ✅ 成功（JNI_OnLoad 里已 llama_backend_init）")
                 true
-            }.getOrElse { t ->
-                Log.e(TAG, "System.loadLibrary(\"xuedi-llama\") ❌ 失败：${t.javaClass.simpleName} - ${t.message}")
-                false
             }
+            libLoadError = result.exceptionOrNull()?.let { t ->
+                "${t.javaClass.simpleName}: ${t.message}"
+            }
+            val ok = result.getOrDefault(false)
             libLoaded = ok
             ok
         }
+
+        /** lib 加载状态：`libLoaded`=null 未尝试 / true 成功 / false 失败；失败时附带错误。 */
+        fun libStatus(): Pair<Boolean?, String?> = libLoaded to libLoadError
     }
 
     // ---- ctx handle（由 nativeInit 返回，0 表示未初始化） ----
     @Volatile private var ctx: Long = 0L
 
-    // ---- fallback 引擎（JNI 失败后懒创建）----
+    /** 上一次 loadModel 失败的原因（给 UI Toast / chatFlow 错误文案用） */
+    @Volatile private var lastLoadError: String? = null
+
+    /** 当前 ctx 值（给 SettingsPage Toast 显示用）：0=未加载，非0=已加载 */
+    fun currentCtx(): Long = ctx
+
+    /** 上一次 loadModel 的错误信息（成功时返回 null） */
+    fun lastLoadError(): String? = lastLoadError
+
+    // ---- fallback 引擎（只在 nativeChat 运行期失败时兜底，ctx==0 不再 fallback！）----
     private val fallbackLock = Any()
     @Volatile private var fallback: MockLlmEngine? = null
     private fun mkFallbackIfNeed(): MockLlmEngine = fallback
         ?: synchronized(fallbackLock) {
             fallback ?: run {
-                Log.w(TAG, "🧱 进入 fallback 模式（native 未实现/失败），回答由 MockLlmEngine 出具占位内容")
+                Log.w(TAG, "🧱 进入 fallback 模式（nativeChat 运行期失败），回答由 MockLlmEngine 出具占位内容")
                 MockLlmEngine().also { fallback = it }
             }
         }
@@ -81,24 +97,58 @@ class LlamaJniEngine : LlmEngine {
     // 公开 API：供 SettingsPage / 开发者手动调用预热、设模型
     // =================================================================
 
-    /** 加载 GGUF 模型；返回 false = JNI 未实现 / 文件不存在 / 其他失败。 */
+    /**
+     * 加载 GGUF 模型；返回是否成功。
+     *
+     * 失败时会把原因写入 [lastLoadError]，供 SettingsPage / chatFlow 展示给用户。
+     * 常见失败原因：
+     *   · libxuedi-llama.so 未加载（安装包损坏 / 架构不匹配 arm64-v8a？）
+     *   · nativeInit 返回 ctx=0（GGUF 文件坏 / 内存不足 / native 方法签名对不上）
+     *   · 文件路径为空或文件不存在
+     */
     fun loadModel(ggufAbsolutePath: String, nCtx: Int = 4096, nThreads: Int = 4, nGpuLayers: Int = 0): Boolean {
+        lastLoadError = null
         val libOk = ensureLibLoaded()
-        if (!libOk) return false
-        if (ggufAbsolutePath.isBlank()) return false
+        if (!libOk) {
+            lastLoadError = "JNI lib 加载失败（${libStatus().second ?: "未知"}）。" +
+                "请确认安装包是否完整、是否是 arm64-v8a 架构（魅族20 是 arm64）。"
+            Log.e(TAG, "loadModel ❌ $lastLoadError")
+            return false
+        }
+        if (ggufAbsolutePath.isBlank()) {
+            lastLoadError = "模型文件路径为空"
+            return false
+        }
+        val f = java.io.File(ggufAbsolutePath)
+        if (!f.exists() || !f.isFile) {
+            lastLoadError = "模型文件不存在：$ggufAbsolutePath"
+            Log.e(TAG, "loadModel ❌ $lastLoadError")
+            return false
+        }
+        if (f.length() < 1024 * 1024) {
+            lastLoadError = "模型文件过小（${f.length()} bytes），非有效 GGUF"
+            return false
+        }
         val newCtx = runCatching {
             nativeInit(ggufAbsolutePath, nCtx, nThreads, nGpuLayers)
         }.getOrElse { t ->
-            Log.e(TAG, "nativeInit 异常（JNI 未实现？文件路径？）：${t.javaClass.simpleName} - ${t.message}")
+            val msg = "nativeInit 抛异常：${t.javaClass.simpleName} - ${t.message}"
+            Log.e(TAG, "loadModel ❌ $msg")
+            lastLoadError = msg
             0L
         }
         if (newCtx == 0L) {
-            Log.w(TAG, "loadModel: 加载失败 ctx=0 → fallback Mock 模式。")
+            if (lastLoadError == null) {
+                lastLoadError = "nativeInit 返回 ctx=0（GGUF 可能损坏、内存不足、或 native 方法未实现）。" +
+                    "\n请尝试：① 删除后重新导入 GGUF ② 关闭其他后台 App 释放内存 ③ 重启手机后重试。"
+            }
+            Log.e(TAG, "loadModel ❌ ctx=0，原因：$lastLoadError")
             return false
         }
         if (ctx != 0L) runCatching { nativeRelease(ctx) }
         ctx = newCtx
-        Log.i(TAG, "loadModel ✅ GGUF 已加载 ctx=$ctx；线程=$nThreads ctx=$nCtx")
+        Log.i(TAG, "loadModel ✅ GGUF 已加载 ctx=$ctx；线程=$nThreads nCtx=$nCtx 文件=${f.name} size=${f.length()/1024/1024}MB")
+        lastLoadError = null
         return true
     }
 
@@ -109,10 +159,43 @@ class LlamaJniEngine : LlmEngine {
     override fun chatFlow(system: String, user: String): Flow<ChatChunk> {
         val libOk = ensureLibLoaded()
         val curCtx = ctx
-        // —— 条件不满足 → 直接 fallback Mock ——
-        if (!libOk || curCtx == 0L) {
-            return mkFallbackIfNeed().chatFlow(system, user)
+
+        // ═══════════════════════════════════════════════════════════════
+        // 🔴 诊断修复：模型未就绪时 **不再默默 fallback Mock**，
+        //    直接返回 ChatChunk.Error，让用户看到具体原因。
+        //    这样用户就不会再碰到"不管哪个模型都跳出固定回应"的情况了。
+        // ═══════════════════════════════════════════════════════════════
+        if (!libOk) {
+            val (_, libErr) = libStatus()
+            val msg = buildString {
+                append("❌ JNI 引擎未就绪（libxuedi-llama.so 加载失败）\n")
+                append("原因：").append(libErr ?: "未知").append("\n\n")
+                append("建议：\n")
+                append("1. 确认安装包是否完整（请用新版本 v1.2.3+ 的 APK 重装）\n")
+                append("2. 魅族20 是 arm64-v8a，请确认 APK 架构匹配\n")
+                append("3. 如果问题依旧，请到 GitHub Issue 提交错误日志")
+            }
+            Log.e(TAG, "chatFlow ❌ lib 未加载 → 返回 Error。$libErr")
+            return flowOf(ChatChunk.Error(RuntimeException(libErr ?: "lib load failed"), msg))
         }
+        if (curCtx == 0L) {
+            val diag = lastLoadError
+                ?: "模型尚未加载或加载失败，当前 ctx=0。"
+            val msg = buildString {
+                append("❌ 模型未加载成功，无法开始推理（ctx=0）\n")
+                append("诊断信息：").append(diag).append("\n\n")
+                append("解决办法（请按顺序尝试）：\n")
+                append("1. 打开「设置」→ 找到你的 GGUF 模型 → 点「设为当前模型」\n")
+                append("   · 看 Toast 显示什么错误，常见是『内存不足』或『GGUF 损坏』\n")
+                append("2. 如提示内存不足：关闭所有后台 App（微信、QQ、浏览器等），或重启手机再试\n")
+                append("3. 如提示 GGUF 损坏：在设置里删除该模型 → 重新下载 GGUF → 重新导入\n")
+                append("   · 推荐从 ModelScope 下载 Qwen2.5-3B-Instruct Q4_K_M（2.1GB）\n")
+                append("4. 如果设置里点『设为当前模型』显示『✅ 已加载』但聊天还是报错，请截图反馈")
+            }
+            Log.e(TAG, "chatFlow ❌ ctx=0 → 返回 Error。diag=$diag")
+            return flowOf(ChatChunk.Error(RuntimeException(diag), msg))
+        }
+
         // —— 真推理：callbackFlow 包 C++ 回调 ——
         return callbackFlow {
             // 累积所有 token 拼成 full text：Done(reason) 时需要 final 正文，

@@ -24,8 +24,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 4
-        versionName = "2.1.0-M5-JNI"
+        versionCode = 5
+        versionName = "2.1.1-M5-JNI-diagnose"  // 本次重点：ctx==0 诊断路径 + 不再fallback Mock
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

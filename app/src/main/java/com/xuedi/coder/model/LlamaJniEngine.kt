@@ -115,18 +115,22 @@ class LlamaJniEngine : LlmEngine {
         }
         // —— 真推理：callbackFlow 包 C++ 回调 ——
         return callbackFlow {
+            // 累积所有 token 拼成 full text：Done(reason) 时需要 final 正文，
+            // 因为 C++ 层 onDone 只传 stop reason，不传完整回复（流式已经 onToken 吐过了）
+            val fullSb = StringBuilder()
             // 取消时顺便让 C++ 端跳出 decode 循环（用户在聊天页中途按取消/关闭APP场景）
             val job = launch {
                 val cb = object : TokenCallback {
                     override fun onToken(piece: String) {
+                        fullSb.append(piece)
                         trySend(ChatChunk.Token(piece))
                     }
                     override fun onDone(reason: String) {
-                        trySend(ChatChunk.Done(reason, "stop"))
+                        trySend(ChatChunk.Done(fullSb.toString(), reason))
                         channel.close()
                     }
                     override fun onError(message: String) {
-                        trySend(ChatChunk.Error(message))
+                        trySend(ChatChunk.Error(RuntimeException(message), message))
                         channel.close()
                     }
                 }

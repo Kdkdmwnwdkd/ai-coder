@@ -131,15 +131,15 @@ class LlamaJniEngine : LlmEngine {
             lastLoadError = "模型文件过小（${f.length()} bytes），非有效 GGUF"
             return false
         }
-        // 🔴 闪退修复：loadModel 前先 cancel + release 旧 ctx，
-        //    防止旧 nativeChat 还在跑时新 nativeInit 覆盖 ctx → SIGSEGV 闪退
+        // 🔴 闪退修复 v2：loadModel 前先 cancel 旧 nativeChat + 把 ctx 清 0，
+        //    但**不**马上 nativeRelease——让旧 nativeChat 自然跳出后在 invokeOnCompletion 里释放。
+        //    之前 sleep(50) 太短，如果 nativeChat 正卡 llama_decode 里（CPU 密集），50ms 不够它跳出，
+        //    nativeRelease 就会释放 LlamaState，而 C++ 还在解引用 → SIGSEGV 闪退。
         val oldCtx = ctx
         if (oldCtx != 0L) {
             runCatching { nativeChatCancel(oldCtx) }
-            Thread.sleep(50)  // 给 C++ while 循环时间跳出
-            runCatching { nativeRelease(oldCtx) }
-            ctx = 0L
-            Log.i(TAG, "loadModel: 旧 ctx=$oldCtx 已释放")
+            ctx = 0L  // 先清 ctx，让 invokeOnCompletion 里检测到 ctx != curCtx 后 release 旧 state
+            Log.i(TAG, "loadModel: 旧 ctx=$oldCtx 已 cancel + ctx 置 0（等旧 nativeChat 自然结束后 release）")
         }
         val newCtx = runCatching {
             nativeInit(ggufAbsolutePath, nCtx, nThreads, nGpuLayers)
@@ -283,6 +283,13 @@ class LlamaJniEngine : LlmEngine {
                 // 取消（聊天页用户停/切后台）：C++ 端 decode while 循环判断 cancel flag
                 timeoutJob.cancel()  // 推理结束/取消时停掉首 token 超时定时器
                 runCatching { nativeChatCancel(curCtx) }
+                // 🔴 闪退修复 v2：如果 ctx 已经被 loadModel/release 替换或清零，
+                //    说明旧 nativeChat 对应的 LlamaState 还没被释放（loadModel 里只 cancel + 清 ctx，
+                //    不立即 release）。现在旧 nativeChat 终于结束了，在这里 release 旧 state 防内存泄漏。
+                if (this@LlamaJniEngine.ctx != curCtx) {
+                    runCatching { nativeRelease(curCtx) }
+                    Log.i(TAG, "invokeOnCompletion: 释放已替换的旧 ctx=$curCtx")
+                }
                 cause?.let { Log.w(TAG, "chatFlow cancel：${it.message}") }
             }
             awaitClose {

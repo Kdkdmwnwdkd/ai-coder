@@ -1,10 +1,54 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <!-- 注意：app_name 由 build.gradle.kts 的 resValue 声明（区分 debug/release），不要在 strings.xml 里重复定义 -->
-    <string name="nav_chat">聊天</string>
+
+    <!-- 底部 4 个 Tab 名称（Material3 正式版风格） -->
+    <string name="nav_chat">对话</string>
     <string name="nav_plugins">场景</string>
     <string name="nav_settings">设置</string>
     <string name="nav_about">关于</string>
-    <string name="coder_channel_keep">推理保活</string>
-    <string name="coder_channel_action">动作执行</string>
+
+    <!-- 前台服务通知渠道（用户在系统通知设置里能看到的正式名称） -->
+    <string name="coder_channel_keep">本地推理保活通道</string>
+    <string name="coder_channel_action">动作执行通道</string>
+
+    <!-- SettingsPage 分组标题（正式版：不再写一大段说明文字，分卡片分组） -->
+    <string name="settings_group_appearance">外观与主题</string>
+    <string name="settings_group_models">本地模型管理</string>
+    <string name="settings_group_hint_import">导入 GGUF 模型文件（推荐 Qwen2.5-3B-Instruct Q4_K_M）</string>
+    <string name="settings_bg_pick">选择背景照片</string>
+    <string name="settings_bg_clear">恢复纯白</string>
+    <string name="settings_alpha_title">背景透明度</string>
+
+    <!-- SettingsPage 模型卡片内的状态文案 -->
+    <string name="model_size_mb">%1$d MB</string>
+    <string name="model_valid">GGUF 校验通过</string>
+    <string name="model_invalid">GGUF 校验失败，请删除后重新导入</string>
+    <string name="model_active">已设为当前</string>
+    <string name="model_inactive">设为当前模型</string>
+    <string name="model_reload">重新加载到内存</string>
+    <string name="model_delete">删除</string>
+    <string name="model_loaded_ok">✓ 已加载到内存</string>
+    <string name="model_not_loaded">未加载到内存（请点右侧按钮加载）</string>
+    <string name="model_loaded_err">加载失败：%1$s</string>
+
+    <!-- AboutPage 分组标题（正式版应用风格） -->
+    <string name="about_group_app">应用信息</string>
+    <string name="about_group_guide">使用指南 · 模型下载</string>
+    <string name="about_group_faq">常见问题与排障</string>
+    <string name="about_group_changelog">版本更新</string>
+    <string name="about_group_license">开源组件与致谢</string>
+
+    <!-- AboutPage 行标签 -->
+    <string name="about_app_name">应用名称</string>
+    <string name="about_version">版本号</string>
+    <string name="about_build_type">构建类型</string>
+    <string name="about_package">包名</string>
+    <string name="about_abi">支持架构</string>
+
+    <!-- AboutPage 使用指南正式文案（替换原 SettingsPage 里的大段说明） -->
+    <string name="about_guide_1">1. 在顶部「推荐下载」链接下载 GGUF 模型文件（推荐 Qwen2.5-3B-Instruct Q4_K_M，约 2.1GB，12GB 内存机型流畅运行）。</string>
+    <string name="about_guide_2">2. 打开本应用 → 前往「设置」→「导入 GGUF 模型文件」，选择刚下载的文件。</string>
+    <string name="about_guide_3">3. 导入成功后，在模型列表里点「设为当前模型」，等待 Toast 显示「已加载到内存」。</string>
+    <string name="about_guide_4">4. 返回「对话」页面，开始与本地大模型自由交谈或编写代码（所有推理在您手机本地完成，不上传任何数据）。</string>
 </resources>

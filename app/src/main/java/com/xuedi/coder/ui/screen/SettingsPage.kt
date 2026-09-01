@@ -15,8 +15,12 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CheckCircle
+import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.DeleteOutline
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Source
 import androidx.compose.material.icons.outlined.Verified
 import androidx.compose.material.icons.outlined.WarningAmber
@@ -24,11 +28,14 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
+import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Slider
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -48,17 +55,20 @@ import coil.compose.AsyncImage
 import coil.request.ImageRequest
 import com.xuedi.coder.App
 import com.xuedi.coder.BuildConfig
+import com.xuedi.coder.R
 import com.xuedi.coder.data.ModelEntity
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.ui.res.stringResource
 
 /**
- * 设置页：
- *  · 背景照片 + 透明度 Slider：改全局 UiBackground（实时生效 + DataStore 持久化）
- *  · 本地 GGUF 模型：导入（SAF→filesDir/models+Room+GGUF魔数校验）/ 列表显示 / 设为当前 / 删除
- *  （接入真 JNI llama.cpp 后，会自动加载"当前"模型开始推理。）
+ * 设置页（v1.2.5 正式版 UI）
+ *   · 分两组卡片：【外观与主题】 / 【本地模型管理】
+ *   · 长说明文字、排障步骤、模型下载指南 → 全部迁移到「关于」页（正式应用的设计）
+ *   · 模型行：始终有「加载/重新加载到内存」按钮，Room 里 selected=true 但 ctx=0 也能手动点
+ *   · 模型行下方显示「内存加载状态」条：✓已加载到内存(ctx=0x...) / 未加载 / 加载失败(具体原因)
  */
 @Composable
 fun SettingsPage(
@@ -78,7 +88,20 @@ fun SettingsPage(
     val selectedModel by App.instance.modelManager.observeSelected()
         .collectAsState(initial = null)
 
-    // SAF: 选照片（image/*）→ UI层直接生效
+    // ---- 当前 JNI 引擎内存状态（给模型行的状态条用）----
+    val engineSnapshot = remember(allModels) {
+        val eng = App.instance.llmEngine as? LlamaJniEngine
+        val libSt = eng?.run { LlamaJniEngine.libStatus() }
+        LoadDiagSnapshot(
+            libLoadedOk = libSt?.first,
+            libLoadError = libSt?.second,
+            currentCtx = eng?.currentCtx() ?: 0L,
+            lastLoadError = eng?.lastLoadError(),
+            lastLoadedPath = App.instance.modelManager.lastLoadedPath()
+        )
+    }
+
+    // SAF: 选照片（image/*）→ UI层直接生效 + ThemeStore 持久化
     val pickBgLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -94,7 +117,7 @@ fun SettingsPage(
         }
     }
 
-    // SAF: 选 GGUF → 导入到 filesDir/models + 写 Room
+    // SAF: 选 GGUF → 导入到 filesDir/models + 写 Room + GGUF 魔数校验
     val pickModelLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.OpenDocument()
     ) { uri ->
@@ -113,7 +136,12 @@ fun SettingsPage(
                 val validated = e?.validated == true
                 Toast.makeText(
                     ctx,
-                    "✅ 导入成功：${e?.displayName}（${mb}MB${if (validated) "，GGUF魔数校验通过" else "，未通过GGUF校验"})",
+                    buildString {
+                        append("✅ 导入成功：").append(e?.displayName)
+                        append("（").append(mb).append(" MB")
+                        append(if (validated) "，GGUF 校验通过" else "，⚠️ GGUF 校验未通过")
+                        append("）")
+                    },
                     Toast.LENGTH_LONG
                 ).show()
             } else {
@@ -132,214 +160,357 @@ fun SettingsPage(
     Column(
         Modifier
             .fillMaxSize()
-            .padding(14.dp)
+            .padding(horizontal = 14.dp, vertical = 10.dp)
     ) {
-        Text(
-            "设置 · 外观 / 模型 / 背景",
-            fontSize = 18.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.onSurface
+        // --------- 分组 1：外观与主题 ----------
+        SectionHeader(title = stringResource(R.string.settings_group_appearance))
+        AppearanceCard(
+            currentBg = currentBg,
+            alphaLocal = alphaLocal,
+            onPickBg = { pickBgLauncher.launch(arrayOf("image/*")) },
+            onClearBg = { setBg(null) },
+            onAlphaChanged = { alphaLocal = it },
+            onAlphaCommit = { setAlpha(alphaLocal) }
         )
-        Spacer(Modifier.height(12.dp))
 
-        // ============== 卡片 1：背景照片 + 透明度 ==============
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)
+        Spacer(Modifier.height(18.dp))
+
+        // --------- 分组 2：本地模型管理 ----------
+        SectionHeader(title = stringResource(R.string.settings_group_models))
+        ModelsCard(
+            allModels = allModels,
+            selected = selectedModel,
+            engineSnapshot = engineSnapshot,
+            onPickModel = { pickModelLauncher.launch(arrayOf("*/*")) },
+            onSetActive = { m ->
+                scope.launch {
+                    val app = App.instance
+                    val holder = LlamaEngineHolder { app.llmEngine as? LlamaJniEngine }
+                    val (ok, tip) = app.modelManager.switchAndLoadModel(m.id, holder)
+                    Toast.makeText(
+                        ctx, tip,
+                        if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                    ).show()
+                }
+            },
+            onDelete = { m ->
+                scope.launch {
+                    App.instance.modelManager.deleteModel(m.id)
+                    Toast.makeText(ctx, "已删除：${m.displayName}", Toast.LENGTH_SHORT).show()
+                }
+            }
+        )
+
+        Spacer(Modifier.height(14.dp))
+        Text(
+            "Build ${BuildConfig.BUILD_TYPE} · v${BuildConfig.VERSION_NAME} · " +
+                "support-abi=arm64-v8a",
+            fontSize = 11.sp,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontWeight = FontWeight.Medium
+        )
+    }
+}
+
+// ===================================================================
+// 子组件：分组标题
+// ===================================================================
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        text = title,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(start = 2.dp, bottom = 6.dp, top = 2.dp),
+        letterSpacing = 0.5.sp
+    )
+}
+
+// ===================================================================
+// 子组件：外观卡片（背景预览 + 透明度滑块 + 选照片/恢复纯白按钮）
+// ===================================================================
+@Composable
+private fun AppearanceCard(
+    currentBg: String?,
+    alphaLocal: Float,
+    onPickBg: () -> Unit,
+    onClearBg: () -> Unit,
+    onAlphaChanged: (Float) -> Unit,
+    onAlphaCommit: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+        )
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        stringResource(R.string.settings_bg_pick),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "自定义聊天界面的背景",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+                FilledTonalButton(
+                    onClick = onPickBg,
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Icon(Icons.Outlined.PhotoLibrary, null, Modifier.padding(end = 4.dp))
+                    Text("选择", fontSize = 12.sp)
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+
+            // 预览
+            OutlinedCard(
+                shape = RoundedCornerShape(14.dp),
+                border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                )
+            ) {
+                Row(
+                    Modifier
+                        .fillMaxWidth()
+                        .height(78.dp)
+                        .padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Surface(
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier
+                            .height(62.dp)
+                            .fillMaxWidth(0.42f),
+                        color = MaterialTheme.colorScheme.background
+                    ) {
+                        if (!currentBg.isNullOrBlank()) {
+                            AsyncImage(
+                                model = ImageRequest.Builder(LocalContext.current)
+                                    .data(currentBg)
+                                    .crossfade(true)
+                                    .build(),
+                                contentDescription = null,
+                                contentScale = androidx.compose.ui.layout.ContentScale.Crop,
+                                modifier = Modifier.fillMaxSize(),
+                                alpha = alphaLocal
+                            )
+                        } else {
+                            Column(
+                                Modifier.fillMaxSize(),
+                                verticalArrangement = Arrangement.Center,
+                                horizontalAlignment = Alignment.CenterHorizontally
+                            ) {
+                                Text("（纯白）", fontSize = 12.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            }
+                        }
+                    }
+                    Column(Modifier.padding(start = 12.dp)) {
+                        Text(stringResource(R.string.settings_alpha_title), fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text(
+                            "${(alphaLocal * 100).toInt()}%",
+                            fontSize = 20.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = MaterialTheme.colorScheme.primary
+                        )
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+            Slider(
+                value = alphaLocal,
+                onValueChange = onAlphaChanged,
+                onValueChangeFinished = onAlphaCommit,
+                valueRange = 0f..1f
             )
-        ) {
-            Column(Modifier.padding(14.dp)) {
+            if (currentBg != null) {
+                Spacer(Modifier.height(2.dp))
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                    TextButton(onClick = onClearBg, shape = RoundedCornerShape(10.dp)) {
+                        Text(stringResource(R.string.settings_bg_clear),
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===================================================================
+// 子组件：本地模型管理卡片（导入按钮 + 模型列表 + 每个模型的内存状态条）
+// ===================================================================
+@Composable
+private fun ModelsCard(
+    allModels: List<ModelEntity>,
+    selected: ModelEntity?,
+    engineSnapshot: LoadDiagSnapshot,
+    onPickModel: () -> Unit,
+    onSetActive: (ModelEntity) -> Unit,
+    onDelete: (ModelEntity) -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+        )
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column {
+                    Text(
+                        stringResource(R.string.settings_group_models),
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        stringResource(R.string.settings_group_hint_import),
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onPickModel,
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors()
+            ) {
+                Icon(Icons.Outlined.Source, null, Modifier.padding(end = 5.dp))
+                Text("导入 GGUF 模型", fontSize = 13.sp)
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            if (allModels.isEmpty()) {
+                EmptyModelsHint()
+            } else {
                 Row(
                     Modifier.fillMaxWidth(),
                     horizontalArrangement = Arrangement.SpaceBetween,
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Text("背景照片", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                    OutlinedButton(
-                        onClick = { pickBgLauncher.launch(arrayOf("image/*")) },
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        Icon(Icons.Outlined.PhotoLibrary, null, Modifier.padding(end = 6.dp))
-                        Text("选择照片")
-                    }
-                }
-                Spacer(Modifier.height(8.dp))
-
-                // 小预览图（当前背景）
-                Card(
-                    shape = RoundedCornerShape(14.dp),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
-                    )
-                ) {
-                    Row(
-                        Modifier
-                            .fillMaxWidth()
-                            .height(80.dp)
-                            .padding(8.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Card(
-                            shape = RoundedCornerShape(12.dp),
-                            modifier = Modifier
-                                .height(64.dp)
-                                .fillMaxWidth(0.42f),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.background
-                            )
-                        ) {
-                            if (!currentBg.isNullOrBlank()) {
-                                AsyncImage(
-                                    model = ImageRequest.Builder(LocalContext.current)
-                                        .data(currentBg)
-                                        .crossfade(true)
-                                        .build(),
-                                    contentDescription = null,
-                                    contentScale = androidx.compose.ui.layout.ContentScale.Crop,
-                                    modifier = Modifier.fillMaxSize(),
-                                    alpha = alphaLocal
-                                )
-                            } else {
-                                Column(
-                                    Modifier.fillMaxSize(),
-                                    verticalArrangement = Arrangement.Center,
-                                    horizontalAlignment = Alignment.CenterHorizontally
-                                ) {
-                                    Text("（纯白）", fontSize = 12.sp)
-                                }
-                            }
-                        }
-                        Column(Modifier.padding(start = 12.dp)) {
-                            Text("透明度", fontSize = 13.sp)
-                            Text(
-                                "${(alphaLocal * 100).toInt()}%",
-                                fontSize = 18.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = MaterialTheme.colorScheme.primary
-                            )
-                        }
-                    }
-                }
-
-                Spacer(Modifier.height(10.dp))
-                Slider(
-                    value = alphaLocal,
-                    onValueChange = { alphaLocal = it },
-                    onValueChangeFinished = { setAlpha(alphaLocal) },
-                    valueRange = 0f..1f
-                )
-
-                if (currentBg != null) {
-                    Spacer(Modifier.height(4.dp))
-                    OutlinedButton(
-                        onClick = { setBg(null) },
-                        shape = RoundedCornerShape(14.dp),
-                        modifier = Modifier.align(Alignment.End)
-                    ) {
-                        Text("移除背景（恢复纯白）", fontSize = 12.sp)
-                    }
-                }
-            }
-        }
-
-        Spacer(Modifier.height(14.dp))
-
-        // ============== 卡片 2：本地 GGUF 模型（列表 + 导入按钮） ==============
-        Card(
-            modifier = Modifier.fillMaxWidth(),
-            shape = RoundedCornerShape(20.dp),
-            colors = CardDefaults.cardColors(
-                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)
-            )
-        ) {
-            Column(Modifier.padding(14.dp)) {
-                Text("本地 GGUF 模型", fontSize = 15.sp, fontWeight = FontWeight.SemiBold)
-                Spacer(Modifier.height(5.dp))
-                Text(
-                    "导入后文件存放在私有目录（filesDir/models）并写入 Room。" +
-                        "GGUF 魔数校验通过后可设为「当前加载模型」，后续接入真 JNI llama.cpp 后自动加载推理。",
-                    fontSize = 12.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-                Spacer(Modifier.height(10.dp))
-                Button(
-                    onClick = { pickModelLauncher.launch(arrayOf("*/*")) },
-                    shape = RoundedCornerShape(16.dp),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = MaterialTheme.colorScheme.primary
-                    )
-                ) {
-                    Icon(Icons.Outlined.Source, null, Modifier.padding(end = 6.dp))
-                    Text("选择 GGUF 模型文件导入")
-                }
-
-                Spacer(Modifier.height(12.dp))
-
-                if (allModels.isEmpty()) {
                     Text(
-                        "（还没导入模型。推荐文件：Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf · 约 2GB · 魅族20 流畅可跑）",
+                        "已导入 ${allModels.size} 个",
                         fontSize = 12.sp,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
-                } else {
-                    Text(
-                        "共 ${allModels.size} 个模型 ｜ 当前加载：" +
-                            (selectedModel?.displayName ?: "（未选择）"),
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.primary,
-                        fontWeight = FontWeight.SemiBold
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    allModels.forEachIndexed { idx, m ->
-                        ModelRow(
-                            m = m,
-                            isActive = selectedModel?.id == m.id,
-                            onSetActive = {
-                                scope.launch {
-                                    val app = App.instance
-                                    val holder = LlamaEngineHolder {
-                                        app.llmEngine as? LlamaJniEngine
-                                    }
-                                    val (ok, tip) = app.modelManager.switchAndLoadModel(m.id, holder)
-                                    Toast.makeText(ctx, tip,
-                                        if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
-                                }
-                            },
-                            onDelete = {
-                                scope.launch {
-                                    App.instance.modelManager.deleteModel(m.id)
-                                    Toast.makeText(ctx, "🗑 已删除：${m.displayName}", Toast.LENGTH_SHORT).show()
-                                }
-                            }
+                    if (selected != null) {
+                        Text(
+                            "默认：${selected.displayName}",
+                            fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
                         )
-                        if (idx < allModels.size - 1) Spacer(Modifier.height(6.dp))
                     }
+                }
+                Spacer(Modifier.height(6.dp))
+                allModels.forEachIndexed { idx, m ->
+                    ModelRowFormal(
+                        m = m,
+                        isActive = selected?.id == m.id,
+                        engineSnapshot = engineSnapshot,
+                        onSetActive = { onSetActive(m) },
+                        onDelete = { onDelete(m) }
+                    )
+                    if (idx < allModels.size - 1) Spacer(Modifier.height(8.dp))
                 }
             }
         }
-
-        Spacer(Modifier.height(18.dp))
-        Text(
-            "当前构建：${BuildConfig.BUILD_TYPE} · v${BuildConfig.VERSION_NAME}",
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
     }
 }
 
-// -------------------------
-// 子组件：单个模型条目行
-// -------------------------
 @Composable
-private fun ModelRow(
+private fun EmptyModelsHint() {
+    OutlinedCard(
+        shape = RoundedCornerShape(14.dp),
+        border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+        )
+    ) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Outlined.CloudOff, null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 10.dp)
+            )
+            Column {
+                Text("尚未导入任何模型",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.SemiBold)
+                Text(
+                    "前往「关于」→「使用指南·模型下载」获取推荐 GGUF 的下载地址，" +
+                        "导入后即可开始本地对话推理。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    lineHeight = 16.sp
+                )
+            }
+        }
+    }
+}
+
+// ===================================================================
+// 子组件：单个模型行（正式版）
+//   - 模型信息（名称 + 大小 + 校验状态 + 是否是默认）
+//   - 操作按钮：
+//       · 如果 isActive=false → 「设为当前并加载到内存」（Primary OutlinedButton）
+//       · 如果 isActive=true  → 「🔄 重新加载到内存」（始终可点，解决用户截图里 ctx=0 却不能重加载）
+//       · 删除按钮（红色）
+//   - 下方小状态条：内存加载状态（已加载/未加载/失败原因）
+// ===================================================================
+@Composable
+private fun ModelRowFormal(
     m: ModelEntity,
     isActive: Boolean,
+    engineSnapshot: LoadDiagSnapshot,
     onSetActive: () -> Unit,
     onDelete: () -> Unit
 ) {
     val mb = (m.sizeBytes / 1024 / 1024).toInt()
+    // 这个模型当前在内存中的状态
+    val (ctxVal, loadErr, _) = engineSnapshot
+    val loadedToMemory = ctxVal != 0L
+    val thisIsLastLoaded = engineSnapshot.lastLoadedPath == m.filePath
+    val memStatus = when {
+        isActive && loadedToMemory && thisIsLastLoaded -> MemStatus.LoadedOk(ctxVal)
+        isActive && !loadedToMemory -> {
+            // Room 里已设为当前，但内存里 ctx==0（这就是用户截图里的状态）
+            val specificErr = engineSnapshot.lastLoadError
+            if (specificErr != null) MemStatus.Failed(specificErr)
+            else MemStatus.NotLoaded
+        }
+        isActive -> MemStatus.NotLoaded
+        else -> MemStatus.OtherModel  // 别的模型，不显示具体内存状态
+    }
+
     val containerColor = if (isActive) {
         MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
     } else {
@@ -350,9 +521,10 @@ private fun ModelRow(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(14.dp),
         colors = CardDefaults.cardColors(containerColor = containerColor),
-        border = BorderStroke(if (isActive) 1.5.dp else 0.dp, borderColor)
+        border = BorderStroke(if (isActive) 1.3.dp else 0.dp, borderColor)
     ) {
         Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
+            // 第一行：状态图标 + 模型名 + 校验标识 + 删除按钮
             Row(
                 Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -380,54 +552,202 @@ private fun ModelRow(
                             text = m.displayName,
                             fontSize = 13.sp,
                             fontWeight = FontWeight.SemiBold,
-                            maxLines = 1
+                            maxLines = 1,
+                            color = MaterialTheme.colorScheme.onSurface
                         )
-                        Text(
-                            text = buildString {
-                                append("${mb}MB")
-                                append(" · ")
-                                append(if (m.validated) "✅ GGUF校验通过" else "⚠️ GGUF校验未通过")
-                                if (isActive) append(" · 🔵 当前加载")
-                            },
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            Text(
+                                "${mb} MB",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            SmallTag(
+                                text = if (m.validated) "GGUF OK" else "GGUF 校验失败",
+                                ok = m.validated
+                            )
+                            if (isActive) {
+                                SmallTag(text = stringResource(R.string.model_active), ok = true, primary = true)
+                            }
+                        }
                     }
                 }
+                OutlinedIconButton(
+                    onClick = onDelete,
+                    modifier = Modifier.padding(start = 4.dp)
+                ) {
+                    Icon(
+                        Icons.Outlined.DeleteOutline, null,
+                        tint = Color(0xFFC24141)
+                    )
+                }
             }
+
             Spacer(Modifier.height(6.dp))
+
+            // 第二行：内存加载状态条（只在 isActive 时详细显示，其他模型给一句概览）
+            if (isActive) {
+                MemoryStatusBar(status = memStatus)
+            } else {
+                Text(
+                    "未设为当前，因此未加载到内存",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // 第三行：操作按钮（正式版：「设为当前并加载到内存」 / 「🔄 重新加载到内存」）
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
                 verticalAlignment = Alignment.CenterVertically
             ) {
+                val btnText = if (!isActive) {
+                    stringResource(R.string.model_inactive) + "并加载到内存"
+                } else {
+                    stringResource(R.string.model_reload)
+                }
                 if (!isActive) {
+                    Button(
+                        onClick = onSetActive,
+                        shape = RoundedCornerShape(10.dp),
+                        modifier = Modifier.height(34.dp)
+                    ) {
+                        Text(btnText, fontSize = 12.sp)
+                    }
+                } else {
                     OutlinedButton(
                         onClick = onSetActive,
                         shape = RoundedCornerShape(10.dp),
-                        modifier = Modifier.height(32.dp)
+                        modifier = Modifier.height(34.dp)
                     ) {
-                        Text("设为当前模型", fontSize = 11.sp)
+                        Icon(
+                            Icons.Outlined.Refresh, null,
+                            Modifier.padding(end = 3.dp),
+                            tint = MaterialTheme.colorScheme.primary
+                        )
+                        Text(btnText, fontSize = 12.sp,
+                            color = MaterialTheme.colorScheme.primary)
                     }
-                    Spacer(Modifier.height(0.dp))
-                } else {
-                    TextButton(
-                        onClick = {},
-                        enabled = false,
-                        modifier = Modifier.height(32.dp)
-                    ) {
-                        Text("✓ 已选中", fontSize = 11.sp, color = MaterialTheme.colorScheme.primary)
-                    }
-                }
-                Spacer(Modifier.padding(end = 6.dp))
-                TextButton(
-                    onClick = onDelete,
-                    modifier = Modifier.height(32.dp)
-                ) {
-                    Icon(Icons.Outlined.DeleteOutline, null, Modifier.padding(end = 2.dp))
-                    Text("删除", fontSize = 11.sp, color = Color(0xFFC24141))
                 }
             }
         }
     }
 }
+
+// ===================================================================
+// 小 UI 辅助：SmallTag / MemoryStatusBar
+// ===================================================================
+@Composable
+private fun SmallTag(text: String, ok: Boolean, primary: Boolean = false) {
+    val bg = when {
+        primary -> MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)
+        ok -> Color(0xFF1A8E4F).copy(alpha = 0.12f)
+        else -> Color(0xFFD98600).copy(alpha = 0.12f)
+    }
+    val fg = when {
+        primary -> MaterialTheme.colorScheme.primary
+        ok -> Color(0xFF1A8E4F)
+        else -> Color(0xFFD98600)
+    }
+    Surface(
+        color = bg,
+        shape = RoundedCornerShape(8.dp)
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            fontSize = 10.sp,
+            color = fg,
+            fontWeight = FontWeight.SemiBold
+        )
+    }
+}
+
+private sealed class MemStatus {
+    object NotLoaded : MemStatus()
+    data class LoadedOk(val ctx: Long) : MemStatus()
+    data class Failed(val reason: String) : MemStatus()
+    object OtherModel : MemStatus()
+}
+
+@Composable
+private fun MemoryStatusBar(status: MemStatus) {
+    when (status) {
+        is MemStatus.LoadedOk -> Row(
+            Modifier
+                .fillMaxWidth()
+                .padding(horizontal = 2.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Outlined.CheckCircle, null,
+                tint = Color(0xFF1A8E4F),
+                modifier = Modifier.padding(end = 4.dp)
+            )
+            Text(
+                "✓ 已加载到内存  ·  ctx=0x${status.ctx.toString(16)}",
+                fontSize = 11.sp,
+                color = Color(0xFF1A8E4F),
+                fontWeight = FontWeight.SemiBold
+            )
+        }
+        is MemStatus.NotLoaded -> Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(
+                Icons.Outlined.ErrorOutline, null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(end = 4.dp)
+            )
+            Text(
+                "未加载到内存（请点下方「重新加载到内存」按钮，" +
+                    "或关闭其他后台 App 释放内存后重试）",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                lineHeight = 14.sp
+            )
+        }
+        is MemStatus.Failed -> {
+            Column(Modifier.fillMaxWidth()) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        Icons.Outlined.ErrorOutline, null,
+                        tint = Color(0xFFC24141),
+                        modifier = Modifier.padding(end = 4.dp)
+                    )
+                    Text(
+                        "加载失败（点击下方「重新加载到内存」可重试）：",
+                        fontSize = 11.sp,
+                        color = Color(0xFFC24141),
+                        fontWeight = FontWeight.SemiBold
+                    )
+                }
+                Text(
+                    status.reason.take(220) + if (status.reason.length > 220) "…" else "",
+                    fontSize = 10.sp,
+                    color = Color(0xFFC24141),
+                    lineHeight = 13.sp,
+                    modifier = Modifier.padding(start = 20.dp, top = 2.dp)
+                )
+            }
+        }
+        MemStatus.OtherModel -> { /* 其他模型不显示细节 */ }
+    }
+}
+
+// ===================================================================
+// 当前 JNI 引擎一次快照（Immutable，便于 Compose 重组）
+// ===================================================================
+private data class LoadDiagSnapshot(
+    val libLoadedOk: Boolean?,
+    val libLoadError: String?,
+    val currentCtx: Long,
+    val lastLoadError: String?,
+    val lastLoadedPath: String?
+)

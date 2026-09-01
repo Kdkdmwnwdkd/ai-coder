@@ -24,8 +24,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 6
-        versionName = "2.1.2-M5-JNI-tokenize-fix"  // 核心修复：llama_tokenize 负值语义 abs()
+        versionCode = 7
+        versionName = "2.2.0-M6-Formal-UI"  // v1.2.5：正式版 UI + 预热修复 + 内存状态条
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

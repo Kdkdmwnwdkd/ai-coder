@@ -37,6 +37,9 @@ class ModelManager(private val ctx: Context) {
     /** 最近已成功 load 到引擎的 GGUF 绝对路径。null = 没加载或已 release。 */
     private val lastLoadedPath = AtomicReference<String?>(null)
 
+    /** UI 用（SettingsPage 内存状态条显示）：当前真正已加载到 JNI 引擎内存里的 GGUF 绝对路径 */
+    fun lastLoadedPath(): String? = lastLoadedPath.get()
+
     fun observeAll(): Flow<List<ModelEntity>> = dao.observeAll()
     fun observeSelected(): Flow<ModelEntity?> = dao.observeSelected()
     suspend fun getSelected(): ModelEntity? = dao.getSelected()

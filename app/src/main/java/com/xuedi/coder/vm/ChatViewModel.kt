@@ -284,10 +284,13 @@ class ChatViewModel : ViewModel() {
         val cur = _messages.value
         if (cur.any { it.pending }) {
             _messages.value = cur.map { if (it.pending) it.copy(pending = false) else it }
-            val tid = _currentTopicId.value ?: return@launch
-            viewModelScope.launch(Dispatchers.IO) {
-                _messages.value.filter { it.id != "welcome" }.forEach {
-                    chatDao.upsert(ChatMsgEntity.from(it, tid))
+            // 当前没话题则跳过持久化（外层 fun 不是 launch，不能用 return@launch）
+            val tid = _currentTopicId.value
+            if (tid != null) {
+                viewModelScope.launch(Dispatchers.IO) {
+                    _messages.value.filter { it.id != "welcome" }.forEach {
+                        chatDao.upsert(ChatMsgEntity.from(it, tid))
+                    }
                 }
             }
         }

@@ -1,6 +1,7 @@
 package com.xuedi.coder.ui.screen
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,8 +34,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
-import androidx.compose.material3.NavigationDrawerItemDefaults
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -127,48 +126,58 @@ fun ChatPage(vm: ChatViewModel) {
                 // 话题列表
                 LazyColumn(modifier = Modifier.fillMaxSize()) {
                     items(topics, key = { it.id }) { topic ->
-                        NavigationDrawerItem(
-                            label = {
-                                Column {
-                                    Text(
-                                        topic.title,
-                                        fontSize = 14.sp,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis,
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    )
-                                    Text(
-                                        "消息于 ${formatTime(topic.lastActiveMs)}",
-                                        fontSize = 11.sp,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                                    )
-                                }
-                            },
-                            selected = topic.id == currentTopicId,
-                            onClick = {
-                                vm.switchTopic(topic.id)
-                                scope.launch { drawerState.close() }
-                            },
-                            icon = { Icon(Icons.Outlined.Menu, null) },
-                            trailingIcon = {
-                                Row {
-                                    IconButton(onClick = {
-                                        renamingTopic = topic.id to topic.title
-                                    }) {
-                                        Icon(Icons.Outlined.Edit, "重命名", modifier = Modifier.height(16.dp))
+                        val isCurrent = topic.id == currentTopicId
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 8.dp, vertical = 2.dp)
+                                .background(
+                                    if (isCurrent) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
+                                    else Color.Transparent,
+                                    RoundedCornerShape(12.dp)
+                                )
+                                .padding(8.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            // 左侧：话题标题 + 时间（点文字区域切换话题）
+                            Column(
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .padding(end = 4.dp)
+                                    .clickable {
+                                        vm.switchTopic(topic.id)
+                                        scope.launch { drawerState.close() }
                                     }
-                                    IconButton(onClick = {
-                                        deletingTopic = topic.id to topic.title
-                                    }) {
-                                        Icon(Icons.Outlined.Delete, "删除", modifier = Modifier.height(16.dp))
-                                    }
+                            ) {
+                                Text(
+                                    topic.title,
+                                    fontSize = 14.sp,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal
+                                )
+                                Text(
+                                    "消息于 ${formatTime(topic.lastActiveMs)}",
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            // 右侧：重命名 / 删除按钮（IconButton 自己消费点击，不冒泡到左侧）
+                            Row {
+                                IconButton(onClick = { renamingTopic = topic.id to topic.title }) {
+                                    Icon(Icons.Outlined.Edit, "重命名",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.height(18.dp))
                                 }
-                            },
-                            colors = NavigationDrawerItemDefaults.colors(
-                                selectedContainerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)
-                            ),
-                            modifier = Modifier.padding(horizontal = 8.dp, vertical = 2.dp)
-                        )
+                                IconButton(onClick = { deletingTopic = topic.id to topic.title }) {
+                                    Icon(Icons.Outlined.Delete, "删除",
+                                        tint = MaterialTheme.colorScheme.error,
+                                        modifier = Modifier.height(18.dp))
+                                }
+                            }
+                        }
                     }
                     if (topics.isEmpty()) {
                         item {

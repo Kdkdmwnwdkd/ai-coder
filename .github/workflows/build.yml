@@ -292,3 +292,58 @@ jobs:
           files: "*.apk"
           generate_release_notes: true
           fail_on_unmatched_files: true
+
+  # =====================================================
+  # v1.3.0 补丁：在 GitHub runner（干净网络）里上传 litterbox 拿 72h 国内直链，
+  #   绕开沙箱出口代理对 multipart 上传的破坏。run via workflow_dispatch 或 tag push。
+  #   把直链写进 litterbox-url.txt 作为 Release asset 挂回去，方便脚本/人读取。
+  # =====================================================
+  upload-litterbox:
+    name: 生成 litterbox 72h 国内直链（GitHub runner 上传）
+    if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      TAG: v1.3.0
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: 从 GitHub Release 下载 APK
+        run: |
+          set -euo pipefail
+          mkdir -p apk
+          gh release download "$TAG" -D ./apk --clobber -p '*.apk' || gh release download "$TAG" -D ./apk --clobber
+          APK="$(ls ./apk/*.apk | head -1)"
+          echo "APK=$APK ($(du -h "$APK" | cut -f1))"
+          echo "APK_PATH=$APK" >> "$GITHUB_ENV"
+
+      - name: 上传 litterbox 拿 72h 直链（重试 3 次）
+        run: |
+          set -euo pipefail
+          URL=""
+          for i in 1 2 3; do
+            echo "第 $i 次尝试上传 litterbox..."
+            R="$(curl -sSL --max-time 300 -A 'Mozilla/5.0 (Linux; Android 13)' \
+              -F 'time=72h' -F 'reqtype=fileupload' \
+              -F "fileToUpload=@$APK_PATH" \
+              https://litterbox.catbox.moe/resources/internals/api.php || true)"
+            echo "返回: $R"
+            case "$R" in
+              https://*) URL="$R"; break;;
+            esac
+            sleep 15
+          done
+          if [ -z "$URL" ]; then
+            echo "❌ litterbox 3 次均失败（可能 litterbox 服务端临时故障）"
+            exit 1
+          fi
+          echo "$URL" > litterbox-url.txt
+          echo "## 🚀 litterbox 72h 国内直链" >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL" >> "$GITHUB_STEP_SUMMARY"
+          echo "litterbox URL = $URL"
+
+      - name: 把直链作为 Release asset 挂回（litterbox-url.txt）
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          files: litterbox-url.txt

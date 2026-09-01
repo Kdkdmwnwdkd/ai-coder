@@ -309,10 +309,12 @@ jobs:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: 从 GitHub Release 下载 APK
+        env:
+          REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           mkdir -p apk
-          gh release download "$TAG" -D ./apk --clobber -p '*.apk' || gh release download "$TAG" -D ./apk --clobber
+          gh release download "$TAG" --repo "$REPO" -D ./apk --clobber -p '*.apk' || gh release download "$TAG" --repo "$REPO" -D ./apk --clobber
           APK="$(ls ./apk/*.apk | head -1)"
           echo "APK=$APK ($(du -h "$APK" | cut -f1))"
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"

@@ -77,14 +77,21 @@ class App : Application(), ImageLoaderFactory, CoroutineScope {
         //    - 触发 llmEngine 的 lazy 初始化（System.loadLibrary("xuedi-llama") 发生在此时）
         //    - 如果是 LlamaJniEngine，就顺便把 modelManager 里"上次选中的模型"尝试加载
         //      （骨架期 C++ nativeInit 是 stub → 返回 false 就跳过，不会崩）
+        //    - 【M8 防卡死】用 switchAndLoadModel() 而不是直接 eng.loadModel，
+        //      保证 ① nCtx=2048 低内存档 ② lastLoadedPath 同步更新
         appScope.launch(Dispatchers.Default) {
             val eng = llmEngine
             Log.i(TAG, "LlmEngine 预热完成：implementation=${eng.javaClass.simpleName}")
             if (eng is LlamaJniEngine) {
                 val current = runCatching { modelManager.getSelected() }.getOrNull()
                 if (current != null) {
-                    Log.i(TAG, "尝试预热加载 GGUF：${current.displayName}")
-                    runCatching { eng.loadModel(ggufAbsolutePath = current.filePath) }
+                    Log.i(TAG, "预热加载 GGUF：${current.displayName}（nCtx=${modelManager.defaultNCtx}）")
+                    val holder = com.xuedi.coder.model.LlamaEngineHolder { eng }
+                    runCatching {
+                        // 不经过 selectOnly（已经是 selected=true 了），直接 loadModel 就行
+                        // 用 holder 是为了后续 release 时也能复用 lastLoadedPath
+                        eng.loadModel(current.filePath, nCtx = modelManager.defaultNCtx)
+                    }
                 } else {
                     Log.i(TAG, "尚无选中的 GGUF 模型（Settings 里先导入并设为当前）")
                 }

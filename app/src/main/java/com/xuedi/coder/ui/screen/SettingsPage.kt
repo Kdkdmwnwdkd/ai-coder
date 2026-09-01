@@ -49,6 +49,8 @@ import coil.request.ImageRequest
 import com.xuedi.coder.App
 import com.xuedi.coder.BuildConfig
 import com.xuedi.coder.data.ModelEntity
+import com.xuedi.coder.model.LlamaEngineHolder
+import com.xuedi.coder.model.LlamaJniEngine
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 
@@ -296,8 +298,13 @@ fun SettingsPage(
                             isActive = selectedModel?.id == m.id,
                             onSetActive = {
                                 scope.launch {
-                                    App.instance.modelManager.selectModel(m.id)
-                                    Toast.makeText(ctx, "✅ 已切换：${m.displayName}", Toast.LENGTH_SHORT).show()
+                                    val app = App.instance
+                                    val holder = LlamaEngineHolder {
+                                        app.llmEngine as? LlamaJniEngine
+                                    }
+                                    val (ok, tip) = app.modelManager.switchAndLoadModel(m.id, holder)
+                                    Toast.makeText(ctx, tip,
+                                        if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG).show()
                                 }
                             },
                             onDelete = {

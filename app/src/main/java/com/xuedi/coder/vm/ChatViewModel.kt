@@ -62,19 +62,32 @@ class ChatViewModel : ViewModel() {
     private val _isTyping = MutableStateFlow(false)
     val isTyping: StateFlow<Boolean> = _isTyping.asStateFlow()
 
-    // ---------- init: 订阅 topics 列表 + 自动选最近一个话题 ----------
+    // ---------- init: 订阅 topics 列表 + 冷启动自动选最近一个话题 ----------
     init {
         viewModelScope.launch(Dispatchers.IO) {
             topicDao.observeAll().collectLatest { list ->
                 _topics.value = list
-                // 启动时如果没选 topic，自动选最近活跃的那个
+                // 🔴 防卡死关键：只有启动时没选话题（冷启动/删光后为空），才自动选最近活跃的那个。
+                // 平时 sendMessage 里 touchActive(topicId) 会让 observeAll emit 新列表，如果这里
+                // 也调 switchTopicInternal → 从 DB 重新 getByTopic → 把内存里正在流式 token 的
+                // _messages 覆盖成 DB 里的旧值（流式每 64B 才 flush）→ UI 来回抖动/死循环/ANR！
+                // 所以正常 observeAll 更新时绝不碰 _messages。
                 if (_currentTopicId.value == null && list.isNotEmpty()) {
                     switchTopicInternal(list.first().id)
                 }
-                // 当前 topic 被删了 → 清空 messages，UI 显示空状态
+                // 唯一例外：当前 topic 被删了 → 必须切到下一个或新建空话题
                 if (_currentTopicId.value != null && list.none { it.id == _currentTopicId.value }) {
+                    val currentDeletedId = _currentTopicId.value
                     _currentTopicId.value = null
                     _messages.value = emptyList()
+                    // 删完空 → 自动建一个新空话题
+                    if (list.isEmpty()) {
+                        createTopic(firstUserMsg = null)
+                    } else {
+                        switchTopicInternal(list.first().id)
+                    }
+                    // 未使用变量，抑制警告
+                    currentDeletedId ?: Unit
                 }
             }
         }

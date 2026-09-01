@@ -50,6 +50,63 @@
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "LlamaJNI", __VA_ARGS__)
 #define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "LlamaJNI", __VA_ARGS__)
 
+// 🔴 诊断计时工具（毫秒）
+#include <chrono>
+#include <cinttypes>
+static inline int64_t now_ms() {
+    using namespace std::chrono;
+    return (int64_t)duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count();
+}
+
+// 🔴🔴 崩溃兜底：捕获 SIGSEGV / SIGBUS / SIGABRT（JNI llama_decode 中野指针、OOM mmap 失败都会触发），
+//    不让 APP 直接闪退，而是写到 crash_msg_buf，让 nativeChat 外层检查后 cb_error 给 Java。
+#include <signal.h>
+#include <ucontext.h>
+static thread_local char  g_crash_msg[1024];
+static thread_local bool  g_crashed = false;
+static struct sigaction g_old_segv, g_old_sigbus, g_old_sigabrt;
+static void crash_handler(int sig, siginfo_t * info, void * /*ctx*/) {
+    if (g_crashed) return;
+    g_crashed = true;
+    snprintf(g_crash_msg, sizeof(g_crash_msg),
+        "Native signal SIG%s: code=%d addr=%p (llama_decode 访问越界/OOM mmap 失败)",
+        sig == SIGSEGV ? "SEGV" : sig == SIGBUS ? "BUS" : "ABRT",
+        info ? info->si_code : -1,
+        info ? info->si_addr : nullptr);
+    LOGE("CRASH CAUGHT: %s", g_crash_msg);
+    // 恢复默认 handler 以防崩溃递归；写了 msg 后返回
+    signal(sig, SIG_DFL);
+}
+static inline void crash_guard_push() {
+    g_crashed = false;
+    g_crash_msg[0] = '\0';
+    struct sigaction sa{};
+    sa.sa_sigaction = crash_handler;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = SA_SIGINFO;
+    sigaction(SIGSEGV, &sa, &g_old_segv);
+    sigaction(SIGBUS,  &sa, &g_old_sigbus);
+    sigaction(SIGABRT, &sa, &g_old_sigabrt);
+}
+static inline void crash_guard_pop() {
+    sigaction(SIGSEGV, &g_old_segv, nullptr);
+    sigaction(SIGBUS,  &g_old_sigbus, nullptr);
+    sigaction(SIGABRT, &g_old_sigabrt, nullptr);
+}
+#define CRASH_CHECK(env_, cb_) do { \
+    if (g_crashed) { \
+        LOGE("CRASH_CHECK 命中 → 回 cb_error: %s", g_crash_msg); \
+        cb_error((env_), (cb_), std::string("💥 ") + g_crash_msg + \
+            "\n这是 Native 层内存崩溃。诊断：\n" \
+            "① 如果出现在 prefill 阶段 = 激活层内存峰值 OOM → 关场景开关、关后台、重启手机\n" \
+            "② 如果出现在 generate 阶段 = kv_cache/激活层越界 → 缩短提问或增大 nCtx\n"); \
+        if (sampler) { llama_sampler_free(sampler); sampler = nullptr; } \
+        (env_)->DeleteGlobalRef(cb_); \
+        crash_guard_pop(); \
+        return; \
+    } \
+} while(0)
+
 // --------------------------------------------------------------------
 // 全局：JavaVM + callback method IDs（JNI_OnLoad 缓存，避免每次反射 FindClass）
 // --------------------------------------------------------------------
@@ -275,12 +332,20 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
 
     auto * state = reinterpret_cast<LlamaState*>(jstate);
     if (!state || !state->ctx || !state->model || !state->vocab) {
-        LOGE("nativeChat: state null / 未初始化");
+        LOGE("nativeChat: state null / 未初始化 (state=%p ctx=%p model=%p vocab=%p)",
+             (void*)state,
+             state ? (void*)state->ctx : nullptr,
+             state ? (void*)state->model : nullptr,
+             state ? (void*)state->vocab : nullptr);
         JNIEnv * env = ensure_env();
         cb_error(env, jcallback, "JNI 推理状态异常：模型未加载。请到设置页重新导入并设为当前。");
         return;
     }
     state->cancel.store(false);
+    const int64_t t0 = now_ms();
+    LOGI("nativeChat: ⭐ ENTER state=%p ctx=%p n_ctx=%d n_batch=%d cancel=%d",
+         (void*)state, (void*)state->ctx, (int)state->n_ctx, (int)state->n_batch,
+         (int)state->cancel.load());
 
     JNIEnv * env = ensure_env();
     if (!env) {
@@ -289,6 +354,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     }
     jobject callback = env->NewGlobalRef(jcallback);
     if (!callback) { LOGE("nativeChat: NewGlobalRef(callback) FAIL"); return; }
+
+    // 🔴 崩溃兜底：注册 SIGSEGV/SIGBUS/SIGABRT handler
+    crash_guard_push();
 
     // -------- 1) 取 system/user 字符串，拼 ChatML（Qwen 2.5 默认 chatml template） --------
     auto j2s = [&](jstring jstr) -> std::string {
@@ -301,7 +369,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     std::string system = j2s(jsystem);
     std::string user   = j2s(juser);
     if (system.empty()) system = "You are a helpful coding assistant. You write concise, correct code.";
-    if (user.empty())   { cb_error(env, callback, "用户输入为空"); env->DeleteGlobalRef(callback); return; }
+    if (user.empty())   { cb_error(env, callback, "用户输入为空"); env->DeleteGlobalRef(callback); crash_guard_pop(); return; }
 
     std::string prompt;
     prompt.reserve(system.size() + user.size() + 160);
@@ -310,6 +378,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     prompt += "<|im_start|>assistant\n";
 
     LOGD("nativeChat: prompt 长度=%zu bytes, system=%d user=%d", prompt.size(), (int)system.size(), (int)user.size());
+    LOGI("nativeChat: 📝 prompt 前 160 bytes: %.160s", prompt.c_str());
 
     // -------- 2) tokenize --------
     //    llama_tokenize 的官方语义：
@@ -323,15 +392,26 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     //        若此时仍是负值才是真错误（buffer 不够、GGUF 缺 vocab 等）。
     std::vector<llama_token> tokens;
     {
-        int32_t add_spec   = 1;   // add_special=true：BOS 开头加一个
-        int32_t parse_spec = 0;   // parse_special=false：避免 ChatML special 名查 control token 失败
+        // 🔴🔴 关键修复（BOS/ChatML 错位）：
+        //   Qwen2.5 用 ChatML 模板 (<|im_start|>system/user/assistant ... <|im_end|>)，
+        //   整个 prompt **字符串里已经包含了完整控制符**，所以：
+        //   add_spec=0  ：不要再额外加 BOS！否则 token[0]=bos_id token[1]=<|im_start|>_id，
+        //                 模型会把 bos_id 当成"用户的一句话"，导致 generate 阶段
+        //                 sample 出来的第一个 token 就是 EOS 或乱码 → 用户看到"一个字蹦不出来"
+        //   parse_spec=1：让 tokenizer 把 <|im_start|> <|im_end|> 解析成它们的 special token ID，
+        //                 而不是拆成一串 < | i m _ s t a r t | > 普通字符 token。
+        //                 这是魅族20 vs 荣耀平板8G「同一模型不同表现」的核心原因之一：
+        //                 不同设备/不同加载时序下，tokenizer 对 unknown special 的 fallback 策略略有不同，
+        //                 有的能瞎蒙跑起来出几个字，有的直接崩 llama_decode。
+        int32_t add_spec   = 0;
+        int32_t parse_spec = 1;
         // 第一步：估算真实 token 数（无论正负，最后 abs）
         int32_t need = llama_tokenize(state->vocab, prompt.c_str(), (int32_t)prompt.size(),
                                       nullptr, 0, add_spec, parse_spec);
         if (need == 0) {
             // 极少场景：空串（理论上前面判过）、或 tokenizer 没初始化
             cb_error(env, callback, "tokenizer 返回 0 个 token（GGUF 缺 vocab 数据？）");
-            env->DeleteGlobalRef(callback);
+            env->DeleteGlobalRef(callback); crash_guard_pop();
             return;
         }
         // 🔴 关键修复：need 为负 = 该版本 llama_tokenize 用负值表示需求大小（绝对值是真实个数），
@@ -364,7 +444,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
                     "，已尝试 2 次分配 buffer。\n" +
                     "可能原因：① GGUF 缺 tokenizer 元数据 ② 文件损坏 ③ token 数超 n_ctx-16。\n" +
                     "建议：先尝试用更短的问题（100 字内）验证；若仍失败请删模型重下。");
-                env->DeleteGlobalRef(callback);
+                env->DeleteGlobalRef(callback); crash_guard_pop();
                 return;
             }
         }
@@ -372,16 +452,70 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         if (real > (int32_t)tokens.size()) real = (int32_t)tokens.size();
         tokens.resize((size_t)real);
     }
-    const int32_t n_prompt = (int32_t)tokens.size();
-    LOGI("nativeChat: prompt tokenized n_prompt=%d / n_ctx=%d", (int)n_prompt, (int)state->n_ctx);
+    int32_t n_prompt = (int32_t)tokens.size();   // 非 const：BOS 修正时会 -= 1
+    // -------- 先拿 eos/bos（做 BOS 对齐校验要用，必须在 sampler/prefill 之前） --------
+    const llama_token eos = llama_vocab_eos(state->vocab);
+    const llama_token bos = llama_vocab_bos(state->vocab);
+    LOGI("nativeChat: 📌 vocab eos=%d bos=%d, tokenize DONE n_prompt=%d / n_ctx=%d (tokenize 耗时 %" PRId64 " ms)",
+         (int)eos, (int)bos, (int)n_prompt, (int)state->n_ctx, now_ms() - t0);
+
+    // 🔴🔴 BOS 对齐诊断 + 修复（必须在 sampler 创建 / n_ctx 检查 / sampler_accept 之前！）
+    //   场景：add_special 某些 GGUF 版本/参数组合下即使传 0 也会塞 BOS，
+    //        或者之前 add_spec=1 的遗留缓存导致 token[0] = bos_id。
+    //   后果：token[0]=bos_id(BOS), token[1]=<|im_start|>_id → 模型把 BOS 当成对话的"第一个用户说话"，
+    //         generate 阶段一上来就 sample EOS → 用户看到 0 token 输出（"一个字蹦不出来"）。
+    if (n_prompt > 0 && tokens[0] == bos) {
+        LOGW("nativeChat: ⚠️ BOS-MISMATCH token[0]=%d == bos_id=%d！开头多了一个 BOS，"
+             "ChatML 应该直接从 <|im_start|> 起头。正在剥掉 token[0]…",
+             (int)tokens[0], (int)bos);
+        for (int i = 1; i < n_prompt; i++) tokens[i - 1] = tokens[i];
+        tokens.pop_back();
+        n_prompt = (int32_t)tokens.size();   // ← 必须同步 n_prompt！否则 prefill 越界
+        LOGI("nativeChat: ✂️  剥掉 BOS OK. n_prompt 已修正=%d, 新 token[0]=%d",
+             (int)n_prompt, n_prompt > 0 ? (int)tokens[0] : -1);
+    }
+    // 完整性校验 1：token[0] 绝不能是 EOS（否则 generate 0 token 结束）
+    if (!tokens.empty() && tokens[0] == eos) {
+        LOGE("nativeChat: ❌ FATAL token[0]==eos=%d —— generate 阶段 0 token 结束。"
+             " ChatML 模板 + tokenize 参数完全错位。", (int)eos);
+        cb_error(env, callback,
+            "tokenize 异常：token[0]==EOS。ChatML 模板不匹配。\n"
+            "建议：① 设置页点「诊断」按钮抓日志 ② 删模型重新导入 GGUF");
+        env->DeleteGlobalRef(callback);
+        crash_guard_pop();
+        return;
+    }
+
+    // 🔴 诊断：打印前 16 个 token id + 前 8 个 piece（BOS 修正之后）
+    {
+        int32_t show_n = std::min(n_prompt, 16);
+        std::string first_pcs;
+        char pcbuf[64];
+        for (int i = 0; i < std::min(show_n, 8); i++) {
+            int32_t n = llama_token_to_piece(state->vocab, tokens[i], pcbuf, sizeof(pcbuf), 0, 0);
+            if (n > 0) first_pcs.append(pcbuf, (size_t)n);
+            else if (n < 0) {
+                std::vector<char> big((size_t)(-n) + 2);
+                llama_token_to_piece(state->vocab, tokens[i], big.data(), (int)big.size(), 0, 0);
+                first_pcs.append(big.data());
+            }
+        }
+        LOGI("nativeChat: 📊 first %d tokens (AFTER BOS-fix): ids=[%d,%d,%d,%d,%d,%d,%d,%d...]; piece_前8=[%s]",
+             show_n,
+             n_prompt>0?tokens[0]:-1, n_prompt>1?tokens[1]:-1, n_prompt>2?tokens[2]:-1, n_prompt>3?tokens[3]:-1,
+             n_prompt>4?tokens[4]:-1, n_prompt>5?tokens[5]:-1, n_prompt>6?tokens[6]:-1, n_prompt>7?tokens[7]:-1,
+             first_pcs.c_str());
+        (void)show_n;
+    }
     if (n_prompt >= state->n_ctx - 16) {
         cb_error(env, callback, "输入过长（token 数=" + std::to_string(n_prompt) +
                                 " 已接近上下文上限 " + std::to_string(state->n_ctx) + "）。请缩短提问或提高 nCtx。");
         env->DeleteGlobalRef(callback);
+        crash_guard_pop();
         return;
     }
 
-    // -------- 3) sampling chain：和 main.cpp 默认一致（top_k/top_p/temp/dist；简化不接 penalties） --------
+    // -------- 3) sampling chain（top_k/top_p/temp/dist） + sampler_accept 修正后的 tokens --------
     llama_sampler * sampler = nullptr;
     {
         auto sp = llama_sampler_chain_default_params();
@@ -391,32 +525,42 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
         llama_sampler_chain_add(sampler, llama_sampler_init_dist((uint32_t)::time(nullptr) ^ 0xC0FFEEu));
     }
-    // 接收 prompt 本身到 penalty 上下文（虽然我们没开 penalty chain，但 accept 对 sampler chain 结构本身没副作用）
     for (llama_token t : tokens) llama_sampler_accept(sampler, t);
 
     // -------- 4) 预填充 prompt（按 n_batch 切片） --------
-    const llama_token eos = llama_vocab_eos(state->vocab);
     int32_t n_consumed = 0;
     {
+        const int64_t t_pre0 = now_ms();
+        int batch_idx = 0;
         bool prefillaunch = true;
         while (n_consumed < n_prompt) {
             if (state->cancel.load()) {
                 cb_done(env, callback, "cancel");
                 if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
                 env->DeleteGlobalRef(callback);
+                crash_guard_pop();
                 return;
             }
             int32_t n_eval = std::min<int32_t>(n_prompt - n_consumed, state->n_batch);
+            int64_t tb0 = now_ms();
             auto batch = llama_batch_get_one(&tokens[n_consumed], n_eval);
             int decode_rc = llama_decode(state->ctx, batch);
-            llama_batch_free(batch);   // 必须释放（batch 内部分配了 seq_id 等指针数组，survey 注释明确说）
+            llama_batch_free(batch);
+            int64_t tb1 = now_ms();
             if (decode_rc != 0) {
-                cb_error(env, callback, "预填充 llama_decode FAIL（OOM？上下文不够？）");
+                LOGE("nativeChat: prefill decode #%d FAIL rc=%d (n_eval=%d, consumed=%d) — 耗时 %" PRId64 " ms",
+                     batch_idx, decode_rc, n_eval, n_consumed, tb1 - tb0);
+                cb_error(env, callback, "预填充 llama_decode FAIL（OOM？上下文不够？）rc=" + std::to_string(decode_rc));
                 if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
                 env->DeleteGlobalRef(callback);
+                crash_guard_pop();
                 return;
             }
+            LOGI("nativeChat: ⏳ prefill batch #%d: n_eval=%d, consumed_now=%d/%d, cost=%" PRId64 "ms (total prefill so far %" PRId64 "ms)",
+                 batch_idx, n_eval, n_consumed + n_eval, n_prompt, tb1 - tb0, tb1 - t_pre0);
+            CRASH_CHECK(env, callback);  // 🔴 每个 batch 后检查有没有 SIGSEGV
             n_consumed += n_eval;
+            batch_idx++;
             // 🔴 预填充进度回调（每完成一批通知一次）——UI 显示百分比，避免一直白转圈圈
             if (g_mid_onPrefill && callback) {
                 env->CallVoidMethod(callback, g_mid_onPrefill, (jint)n_consumed, (jint)n_prompt);
@@ -424,8 +568,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             }
         }
         (void)prefillaunch;
+        LOGI("nativeChat: ✅ prefill DONE. n_consumed=%d n_prompt=%d, total cost=%" PRId64 " ms (enter→now %" PRId64 " ms)",
+             (int)n_consumed, (int)n_prompt, now_ms() - t_pre0, now_ms() - t0);
     }
-    LOGD("nativeChat: prompt eval DONE n_consumed=%d", (int)n_consumed);
 
     // -------- 5) 生成循环：最多 1024 token --------
     const int32_t MAX_TOKENS = 1024;
@@ -433,54 +578,77 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     std::string piece_buf;
     piece_buf.resize(32);  // token_to_piece 通常 4~16 字节，32 覆盖大多数 emoji/中文字符
     llama_token last_id   = 0;
+    const int64_t t_gen0 = now_ms();
 
     while (n_generated < MAX_TOKENS) {
         if (state->cancel.load()) { cb_done(env, callback, "cancel"); break; }
 
+        int64_t ts0 = now_ms();
         // a. sample 最后一个 logit（idx = -1）
         llama_token id = llama_sampler_sample(sampler, state->ctx, /*idx=*/-1);
         llama_sampler_accept(sampler, id);
+        int64_t ts1 = now_ms();
 
         // b. EOS / 到上下文上限 → Done
-        if (id == eos) { cb_done(env, callback, "stop"); break; }
-        if (n_consumed >= state->n_ctx - 2) { cb_done(env, callback, "context_limit"); break; }
+        if (id == eos) {
+            LOGI("nativeChat: 🏁 EOS hit at n_generated=%d (token_id=%d). Gen total %" PRId64 " ms",
+                 (int)n_generated, (int)id, now_ms() - t_gen0);
+            cb_done(env, callback, "stop"); break;
+        }
+        if (n_consumed >= state->n_ctx - 2) {
+            LOGI("nativeChat: 🏁 context_limit at n_generated=%d → DONE", (int)n_generated);
+            cb_done(env, callback, "context_limit"); break;
+        }
 
         // c. token → piece（需要再次调用，得到真实字节数）
-        //    llama_token_to_piece 签名（6 参数）：vocab, id, buf, length, lstrip, special
         int32_t n = llama_token_to_piece(state->vocab, id, piece_buf.data(), (int32_t)piece_buf.size(),
                                           /*lstrip=*/0, /*special=*/false);
         if (n < 0) {
-            // buffer 不够 → 扩大重来（n 是"所需字节数"的负数形式，官方惯例）
             piece_buf.resize((size_t)(-n));
             llama_token_to_piece(state->vocab, id, piece_buf.data(), (int32_t)piece_buf.size(),
                                  /*lstrip=*/0, /*special=*/false);
             n = -n;
         }
+        std::string piece;
         if (n > 0) {
-            cb_token(env, callback, std::string(piece_buf.data(), (size_t)n));
+            piece.assign(piece_buf.data(), (size_t)n);
+            cb_token(env, callback, piece);
         }
-
         // d. decode 下一步（单个 token）
+        int64_t td0 = now_ms();
         last_id = id;
         auto batch = llama_batch_get_one(&id, 1);
         int decode_rc = llama_decode(state->ctx, batch);
         llama_batch_free(batch);
+        int64_t td1 = now_ms();
         if (decode_rc != 0) {
-            cb_error(env, callback, "生成阶段 llama_decode FAIL (token " + std::to_string(n_generated) + ")");
+            LOGE("nativeChat: generate decode FAIL rc=%d at token %d (sample=%" PRId64 "ms, decode=%" PRId64 "ms)",
+                 decode_rc, (int)n_generated, ts1 - ts0, td1 - td0);
+            cb_error(env, callback, "生成阶段 llama_decode FAIL (token " + std::to_string(n_generated) + ") rc=" + std::to_string(decode_rc));
             break;
         }
         n_consumed++;
         n_generated++;
+        if (n_generated % 10 == 0) {
+            int64_t gtotal = now_ms() - t_gen0;
+            double tps = (gtotal > 0) ? (n_generated * 1000.0 / gtotal) : 0.0;
+            LOGI("nativeChat: 🚀 token #%d: id=%d sample=%" PRId64 "ms decode=%" PRId64 "ms | piece_last(16)=%.16s | speed %.1f tok/s | total_gen %" PRId64 "ms",
+                 (int)n_generated, (int)id, ts1 - ts0, td1 - td0, piece.c_str(), tps, gtotal);
+        }
     }
 
     // 正常 MAX_TOKENS 达到（没 EOS 且没 cancel） → 也算 Done
     if (n_generated >= MAX_TOKENS && !state->cancel.load() && last_id != eos) {
+        LOGI("nativeChat: 🏁 MAX_TOKENS 达到 n_generated=%d", (int)n_generated);
         cb_done(env, callback, "length");
     }
+    LOGI("nativeChat: ⭐ EXIT n_generated=%d n_consumed=%d total elapsed=%" PRId64 " ms (enter→now)",
+         (int)n_generated, (int)n_consumed, now_ms() - t0);
     LOGI("nativeChat: DONE. n_generated=%d, last_id=%d, eos=%d",
          (int)n_generated, (int)last_id, (int)eos);
 
     if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
     env->DeleteGlobalRef(callback);
+    crash_guard_pop();
     return;
 }

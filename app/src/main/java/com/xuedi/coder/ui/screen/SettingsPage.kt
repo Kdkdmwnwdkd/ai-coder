@@ -16,11 +16,16 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.PauseCircle
 import androidx.compose.material.icons.outlined.PhotoLibrary
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Source
@@ -43,13 +48,15 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -59,12 +66,17 @@ import com.xuedi.coder.App
 import com.xuedi.coder.BuildConfig
 import com.xuedi.coder.R
 import com.xuedi.coder.data.ModelEntity
+import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
 import com.xuedi.coder.theme.ThemeMode
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.res.stringResource
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /**
  * 设置页（v1.2.5 正式版 UI）
@@ -160,6 +172,13 @@ fun SettingsPage(
 
     var alphaLocal: Float by remember(currentAlpha) { mutableFloatStateOf(currentAlpha) }
 
+    // ---- 诊断运行态 ----
+    val diagLines = remember { mutableStateListOf<String>() }
+    var diagRunning by remember { mutableStateOf(false) }
+    val diagTsFmt = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.CHINA) }
+    fun ts() = diagTsFmt.format(Date())
+    fun addLog(line: String) { diagLines.add("[${ts()}] $line") }
+
     Column(
         Modifier
             .fillMaxSize()
@@ -201,6 +220,40 @@ fun SettingsPage(
                     App.instance.modelManager.deleteModel(m.id)
                     Toast.makeText(ctx, "已删除：${m.displayName}", Toast.LENGTH_SHORT).show()
                 }
+            }
+        )
+
+        Spacer(Modifier.height(18.dp))
+
+        // --------- 分组 3：推理诊断（用户反馈闪退/0 token 时跑这个截图给开发者） ----------
+        SectionHeader(title = "🔍 推理诊断（闪退 / 没输出时点这里）")
+        DiagnosticCard(
+            lines = diagLines,
+            running = diagRunning,
+            onStart = {
+                diagLines.clear()
+                diagRunning = true
+                addLog("══════════════════ 开始诊断 ══════════════════")
+                scope.launch {
+                    runDiagnosticImpl(
+                        addLog = ::addLog,
+                        selectedModel = selectedModel,
+                        engineSnapshot = engineSnapshot,
+                        engine = App.instance.llmEngine as? LlamaJniEngine,
+                        onModelNeedLoad = { m ->
+                            // 需要先把当前模型加载到内存
+                            val app = App.instance
+                            val holder = LlamaEngineHolder { app.llmEngine as? LlamaJniEngine }
+                            app.modelManager.switchAndLoadModel(m.id, holder)
+                        }
+                    )
+                    diagRunning = false
+                    addLog("══════════════════ 诊断结束 ══════════════════")
+                }
+            },
+            onCancel = {
+                (App.instance.llmEngine as? LlamaJniEngine)?.cancel()
+                addLog("用户请求取消当前推理")
             }
         )
 
@@ -829,4 +882,234 @@ private fun RowScope.ThemeModeChip(
             )
         }
     }
+}
+
+// ===================================================================
+// 诊断卡片：按钮 + 实时日志（自动滚动到底）
+// ===================================================================
+@Composable
+private fun DiagnosticCard(
+    lines: List<String>,
+    running: Boolean,
+    onStart: () -> Unit,
+    onCancel: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(18.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+        )
+    ) {
+        Column(Modifier.padding(14.dp)) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Column {
+                    Text(
+                        "最小推理自检",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        "跑一次超短提问（\"你好\"），把每一步写在这里。\n" +
+                            "闪退 / 一个字出不来时，跑完截图发给开发者即可，不用再抓 logcat。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 16.sp
+                    )
+                }
+                if (!running) {
+                    Button(
+                        onClick = onStart,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.height(38.dp)
+                    ) {
+                        Icon(
+                            Icons.Outlined.BugReport, null,
+                            Modifier.padding(end = 4.dp)
+                        )
+                        Text("开始诊断", fontSize = 12.sp)
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = onCancel,
+                        shape = RoundedCornerShape(12.dp),
+                        modifier = Modifier.height(38.dp)
+                    ) {
+                        Icon(
+                            Icons.Outlined.PauseCircle, null,
+                            Modifier.padding(end = 4.dp),
+                            tint = Color(0xFFC24141)
+                        )
+                        Text("取消", fontSize = 12.sp, color = Color(0xFFC24141))
+                    }
+                }
+            }
+
+            Spacer(Modifier.height(10.dp))
+
+            // 日志输出区：等宽字体 + 可滚动 + 深色背景
+            OutlinedCard(
+                shape = RoundedCornerShape(12.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = Color(0xFF0E1013)  // 近黑板子
+                ),
+                border = BorderStroke(0.6.dp, MaterialTheme.colorScheme.outlineVariant),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .defaultMinSize(minHeight = 220.dp)
+            ) {
+                val scroll = rememberScrollState()
+                // 有新行时自动滚到底（用 effect 形式更稳）
+                androidx.compose.runtime.LaunchedEffect(lines.size) {
+                    if (lines.isNotEmpty()) runCatching { scroll.animateScrollTo(scroll.maxValue) }
+                }
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(scroll)
+                        .padding(10.dp)
+                ) {
+                    if (lines.isEmpty()) {
+                        Text(
+                            "（还没跑过。点右上角「开始诊断」。\n" +
+                                "结果会按时间顺序从上到下显示。）",
+                            fontSize = 11.sp,
+                            color = Color(0xFF7A7D82),
+                            fontFamily = FontFamily.Monospace,
+                            lineHeight = 15.sp
+                        )
+                    } else {
+                        lines.forEach { line ->
+                            Text(
+                                text = line,
+                                fontSize = 10.5.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = when {
+                                    "❌" in line -> Color(0xFFFF9A9A)
+                                    "✅" in line || "✓" in line -> Color(0xFF92E3A9)
+                                    "⚠️" in line || "WARN" in line -> Color(0xFFFFD08A)
+                                    "══════" in line -> Color(0xFF6FA8D8)
+                                    else -> Color(0xFFD7D9DD)
+                                },
+                                lineHeight = 14.sp
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+// ===================================================================
+// 诊断逻辑实现（挂起函数，在协程里跑；按步骤 addLog 写 UI 上的日志框）
+// ===================================================================
+private suspend fun runDiagnosticImpl(
+    addLog: (String) -> Unit,
+    selectedModel: ModelEntity?,
+    engineSnapshot: LoadDiagSnapshot,
+    engine: LlamaJniEngine?,
+    onModelNeedLoad: suspend (ModelEntity) -> Pair<Boolean, String>
+) {
+    val tStart = System.currentTimeMillis()
+    // ---- 1. 环境/基础信息 ----
+    val rt = Runtime.getRuntime()
+    val freeMB = rt.freeMemory() / 1024 / 1024
+    val totalMB = rt.totalMemory() / 1024 / 1024
+    val maxMB = rt.maxMemory() / 1024 / 1024
+    addLog("① JVM Heap: free=${freeMB}MB total=${totalMB}MB max=${maxMB}MB")
+    addLog("② lib 状态: loaded=${engineSnapshot.libLoadedOk}  err=${engineSnapshot.libLoadError?:"(无)"}")
+    addLog("③ 内存 ctx: 0x${java.lang.Long.toHexString(engineSnapshot.currentCtx)}  lastLoadErr=${engineSnapshot.lastLoadError?:"(无)"}")
+
+    // ---- 2. 模型存在性 ----
+    if (selectedModel == null) {
+        addLog("❌ 还没有「当前模型」。请先在上面「导入 GGUF 模型」，然后点「设为当前并加载到内存」")
+        return
+    }
+    addLog("④ 当前模型: ${selectedModel.displayName}  size=${selectedModel.sizeBytes/1024/1024}MB  validated=${selectedModel.validated}  path=${selectedModel.filePath}")
+    val f = java.io.File(selectedModel.filePath)
+    if (!f.exists()) {
+        addLog("❌ 模型文件路径不存在：${selectedModel.filePath}。请删除后重新导入。")
+        return
+    }
+
+    // ---- 3. 确保引擎/模型已加载 ----
+    var ctxVal = engine?.currentCtx() ?: 0L
+    if (ctxVal == 0L) {
+        addLog("⚠️ ctx==0，模型还没加载到内存。尝试加载中（可能 10~30 秒，3B Q4_K_M 约 2.1GB）...")
+        val (ok, tip) = onModelNeedLoad(selectedModel)
+        addLog(if (ok) "✅ 加载完成：$tip" else "❌ 加载失败：$tip")
+        ctxVal = engine?.currentCtx() ?: 0L
+        if (ctxVal == 0L) {
+            addLog("❌ 仍 ctx==0，无法开始推理。常见原因：\n" +
+                "  · 内存不足 4GB → 关后台/重启手机后重试\n" +
+                "  · GGUF 文件损坏 → 删了重下\n" +
+                "  · 安装包架构不对 → 必须是 arm64-v8a APK")
+            return
+        }
+    } else {
+        addLog("✅ ctx=0x${java.lang.Long.toHexString(ctxVal)} 已就绪，直接开始推理")
+    }
+
+    if (engine == null) {
+        addLog("❌ App.llmEngine 不是 LlamaJniEngine 实例（可能还在用 Mock）。请重启 App 后重试。")
+        return
+    }
+
+    // ---- 4. 跑一次最小推理：system=超短 + user="你好，请回复" ----
+    addLog("⑤ 开始最小推理：system=\"短答助手\"  user=\"你好，请回复两个字。\"（首 token 最长等待 45 秒）")
+    val sb = StringBuilder()
+    var tokenCount = 0
+    var prefillDone = false
+    val tInfer0 = System.currentTimeMillis()
+    try {
+        engine.chatFlow(
+            system = "你是一个简短的中文助手，只回答一两个字。",
+            user = "你好，请回复两个字。"
+        ).collectLatest { chunk ->
+            when (chunk) {
+                is ChatChunk.PrefillProgress -> {
+                    if (!prefillDone) {
+                        addLog("   预填充中... ${chunk.consumed}/${chunk.total} token (${chunk.percent}%)")
+                        if (chunk.percent >= 100) prefillDone = true
+                    }
+                }
+                is ChatChunk.Token -> {
+                    if (!prefillDone) {
+                        prefillDone = true
+                        val ms = System.currentTimeMillis() - tInfer0
+                        addLog("✅ 首 token 到达！耗时 ${ms}ms。接下来显示持续 token 及累计：")
+                    }
+                    sb.append(chunk.text)
+                    tokenCount++
+                    if (tokenCount <= 12 || tokenCount % 10 == 0) {
+                        addLog("   · token #$tokenCount  累计=\"${sb.toString().take(48)}\"")
+                    }
+                }
+                is ChatChunk.Done -> {
+                    val ms = System.currentTimeMillis() - tInfer0
+                    addLog("✅ 完成。stop=\"${chunk.stopReason}\"  total_tokens=$tokenCount  耗时=${ms}ms  速度=${"%.1f".format(if(ms>0) tokenCount*1000.0/ms else 0.0)} tok/s")
+                    addLog("   最终回复全文=\"${chunk.full.take(200)}\"")
+                    if (tokenCount == 0) {
+                        addLog("❌❌ 0 token 输出！这对应你说的「一个字蹦不出来」。\n" +
+                            "  → 根因：tokenize 开头错位（多余 BOS 或 <|im_start|> 当普通字符拆开），模型一上来就 sample EOS。\n" +
+                            "  → 新版本 v1.3.4 已修 add_special=0 parse_special=1 并加 BOS 自动剥离。若仍 0 token，请把上面的日志 + logcat 中 tag=LlamaJNI 的行一起发给开发者。")
+                    }
+                }
+                is ChatChunk.Error -> {
+                    val ms = System.currentTimeMillis() - tInfer0
+                    addLog("❌ 推理错误 @ ${ms}ms：${chunk.hint.take(400)}")
+                    addLog("   Throwable: ${chunk.t.javaClass.simpleName} - ${chunk.t.message}")
+                }
+            }
+        }
+    } catch (t: Throwable) {
+        addLog("❌ collectLatest 抛异常：${t.javaClass.simpleName} - ${t.message}")
+    }
+    val total = System.currentTimeMillis() - tStart
+    addLog("⑥ 整个诊断流程总耗时：${total}ms")
 }

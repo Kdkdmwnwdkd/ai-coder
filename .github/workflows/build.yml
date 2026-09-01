@@ -294,12 +294,12 @@ jobs:
           fail_on_unmatched_files: true
 
   # =====================================================
-  # v1.3.0 补丁：在 GitHub runner（干净网络）里上传 litterbox 拿 72h 国内直链，
-  #   绕开沙箱出口代理对 multipart 上传的破坏。run via workflow_dispatch 或 tag push。
-  #   把直链写进 litterbox-url.txt 作为 Release asset 挂回去，方便脚本/人读取。
+  # v1.3.0 直链：在 GitHub runner（干净网络）跑，按顺序试 3 个免费图床/网盘，
+  #   任一成功即拿到 URL 挂回 Release asset。GitHub 是出包主力，沙箱只发命令。
+  #   服务优先级：0x0.st（永久）> tmpfiles.org（30天）> litterbox（72h）
   # =====================================================
-  upload-litterbox:
-    name: 生成 litterbox 72h 国内直链（GitHub runner 上传）
+  upload-mirror:
+    name: 生成国内直链（GitHub runner · 多服务 fallback）
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     permissions:
@@ -319,33 +319,50 @@ jobs:
           echo "APK=$APK ($(du -h "$APK" | cut -f1))"
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
-      - name: 上传 litterbox 拿 72h 直链（重试 3 次）
+      - name: 多服务并发上传（0x0.st / tmpfiles / litterbox 任一成功即用）
         run: |
-          set -euo pipefail
+          set -uo pipefail
           URL=""
-          for i in 1 2 3; do
-            echo "第 $i 次尝试上传 litterbox..."
-            R="$(curl -sSL --max-time 300 -A 'Mozilla/5.0 (Linux; Android 13)' \
-              -F 'time=72h' -F 'reqtype=fileupload' \
-              -F "fileToUpload=@$APK_PATH" \
-              https://litterbox.catbox.moe/resources/internals/api.php || true)"
-            echo "返回: $R"
-            case "$R" in
-              https://*) URL="$R"; break;;
-            esac
-            sleep 15
-          done
+          UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
+
+          try_0x0() {
+            echo "→ 尝试 0x0.st（永久直链）..."
+            R="$(curl -sS --max-time 240 -A "$UA" -F "file=@$APK_PATH" https://0x0.st 2>&1 || true)"
+            echo "0x0.st 返回: $R"
+            case "$R" in http*) echo "$R" | head -1;; esac
+          }
+          try_tmpfiles() {
+            echo "→ 尝试 tmpfiles.org（30天）..."
+            R="$(curl -sS --max-time 240 -A "$UA" -F "file=@$APK_PATH" https://tmpfiles.org/api/v1/upload 2>&1 || true)"
+            echo "tmpfiles 返回: $R"
+            U="$(echo "$R" | grep -oE 'https://tmpfiles\.org/[^"]+' | head -1)"
+            [ -n "$U" ] && echo "${U/dl//dl}"
+          }
+          try_litterbox() {
+            echo "→ 尝试 litterbox（72h）..."
+            for i in 1 2 3; do
+              R="$(curl -sSL --max-time 240 -A "$UA" -F 'time=72h' -F 'reqtype=fileupload' -F "fileToUpload=@$APK_PATH" https://litterbox.catbox.moe/resources/internals/api.php 2>&1 || true)"
+              case "$R" in https://*) echo "$R"; return 0;; esac
+              sleep 10
+            done
+            echo "litterbox 3 次都失败"
+          }
+
+          URL="$(try_0x0 || true)"
+          [ -z "$URL" ] && URL="$(try_tmpfiles || true)"
+          [ -z "$URL" ] && URL="$(try_litterbox || true)"
+
           if [ -z "$URL" ]; then
-            echo "❌ litterbox 3 次均失败（可能 litterbox 服务端临时故障）"
+            echo "❌ 3 个服务都失败"
             exit 1
           fi
-          echo "$URL" > litterbox-url.txt
-          echo "## 🚀 litterbox 72h 国内直链" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' "$URL" > mirror-url.txt
+          echo "✅ 拿到国内直链: $URL"
+          echo "## 🚀 国内直链（GitHub runner 上传）" >> "$GITHUB_STEP_SUMMARY"
           echo "$URL" >> "$GITHUB_STEP_SUMMARY"
-          echo "litterbox URL = $URL"
 
-      - name: 把直链作为 Release asset 挂回（litterbox-url.txt）
+      - name: 把直链作为 Release asset 挂回
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.TAG }}
-          files: litterbox-url.txt
+          files: mirror-url.txt

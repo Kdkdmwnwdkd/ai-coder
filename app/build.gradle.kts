@@ -225,13 +225,14 @@ tasks.register("ensureLlamaCppSource") {
     doLast {
         if (marker.exists() && marker.length() > 40_000) return@doLast
         cppDir.mkdirs()
-        // NOTE: b4812 是 commit short hash（不是 tag），URL 不带 /refs/tags/
-        //      走 GitHub archive 通用路由：https://github.com/<user>/<repo>/archive/<short_hash>.tar.gz
-        val TAG = "b4812"
+        // NOTE: 用 llama.cpp 官方真实存在的 release tag（b4835），而不是 short hash。
+        //      同时直接写最终组织 ggml-org（ggerganov/llama.cpp 已迁移到 ggml-org/llama.cpp，
+        //      archive 路由经过 301 时偶尔会把路径拼成 404）。codeload 直链比 github.com archive 稳定。
+        val TAG = "b4835"
         val URLS = listOf(
-            "https://github.com/ggerganov/llama.cpp/archive/$TAG.tar.gz",
-            "https://mirror.ghproxy.com/https://github.com/ggerganov/llama.cpp/archive/$TAG.tar.gz",
-            "https://gh-proxy.com/https://github.com/ggerganov/llama.cpp/archive/$TAG.tar.gz",
+            "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/$TAG",
+            "https://github.com/ggml-org/llama.cpp/archive/refs/tags/$TAG.tar.gz",
+            "https://github.com/ggerganov/llama.cpp/archive/refs/tags/$TAG.tar.gz",
         )
         val tmpTgz = File(cppDir, "_dl_llama_$TAG.tar.gz")
         var lastExit = -1
@@ -250,8 +251,8 @@ tasks.register("ensureLlamaCppSource") {
         }
         check(tmpTgz.exists() && tmpTgz.length() > 1_000_000) {
             "llama.cpp 源码下载失败（所有源失败，最后 curl exit=$lastExit，文件大小=${tmpTgz.length()}B）。" +
-                "请手动将 https://github.com/ggerganov/llama.cpp/archive/$TAG.tar.gz 解压后内容放到 " +
-                "${llamaDir.absolutePath}/（目标目录下必须直接有 CMakeLists.txt / ggml.c / llama.cpp 等文件，不能嵌套一层 llama.cpp-b4812）"
+                "请手动将 https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/$TAG 解压后内容放到 " +
+                "${llamaDir.absolutePath}/（目标目录下必须直接有 CMakeLists.txt / ggml.c / llama.cpp 等文件，不能嵌套一层 llama.cpp-$TAG）"
         }
         // 清理旧目录
         listOf(llamaDir, File(cppDir, "llama.cpp-$TAG")).forEach { d ->

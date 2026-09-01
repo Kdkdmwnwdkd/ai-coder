@@ -4,9 +4,13 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.xuedi.coder.App
 import com.xuedi.coder.action.ActionExecutor
+import com.xuedi.coder.data.ChatDatabase
+import com.xuedi.coder.data.ChatMsgEntity
 import com.xuedi.coder.data.ChatMsg
 import com.xuedi.coder.data.ChatRole
 import com.xuedi.coder.model.ChatChunk
+import com.xuedi.coder.model.InferenceForegroundService
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -14,42 +18,61 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 
 /**
- * 【新 M4 = 管理层】聊天 ViewModel —— 真正接上管理层三件套 + LlmEngine 接口。
- *
- * 结构：
- *   sendMessage(text)
- *      └─ viewModelScope.launch
- *           1. append 用户消息到 _messages
- *           2. pluginManager.buildMergedSystemPrompt() ← 合并所有启用场景的 system prompt
- *           3. llmEngine.chatFlow(system, user) 流式收集
- *                  ├─ ChatChunk.Token(t)  → 实时拼接到 assistant 消息
- *                  └─ ChatChunk.Done(full) → 1) ActionExecutor.extractActions(full)
- *                                            2) msg.actions = 解析出的 ActionTag 列表
- *                                            3) ActionExecutor.executeAll（应用操作）
- *                                            4) msg.content = 清理标签后的正文
- *                  （ChatChunk.Error 单独一条 ChatRole.Error 消息）
- *
- * 构造函数保持零参（与 M3 一致）— viewModel() 默认工厂能直接实例化。
- * 单例通过 App.instance.* lazy 获取（lazy 线程安全 + 首次访问才创建）。
+ * 【修复 4 Bug】：
+ *   ① 聊天消息持久化（init 时从 ChatDatabase 加载；所有变动同步 upsert；死要求 welcome 消息内置不入库）
+ *   ② 推理结束后清空 pending 标记，避免下次读取还在"打字中"
+ *   ③ 开始推理前调 InferenceForegroundService.start(ctx) — 避免 Flyme 后台 3 分钟被杀
+ *   ④ 推理 Done / Error / 取消 调 stop 释放前台保活
  */
 class ChatViewModel : ViewModel() {
 
     private val app get() = App.instance
+    private val chatDao by lazy { ChatDatabase.get(app).dao() }
 
-    private val _messages = MutableStateFlow(
-        listOf(
-            ChatMsg(
-                id = "welcome",
-                role = ChatRole.Assistant,
-                content = "你好！我是 AI 编程助手 🤖\n\n现在是 **新 M4=管理层** 版本（UI层已经对调顺序提前做好，管理层现在接回来了）。\n\n已经接回来的能力：\n  · 场景/插件：Android / Java / Python / Shell 四个场景，打开后会注入对应 System Prompt\n  · 背景照片 + 透明度 持久化（DataStore，关掉APP重开也在）\n  · GGUF 模型导入入口（Settings→选GGUF文件→写入Room。JNI推理 M5 再上）\n  · ACTION 标签解析执行（复制代码/打开APP/跳转设置/震动等）\n\n想测试的话：\n  - 试试发「写个安卓按钮」→ 会注入 Android 场景 system prompt，Mock流式输出代码+最后带 <ACTION: copy_to_clipboard ...>，你会收到系统剪贴板 Toast\n  - 到【场景】Tab开/关几个场景，返回聊天页发消息，就能感知 system prompt 变化\n  - 到【设置】Tab调透明度滑块、选照片，重开APP仍保留",
-                createdAtMs = System.currentTimeMillis() - 60_000
-            )
-        )
+    // ---------- 欢迎消息（id=welcome，不入库，每次构造都重新加；入库会造成 welcome createdAtMs 陈旧）----------
+    private val welcomeMsg = ChatMsg(
+        id = "welcome",
+        role = ChatRole.Assistant,
+        content = "你好！我是 AI 编程助手 🤖\n\n接入了真 JNI llama.cpp 推理 + ACTION 按钮 + 聊天记录持久化。\n\n" +
+            "用法：\n" +
+            "  1. 设置 → 导入 GGUF 模型（推荐 Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf）→ 设为当前\n" +
+            "  2. 聊天页输入问题 → 气泡**逐字跳出**（真推理），结束后下方出「复制/打开链接」等 ACTION 按钮\n" +
+            "  3. 退出 APP / 锁屏再回来，消息列表还在 ✅\n\n" +
+            "提示：如提示「进入 fallback 模式」，说明 JNI 没加载成功（或还没设模型），先去设置页导入 GGUF。",
+        createdAtMs = System.currentTimeMillis() - 60_000
     )
+
+    private val _messages = MutableStateFlow<List<ChatMsg>>(emptyList())
     val messages: StateFlow<List<ChatMsg>> = _messages.asStateFlow()
 
     private val _isTyping = MutableStateFlow(false)
     val isTyping: StateFlow<Boolean> = _isTyping.asStateFlow()
+
+    // ---------- 1. 从 ChatDatabase 恢复持久化消息（异步，不阻塞 UI）----------
+    init {
+        viewModelScope.launch(Dispatchers.IO) {
+            val persisted = runCatching { chatDao.getAll() }.getOrDefault(emptyList())
+            // ChatMsgEntity -> ChatMsg：强制设 pending=false（上次杀进程可能是 pending=true）
+            val recovered = persisted
+                .filter { it.id != "welcome" }
+                .map { e ->
+                    val m = ChatMsgEntity.toMsg(e)
+                    m.copy(pending = false)
+                }
+            _messages.value = listOf(welcomeMsg) + recovered
+        }
+    }
+
+    // ---------- 2. 所有变动同步保存 ----------
+    private suspend fun save(m: ChatMsg) {
+        if (m.id == "welcome") return  // welcome 不存
+        runCatching { chatDao.upsert(ChatMsgEntity.from(m)) }
+    }
+    private suspend fun saveAll(list: List<ChatMsg>) {
+        val toStore = list.filter { it.id != "welcome" }.map { ChatMsgEntity.from(it) }
+        if (toStore.isEmpty()) return
+        runCatching { chatDao.upsertAll(toStore) }
+    }
 
     fun sendMessage(text: String) {
         val content = text.trim()
@@ -62,6 +85,7 @@ class ChatViewModel : ViewModel() {
             createdAtMs = System.currentTimeMillis()
         )
         _messages.value = _messages.value + userMsg
+        viewModelScope.launch(Dispatchers.IO) { save(userMsg) }
 
         viewModelScope.launch {
             _isTyping.value = true
@@ -69,14 +93,19 @@ class ChatViewModel : ViewModel() {
             val system = runCatching { app.pluginManager.buildMergedSystemPrompt() }
                 .getOrDefault(PluginManagerFallback.BASE_PROMPT)
 
+            // ---------- ③ 前台保活：开始推理前启动 ----------
+            runCatching { InferenceForegroundService.start(app) }
+
             // 先插一条空的 assistant 消息（pending=true）
-            _messages.value = _messages.value + ChatMsg(
+            val answer = ChatMsg(
                 id = answerId,
                 role = ChatRole.Assistant,
                 content = "",
                 createdAtMs = System.currentTimeMillis(),
                 pending = true
             )
+            _messages.value = _messages.value + answer
+            viewModelScope.launch(Dispatchers.IO) { save(answer) }
 
             var sb = StringBuilder()
             runCatching {
@@ -87,26 +116,36 @@ class ChatViewModel : ViewModel() {
                             _messages.value = _messages.value.map { m ->
                                 if (m.id == answerId) m.copy(content = sb.toString()) else m
                             }
+                            // 流式过程中每 50 个 token 持久化一次（避免 OOM 时整段丢失）
+                            if (sb.length and 0x3F == 0) {
+                                viewModelScope.launch(Dispatchers.IO) {
+                                    chatDao.upsert(
+                                        ChatMsgEntity.from(
+                                            _messages.value.first { it.id == answerId }
+                                        )
+                                    )
+                                }
+                            }
                         }
                         is ChatChunk.Done -> {
-                            // 引擎 emit 完 Done 时，用 full 做最终一致性拼接
                             sb = StringBuilder(chunk.full)
-                            // 解析 ACTION 标签
                             val (cleaned, actions) = ActionExecutor.extractActions(chunk.full)
-                            // 执行 ACTION（复制/打开APP/震动/Toast 等）
-                            runCatching {
-                                ActionExecutor.executeAll(App.instance, actions)
-                            }
+                            runCatching { ActionExecutor.executeAll(App.instance, actions) }
+                            val finalText = cleaned.ifBlank { chunk.full }
+                            val finalMsg = ChatMsg(
+                                id = answerId,
+                                role = ChatRole.Assistant,
+                                content = finalText,
+                                createdAtMs = answer.createdAtMs,
+                                actions = actions,
+                                pending = false
+                            )
                             _messages.value = _messages.value.map { m ->
-                                if (m.id == answerId) m.copy(
-                                    content = cleaned.ifBlank { chunk.full },
-                                    actions = actions,
-                                    pending = false
-                                ) else m
+                                if (m.id == answerId) finalMsg else m
                             }
+                            viewModelScope.launch(Dispatchers.IO) { save(finalMsg) }
                         }
                         is ChatChunk.Error -> {
-                            // 引擎报错 → 在当前 assistant 消息后追加一条 Error 消息
                             _messages.value = _messages.value
                                 .map { m -> if (m.id == answerId) m.copy(pending = false) else m } +
                                 ChatMsg(
@@ -115,11 +154,13 @@ class ChatViewModel : ViewModel() {
                                     content = "❌ ${chunk.hint}",
                                     createdAtMs = System.currentTimeMillis()
                                 )
+                            viewModelScope.launch(Dispatchers.IO) {
+                                saveAll(_messages.value)
+                            }
                         }
                     }
                 }
             }.onFailure { t ->
-                // 引擎本身抛异常 → Error 消息兜底
                 _messages.value = _messages.value
                     .map { m -> if (m.id == answerId) m.copy(pending = false) else m } +
                     ChatMsg(
@@ -128,13 +169,39 @@ class ChatViewModel : ViewModel() {
                         content = "❌ 推理崩溃：${t.message ?: t.javaClass.simpleName}",
                         createdAtMs = System.currentTimeMillis()
                     )
+                viewModelScope.launch(Dispatchers.IO) { saveAll(_messages.value) }
             }
+
+            // ---------- ④ 前台保活：结束/取消后释放 ----------
+            runCatching { InferenceForegroundService.stop(app) }
             _isTyping.value = false
         }
     }
 
-    // 如果 PluginManager 还没初始化完（race），用这个兜底 BASE_PROMPT，不会 sendMessage
+    // 如果 PluginManager 还没初始化完（race），用这个兜底 BASE_PROMPT
     private object PluginManagerFallback {
         const val BASE_PROMPT = "你是运行在用户手机本地的 AI编程助手。请用简体中文回答。"
+    }
+
+    /**
+     * 【Step 4/5 关键：退出聊天页 / 回桌面 时取消推理 + 释放前台服务】
+     * - 调 LlmEngine.cancel()（底层 LlamaJniEngine.nativeChatCancel → C++ cancel=true → while 循环跳出）
+     * - 把所有 pending 消息的 pending 位清掉（避免下次进来看见"打字中"永久挂在那里）
+     * - 立即释放前台保活（START_STICKY 重启的 service 也能被 stopService 关掉）
+     */
+    fun cancelInference() {
+        _isTyping.value = false
+        viewModelScope.launch(Dispatchers.Default) {
+            runCatching { app.llmEngine.cancel() }
+        }
+        viewModelScope.launch(Dispatchers.IO) {
+            runCatching { InferenceForegroundService.stop(app) }
+        }
+        // 同步清 UI 上的 pending 标记
+        val cur = _messages.value
+        if (cur.any { it.pending }) {
+            _messages.value = cur.map { if (it.pending) it.copy(pending = false) else it }
+            viewModelScope.launch(Dispatchers.IO) { saveAll(_messages.value) }
+        }
     }
 }

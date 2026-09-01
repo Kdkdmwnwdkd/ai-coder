@@ -28,6 +28,7 @@ import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -53,6 +54,11 @@ fun ChatPage(vm: ChatViewModel) {
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val ctx = LocalContext.current
+
+    // 【Step 4 关键：退出聊天页（返回键 / 切 Tab）时 → 取消推理 + 释放前台服务 + 清 pending】
+    DisposableEffect(vm) {
+        onDispose { vm.cancelInference() }
+    }
 
     LaunchedEffect(messages.size, isTyping) {
         val idx = (messages.size - 1).coerceAtLeast(0)

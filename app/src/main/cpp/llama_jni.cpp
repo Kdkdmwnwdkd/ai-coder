@@ -307,27 +307,60 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
 
     LOGD("nativeChat: prompt 长度=%zu bytes, system=%d user=%d", prompt.size(), (int)system.size(), (int)user.size());
 
-    // -------- 2) tokenize（2 次：先估大小 + 再写真实 buffer） --------
+    // -------- 2) tokenize（先估大小 + 再写真实 buffer；parse_special=false 避免 ChatML 特殊标记解析失败） --------
+    //    为什么 parse_special=false？
+    //      prompt 里有 <|im_start|>/<|im_end|>，parse_special=true 会尝试在 vocab 的 control token
+    //      表里按名称精确匹配（llama.cpp b4835 的 llama_tokenize 走这条路径）。Qwen GGUF 里这些标记
+    //      要么是普通 id(非 control) 要么没注册，找不到返回负值（需要的 token 数<0，和错误同语义，
+    //      旧代码 need<=0 直接抛失败）。
+    //    解决方案：parse_special=false，让 llama_tokenize 把 "<|im_start|>" 当普通字串分词，
+    //      Qwen chat template 本身就不依赖这些 tag 作为单个 special token，功能等价。
     std::vector<llama_token> tokens;
     {
-        // llama_tokenize 传 0 buffer → 返回所需 token 数（<0 表示错误）
-        // llama.h: int32_t llama_tokenize(const llama_vocab * vocab, const char * text, ..., llama_token * tokens, int32_t n_tokens_max, ...)
+        // 第一次：估 token 数。buffer 填 0 → 返回"所需 token 数"（负值=错误）
+        int32_t add_spec = 1;   // add_special=true：BOS 开头加一个
+        int32_t parse_spec = 0; // parse_special=false：关键修复
         int32_t need = llama_tokenize(state->vocab, prompt.c_str(), (int32_t)prompt.size(),
-                                      nullptr, 0, /*add_special=*/true, /*parse_special=*/true);
+                                      nullptr, 0, add_spec, parse_spec);
         if (need <= 0) {
-            cb_error(env, callback, "llama_tokenize 失败（可能 tokenizer 元数据在 GGUF 中缺失）");
-            env->DeleteGlobalRef(callback);
-            return;
-        }
-        tokens.resize((size_t)need);
-        int32_t real = llama_tokenize(state->vocab, prompt.c_str(), (int32_t)prompt.size(),
-                                      tokens.data(), (int32_t)tokens.size(),
-                                      /*add_special=*/true, /*parse_special=*/true);
-        if (real != need) {
-            LOGE("nativeChat: llama_tokenize need=%d real=%d", (int)need, (int)real);
-            cb_error(env, callback, "GGUF tokenizer 二次校验失败，终止推理");
-            env->DeleteGlobalRef(callback);
-            return;
+            // 兜底：直接预分配一个"肯定够"的 buffer。
+            // ChatML prompt token 数通常接近字节数的 1/2~1/3 中文，英文 1/4。
+            // (prompt.size() / 2) + 64 足够；上限设 n_ctx/2 避免 OOM。
+            int32_t fallback = (int32_t)prompt.size() / 2 + 64;
+            fallback = std::max(fallback, 128);
+            fallback = std::min(fallback, std::max(128, state->n_ctx / 2));
+            LOGE("nativeChat: llama_tokenize estimate need=%d <=0（parse_special=true 可能误解析 ChatML special）"
+                 "，改用 fallback buffer=%d。prompt bytes=%zu vocab=%d",
+                 (int)need, (int)fallback, prompt.size(), (int)state->n_vocab);
+            tokens.resize((size_t)fallback);
+            int32_t real = llama_tokenize(state->vocab, prompt.c_str(), (int32_t)prompt.size(),
+                                          tokens.data(), (int32_t)tokens.size(), add_spec, parse_spec);
+            if (real <= 0) {
+                LOGE("nativeChat: llama_tokenize 二次 call 也失败 real=%d。prompt[头32字节]=%.32s",
+                     (int)real, prompt.c_str());
+                cb_error(env, callback, std::string("llama_tokenize 失败（返回") + std::to_string(real) +
+                         "，GGUF 可能缺 tokenizer 元数据 或 GGUF 文件不完整）");
+                env->DeleteGlobalRef(callback);
+                return;
+            }
+            tokens.resize((size_t)real);
+        } else {
+            tokens.resize((size_t)need);
+            int32_t real = llama_tokenize(state->vocab, prompt.c_str(), (int32_t)prompt.size(),
+                                          tokens.data(), (int32_t)tokens.size(), add_spec, parse_spec);
+            if (real != need) {
+                // need 与 real 不一致（常见：add_special 时多了一个 BOS 但 estimate 少算）
+                // → 截断到 real，不抛错
+                if (real > 0 && real <= need) {
+                    tokens.resize((size_t)real);
+                    LOGW("nativeChat: llama_tokenize need=%d real=%d（不一致，已调整）", (int)need, (int)real);
+                } else {
+                    LOGE("nativeChat: llama_tokenize need=%d real=%d（不合法）", (int)need, (int)real);
+                    cb_error(env, callback, "GGUF tokenizer 二次校验失败，终止推理");
+                    env->DeleteGlobalRef(callback);
+                    return;
+                }
+            }
         }
     }
     const int32_t n_prompt = (int32_t)tokens.size();

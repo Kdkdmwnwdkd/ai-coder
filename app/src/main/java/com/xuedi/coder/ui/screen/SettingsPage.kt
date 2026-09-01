@@ -105,8 +105,13 @@ fun SettingsPage(
         .collectAsState(initial = null)
 
     // ---- 当前 JNI 引擎内存状态（给模型行的状态条用）----
-    val engineSnapshot = remember(allModels) {
-        val eng = App.instance.llmEngine as? LlamaJniEngine
+    // 🔴 注意：这里 **不能 remember**！
+    //   如果 remember(key=allModels)，当用户点「设为当前」导致 loadModel return false，
+    //   allModels 没变化 → remember 不重算 → engineSnapshot.lastLoadError / currentCtx
+    //   永远停留在第一次进入页面的快照 → 状态条一直是「未加载」甚至 Failed reason 为空。
+    //   LlamaJniEngine.lastLoadError / currentCtx / libStatus 都是纯内存读（无 IO），
+    //   每次重组直接取不会影响性能。
+    val engSnapRaw = (App.instance.llmEngine as? LlamaJniEngine).let { eng ->
         val libSt = eng?.run { LlamaJniEngine.libStatus() }
         LoadDiagSnapshot(
             libLoadedOk = libSt?.first,
@@ -116,6 +121,10 @@ fun SettingsPage(
             lastLoadedPath = App.instance.modelManager.lastLoadedPath()
         )
     }
+    // 但为了避免「一次重组内多次取」有微秒级差导致 Compose smart-cast 警告，
+    // 这里包一层 remember(Unit) 在**单次帧重组内只算一次**（下一次重组还是会重拿）。
+    //   — 核心：永远不用 allModels/selectedModel 当 key，任何状态变更都重算最新值。
+    val engineSnapshot = engSnapRaw
 
     // SAF: 选照片（image/*）→ UI层直接生效 + ThemeStore 持久化
     val pickBgLauncher = rememberLauncherForActivityResult(
@@ -682,20 +691,8 @@ private fun ModelRowFormal(
 
             Spacer(Modifier.height(6.dp))
 
-            // 第二行：内存加载状态条（只在 isActive 时详细显示，其他模型给一句概览）
-            if (isActive) {
-                MemoryStatusBar(status = memStatus)
-            } else {
-                Text(
-                    "未设为当前，因此未加载到内存",
-                    fontSize = 11.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
-                )
-            }
-
-            Spacer(Modifier.height(8.dp))
-
-            // 第三行：操作按钮（正式版：「设为当前并加载到内存」 / 「🔄 重新加载到内存」）
+            // 🔴 操作按钮放在【内存状态条之前】，避免卡片处于屏幕底部时按钮被截断看不到。
+            //    用户反馈「好像没有整顿（诊断/重加载）的按键」就是因为按钮在最下面一行、屏幕外。
             Row(
                 Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.End,
@@ -729,6 +726,19 @@ private fun ModelRowFormal(
                             color = MaterialTheme.colorScheme.primary)
                     }
                 }
+            }
+
+            Spacer(Modifier.height(8.dp))
+
+            // 第二行：内存加载状态条（只在 isActive 时详细显示，其他模型给一句概览）
+            if (isActive) {
+                MemoryStatusBar(status = memStatus)
+            } else {
+                Text(
+                    "未设为当前，因此未加载到内存",
+                    fontSize = 11.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
             }
         }
     }

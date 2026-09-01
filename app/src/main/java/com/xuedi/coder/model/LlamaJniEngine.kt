@@ -1,6 +1,7 @@
 package com.xuedi.coder.model
 
 import android.util.Log
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
@@ -202,7 +203,11 @@ class LlamaJniEngine : LlmEngine {
             // 因为 C++ 层 onDone 只传 stop reason，不传完整回复（流式已经 onToken 吐过了）
             val fullSb = StringBuilder()
             // 取消时顺便让 C++ 端跳出 decode 循环（用户在聊天页中途按取消/关闭APP场景）
-            val job = launch {
+            // 🔴 🔴 ANR 致命修复：nativeChat(curCtx,...) 是阻塞式 JNI C++ while 循环（几分钟 CPU 密集），
+            //    绝对不能在主线程跑！之前 callbackFlow 继承了 ViewModel 的 Main.immediate，
+            //    launch { } 也没切 Dispatcher → 真推理一跑主线程直接卡死 5s → ANR "应用无响应"。
+            //    现在强制切到 Dispatchers.Default（专用于 CPU 密集任务的协程池）。
+            val job = launch(Dispatchers.Default) {
                 val cb = object : TokenCallback {
                     override fun onToken(piece: String) {
                         fullSb.append(piece)

@@ -178,7 +178,12 @@ class ChatViewModel : ViewModel() {
         val content = text.trim()
         if (content.isEmpty()) return
 
-        viewModelScope.launch {
+        // 🔴 ANR 双保险修复：nativeChat JNI 是 CPU 密集阻塞，推理工作流必须完整地在
+        //    后台协程池（Dispatchers.Default）里跑，不能在 Main.immediate 上发起 collect。
+        //    之前：viewModelScope.launch { ... chatFlow(...).collectLatest ... }
+        //         → 默认 Main.immediate → callbackFlow 也继承 Main → launch 在主线程阻塞 native → ANR。
+        //    现在：顶层就在 Default，所有子协程继承它；StateFlow.value setter 是线程安全的，UI 不会崩。
+        viewModelScope.launch(Dispatchers.Default) {
             // 当前没话题 → 用首条用户消息自动创建一个
             val topicId = _currentTopicId.value ?: createTopic(firstUserMsg = content)
 

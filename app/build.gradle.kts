@@ -24,8 +24,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 8
-        versionName = "2.2.0-M7-Formal-UI"  // v1.2.6：修复 M6 build 20 个编译错误（Divider.startIndent / Triple4参数 / LoadDiagSnapshot 解构顺序）
+        versionCode = 9
+        versionName = "2.2.0-M8-NoANR"      // v1.2.7：修复真推理ANR（sendMessage + chatFlow 都切 Dispatchers.Default）
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

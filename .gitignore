@@ -15,6 +15,15 @@ captures/
 *.aab
 *.ap_
 *.idsig
+
+# —— 签名 keystore（敏感！不允许提交到公共仓库）——
+# 固定 Debug 签名：由 GitHub Actions 从 Secrets XUEDI_DEBUG_KS_B64 decode 生成
+keystore/*.jks
+keystore/*.p12
+keystore/*.b64
+keystore/*.keystore
+!keystore/README.md
+# 旧 legado Shimmer 正式签名目录（同理禁止提交）
 signing/*.jks
 signing/*.p12
 signing/*.b64

@@ -56,17 +56,89 @@ android {
         }
     }
 
+    // =====================================================
+    // 签名配置（解决"每次出包都要先卸载"的核心根因）
+    // 关键：必须放在 buildTypes 之前，否则 buildTypes 里 signingConfigs.getByName("fixedDebug")
+    //       会找不到对象（AGP 按代码顺序执行）。
+    // 优先级：
+    //   1) release：SIGNING_STORE_* / SIGNING_KEY_* 环境变量（Actions Secrets SIGNING_*）
+    //      （用户 shimmer_xuedi_release.jks 正式签名，M7 用）
+    //   2) fixedDebug：XUEDI_DEBUG_STORE_* / XUEDI_DEBUG_KEY_*
+    //      （Debug 统一固定签名，Debug APK 之间可覆盖安装，不用卸载）
+    //   3) fallback：本地手跑时自动读 keystore/xuedi-debug.jks
+    // =====================================================
+    signingConfigs {
+
+        create("release") {
+            val envStoreFile = System.getenv("SIGNING_STORE_FILE")?.takeIf { it.isNotBlank() }
+                ?: project.findProperty("RELEASE_STORE_FILE")?.toString()
+                ?: rootProject.file("signing/shimmer_xuedi_release.jks")
+                    .takeIf { it.exists() }?.absolutePath
+            val envStorePassword = System.getenv("SIGNING_STORE_PASSWORD")
+                ?: project.findProperty("RELEASE_STORE_PASSWORD")?.toString()
+            val envKeyAlias = System.getenv("SIGNING_KEY_ALIAS")
+                ?: project.findProperty("RELEASE_KEY_ALIAS")?.toString()
+            val envKeyPassword = System.getenv("SIGNING_KEY_PASSWORD")
+                ?: project.findProperty("RELEASE_KEY_PASSWORD")?.toString()
+                ?: envStorePassword
+
+            if (envStoreFile != null && java.io.File(envStoreFile).exists() &&
+                !envStorePassword.isNullOrBlank() && !envKeyAlias.isNullOrBlank()) {
+                storeFile = java.io.File(envStoreFile)
+                storePassword = envStorePassword
+                keyAlias = envKeyAlias
+                keyPassword = envKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+                enableV3Signing = true
+                enableV4Signing = true
+                @Suppress("DEPRECATION")
+                this.v2SigningEnabled = true
+            }
+        }
+
+        create("fixedDebug") {
+            val envStore = System.getenv("XUEDI_DEBUG_STORE_FILE")?.takeIf { it.isNotBlank() }
+                ?: rootProject.file("keystore/xuedi-debug.jks").absolutePath
+                    .takeIf { java.io.File(it).exists() }
+                ?: rootProject.file("../keystore/xuedi-debug.jks").absolutePath
+                    .takeIf { java.io.File(it).exists() }
+
+            val envStorePassword = System.getenv("XUEDI_DEBUG_STORE_PASSWORD")
+                ?.takeIf { it.isNotBlank() }
+                ?: "XuediCoder_Debug_2026!"
+            val envKeyAlias = System.getenv("XUEDI_DEBUG_KEY_ALIAS")
+                ?.takeIf { it.isNotBlank() }
+                ?: "xuedicoder"
+            val envKeyPassword = System.getenv("XUEDI_DEBUG_KEY_PASSWORD")
+                ?.takeIf { it.isNotBlank() }
+                ?: envStorePassword
+
+            if (envStore != null && java.io.File(envStore).exists()) {
+                storeFile = java.io.File(envStore)
+                storePassword = envStorePassword
+                keyAlias = envKeyAlias
+                keyPassword = envKeyPassword
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
             isShrinkResources = false
-            applicationIdSuffix = ".debug"
+            // 统一包名：之前 applicationIdSuffix = ".debug" 导致 debug/release 包名不同 → 覆盖必失败
             resValue("string", "app_name", "AI编程助手·调试版")
+            signingConfig = signingConfigs.getByName("fixedDebug")
         }
         release {
             isMinifyEnabled = false
             isShrinkResources = false
             resValue("string", "app_name", "AI编程助手")
+            signingConfig = signingConfigs.runCatching { getByName("release") }
+                .getOrNull() ?: signingConfigs.getByName("fixedDebug")
         }
     }
 

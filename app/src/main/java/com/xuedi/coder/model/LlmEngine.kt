@@ -18,4 +18,6 @@ sealed class ChatChunk {
     data class Token(val text: String) : ChatChunk()
     data class Done(val full: String, val stopReason: String = "stop") : ChatChunk()
     data class Error(val t: Throwable, val hint: String = t.message ?: "推理出错") : ChatChunk()
+    /** 🔴 预填充进度（0~100%），UI 显示百分比避免一直白转圈圈 */
+    data class PrefillProgress(val percent: Int, val consumed: Int, val total: Int) : ChatChunk()
 }

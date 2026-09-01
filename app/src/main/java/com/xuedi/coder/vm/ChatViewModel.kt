@@ -100,6 +100,10 @@ class ChatViewModel : ViewModel() {
     private val _failMsgFlow = MutableStateFlow<String?>(null)
     val failMsgFlow: StateFlow<String?> = _failMsgFlow.asStateFlow()
 
+    /** 🔴 预填充进度百分比（0~100），Preparing 时显示「准备中 35%」避免一直白转圈圈 */
+    private val _prefillPercent = MutableStateFlow(0)
+    val prefillPercent: StateFlow<Int> = _prefillPercent.asStateFlow()
+
     // 🔴 TODO-4b 互斥锁：防连点两次发送同时起两个 nativeChat → OOM 闪退
     private val inferenceMutex = Mutex()
     private var inferenceJob: Job? = null
@@ -351,7 +355,7 @@ class ChatViewModel : ViewModel() {
                             }
                         }
                         is ChatChunk.Error -> {
-                            // 🔴 TODO-4d：超时 vs 普通失败 区分（LlamaJniEngine 首 token 15s 超时发的 hint 含「超时」）
+                            // 🔴 TODO-4d：超时 vs 普通失败 区分（LlamaJniEngine 首 token 45s 超时发的 hint 含「超时」）
                             val hint = chunk.hint
                             _infStatus.value = if (hint.contains("超时")) InfStatus.Timeout else InfStatus.Failed
                             _failMsgFlow.value = hint
@@ -364,9 +368,14 @@ class ChatViewModel : ViewModel() {
                                     createdAtMs = System.currentTimeMillis()
                                 )
                             viewModelScope.launch(Dispatchers.IO) {
-                                val cur = _messages.value.firstOrNull { it.id == answerId } ?: return@launch
+                                val cur = _messages.value.firstOrNull { m -> m.id == answerId } ?: return@launch
                                 chatDao.upsert(ChatMsgEntity.from(cur.copy(pending = false), topicId))
                             }
+                        }
+                        is ChatChunk.PrefillProgress -> {
+                            // 🔴 预填充进度：UI 状态条显示具体百分比
+                            _infStatus.value = InfStatus.Preparing
+                            _prefillPercent.value = chunk.percent
                         }
                     }
                 }

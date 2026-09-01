@@ -1,13 +1,16 @@
 package com.xuedi.coder.model
 
+import android.app.ActivityManager
+import android.content.Context
 import android.util.Log
+import com.xuedi.coder.App
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.callbackFlow
-import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.launch
 
 /**
@@ -85,6 +88,24 @@ class LlamaJniEngine : LlmEngine {
     init { ensureLibLoaded() }
 
     // =================================================================
+    // OOM 防护：内存预检（loadModel 和 chatFlow 调用前都查，<4GB 直接报错避免 SIGSEGV）
+    // =================================================================
+    private fun availableMemMB(): Long {
+        val am = App.instance.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager ?: return Long.MAX_VALUE
+        val info = ActivityManager.MemoryInfo()
+        am.getMemoryInfo(info)
+        return info.availMem / (1024L * 1024L)
+    }
+
+    private fun checkMemAndReason(minMB: Long): String? {
+        val avail = availableMemMB()
+        return if (avail < minMB) {
+            "可用内存不足（当前 ${avail}MB < 最低要求 ${minMB}MB）。" +
+                "\n请：① 关闭所有后台 App（微信、QQ、浏览器等）② 重启手机释放内存 ③ 再尝试加载模型"
+        } else null
+    }
+
+    // =================================================================
     // Java ↔ C++ 回调接口（C++ 层用反射调 Java）
     // =================================================================
     /** C++ 解码循环每出一段 UTF-8 字节（可能是 1~多个 token 合并，提高效率）就调一次。 */
@@ -93,6 +114,8 @@ class LlamaJniEngine : LlmEngine {
         fun onToken(piece: String)
         fun onDone(reason: String)
         fun onError(message: String)
+        /** 🔴 预填充进度回调（0.0 ~ 1.0）——UI 显示百分比，避免一直白转圈圈 */
+        fun onPrefillProgress(consumed: Int, total: Int)
     }
 
     // =================================================================
@@ -129,6 +152,13 @@ class LlamaJniEngine : LlmEngine {
         }
         if (f.length() < 1024 * 1024) {
             lastLoadError = "模型文件过小（${f.length()} bytes），非有效 GGUF"
+            return false
+        }
+        // 🔴 OOM 防护 1：加载前查可用内存（3B Q4_K_M 最低 4GB），
+        //    内存不够时直接友好报错，不要让 llama_decode 硬顶 → SIGSEGV 闪退。
+        checkMemAndReason(4096)?.let {
+            lastLoadError = it
+            Log.w(TAG, "loadModel ❌ 内存不足：$it")
             return false
         }
         // 🔴 闪退修复 v2：loadModel 前先 cancel 旧 nativeChat + 把 ctx 清 0，
@@ -190,21 +220,27 @@ class LlamaJniEngine : LlmEngine {
             return flowOf(ChatChunk.Error(RuntimeException(libErr ?: "lib load failed"), msg))
         }
         if (curCtx == 0L) {
-            val diag = lastLoadError
-                ?: "模型尚未加载或加载失败，当前 ctx=0。"
+            val diag = lastLoadError ?: "模型尚未加载或加载失败，ctx=0"
             val msg = buildString {
                 append("❌ 模型未加载成功，无法开始推理（ctx=0）\n")
                 append("诊断信息：").append(diag).append("\n\n")
                 append("解决办法（请按顺序尝试）：\n")
                 append("1. 打开「设置」→ 找到你的 GGUF 模型 → 点「设为当前模型」\n")
-                append("   · 看 Toast 显示什么错误，常见是『内存不足』或『GGUF 损坏』\n")
                 append("2. 如提示内存不足：关闭所有后台 App（微信、QQ、浏览器等），或重启手机再试\n")
                 append("3. 如提示 GGUF 损坏：在设置里删除该模型 → 重新下载 GGUF → 重新导入\n")
-                append("   · 推荐从 ModelScope 下载 Qwen2.5-3B-Instruct Q4_K_M（2.1GB）\n")
-                append("4. 如果设置里点『设为当前模型』显示『✅ 已加载』但聊天还是报错，请截图反馈")
             }
             Log.e(TAG, "chatFlow ❌ ctx=0 → 返回 Error。diag=$diag")
             return flowOf(ChatChunk.Error(RuntimeException(diag), msg))
+        }
+
+        // 🔴 OOM 防护 2：聊天前再查一次内存（要 3GB 以上），
+        //    避免用户加载完模型后又开了几个后台 App，推理中途 OOM → SIGSEGV
+        checkMemAndReason(3072)?.let { reason ->
+            Log.w(TAG, "chatFlow ❌ 内存不足：$reason")
+            return flowOf(ChatChunk.Error(
+                RuntimeException("memory_low"),
+                "❌ $reason\n\n另外，建议关闭「场景」页面中不必要的开关，减少 system prompt 占用。"
+            ))
         }
 
         // —— 真推理：callbackFlow 包 C++ 回调 ——
@@ -231,7 +267,7 @@ class LlamaJniEngine : LlmEngine {
                         }
                         firstTokenReceived.set(true)
                         fullSb.append(piece)
-                        trySend(ChatChunk.Token(piece))
+                        trySend(ChatChunk.Token(text=piece))
                     }
                     override fun onDone(reason: String) {
                         if (this@LlamaJniEngine.ctx != curCtx) {
@@ -239,7 +275,7 @@ class LlamaJniEngine : LlmEngine {
                             channel.close()
                             return
                         }
-                        trySend(ChatChunk.Done(fullSb.toString(), reason))
+                        trySend(ChatChunk.Done(full=fullSb.toString(), stopReason=reason))
                         channel.close()
                     }
                     override fun onError(message: String) {
@@ -250,6 +286,12 @@ class LlamaJniEngine : LlmEngine {
                         }
                         trySend(ChatChunk.Error(RuntimeException(message), message))
                         channel.close()
+                    }
+                    override fun onPrefillProgress(consumed: Int, total: Int) {
+                        if (this@LlamaJniEngine.ctx != curCtx) return
+                        // 🔴 不设置 firstTokenReceived——prefill 阶段还没出 token，超时定时器继续跑
+                        val percent = if (total > 0) (consumed * 100 / total).coerceIn(0, 100) else 0
+                        trySend(ChatChunk.PrefillProgress(percent, consumed, total))
                     }
                 }
                 val ok = runCatching {

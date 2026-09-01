@@ -59,6 +59,7 @@ static jclass   g_cls_Callback = nullptr; // global ref
 static jmethodID g_mid_onToken = nullptr;
 static jmethodID g_mid_onDone  = nullptr;
 static jmethodID g_mid_onError = nullptr;
+static jmethodID g_mid_onPrefill = nullptr;  // 🔴 预填充进度 onPrefillProgress(II)V
 
 static std::mutex g_init_mutex;
 static bool       g_backend_inited = false;
@@ -157,9 +158,10 @@ extern "C" JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM * vm, void *) {
     g_mid_onToken = env->GetMethodID(g_cls_Callback, "onToken", "(Ljava/lang/String;)V");
     g_mid_onDone  = env->GetMethodID(g_cls_Callback, "onDone",  "(Ljava/lang/String;)V");
     g_mid_onError = env->GetMethodID(g_cls_Callback, "onError", "(Ljava/lang/String;)V");
-    if (!g_mid_onToken || !g_mid_onDone || !g_mid_onError) {
-        LOGE("JNI_OnLoad: GetMethodID 有 null（onToken=%p onDone=%p onError=%p）—— Kotlin interface 方法签名改了？",
-             (void*)g_mid_onToken, (void*)g_mid_onDone, (void*)g_mid_onError);
+    g_mid_onPrefill = env->GetMethodID(g_cls_Callback, "onPrefillProgress", "(II)V");
+    if (!g_mid_onToken || !g_mid_onDone || !g_mid_onError || !g_mid_onPrefill) {
+        LOGE("JNI_OnLoad: GetMethodID 有 null（onToken=%p onDone=%p onError=%p onPrefill=%p）—— Kotlin interface 方法签名改了？",
+             (void*)g_mid_onToken, (void*)g_mid_onDone, (void*)g_mid_onError, (void*)g_mid_onPrefill);
         env->ExceptionClear();
         return JNI_VERSION_1_6;
     }
@@ -213,8 +215,10 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     // 3) create context
     auto cparams = llama_context_default_params();
     cparams.n_ctx        = (uint32_t)nCtx;
-    cparams.n_batch      = std::min<uint32_t>((uint32_t)nCtx, 512U);   // CPU 推理批大小保守一点
-    cparams.n_ubatch     = std::min<uint32_t>((uint32_t)nCtx, 512U);
+    // 🔴 OOM 修复：n_batch 从 512 降到 256，牺牲一点速度换取更低的激活层内存峰值。
+    //    512 batch 的 decode 一次需要分配更多临时张量，容易在预填充后期 OOM SIGSEGV。
+    cparams.n_batch      = std::min<uint32_t>((uint32_t)nCtx, 256U);
+    cparams.n_ubatch     = std::min<uint32_t>((uint32_t)nCtx, 256U);
     cparams.logits_all   = false;
     // 线程数：直接在 cparams 里设置（llama.h 317-318 行：n_threads 生成单 token / n_threads_batch 批处理）
     int32_t n_threads_use = std::max(1, (int)nThreads);
@@ -413,6 +417,11 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
                 return;
             }
             n_consumed += n_eval;
+            // 🔴 预填充进度回调（每完成一批通知一次）——UI 显示百分比，避免一直白转圈圈
+            if (g_mid_onPrefill && callback) {
+                env->CallVoidMethod(callback, g_mid_onPrefill, (jint)n_consumed, (jint)n_prompt);
+                if (env->ExceptionCheck()) { env->ExceptionClear(); }
+            }
         }
         (void)prefillaunch;
     }

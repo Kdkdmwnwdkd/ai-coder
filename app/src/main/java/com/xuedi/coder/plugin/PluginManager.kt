@@ -145,7 +145,10 @@ class PluginManager(private val ctx: Context) {
                         name = cfg.name,
                         description = cfg.description,
                         version = cfg.version,
-                        enabled = existing?.enabled ?: true,
+                        // 🔴 OOM 修复：场景首次写入数据库时默认 false，让用户按需开启。
+                        //    之前 true → 4 场景全开会拼 600-800 token system prompt，
+                        //    手机 CPU 预填充 20-30s → 极易 OOM SIGSEGV 闪退。
+                        enabled = existing?.enabled ?: false,
                         folderName = folder.name
                     )
                 )

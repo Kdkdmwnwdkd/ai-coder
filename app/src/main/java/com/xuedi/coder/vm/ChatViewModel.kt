@@ -297,6 +297,11 @@ class ChatViewModel : ViewModel() {
     }
 
     private companion object {
-        const val BASE_PROMPT = "你是运行在用户手机本地的 AI编程助手。请用简体中文回答。"
+        // 通用对话 + 写代码两不误。用户可闲聊，也可问代码。
+        // 之所以不是"AI 编程助手"是为了避免 Qwen2.5-Coder 等代码专用模型拒绝闲聊；
+        // 通用对话模型（Qwen2.5-Instruct、Phi-3、Yi 等）能在此提示词下既闲聊又写代码。
+        const val BASE_PROMPT = "你是一个运行在用户手机本地的 AI 助手。用简体中文回答。" +
+            "你可以和用户闲聊、回答知识问题，也可以写代码或解释代码。" +
+            "保持回答简洁友好。"
     }
 }

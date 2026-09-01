@@ -319,47 +319,39 @@ jobs:
           echo "APK=$APK ($(du -h "$APK" | cut -f1))"
           echo "APK_PATH=$APK" >> "$GITHUB_ENV"
 
-      - name: 多服务并发上传（0x0.st / tmpfiles / litterbox 任一成功即用）
+      - name: 多服务并发上传（tmpfiles / litterbox 任一成功即用）
         run: |
           set -uo pipefail
           URL=""
           UA='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36'
 
-          try_0x0() {
-            echo "→ 尝试 0x0.st（永久直链）..."
-            R="$(curl -sS --max-time 240 -A "$UA" -F "file=@$APK_PATH" https://0x0.st 2>&1 || true)"
-            echo "0x0.st 返回: $R"
-            case "$R" in http*) echo "$R" | head -1;; esac
-          }
           try_tmpfiles() {
-            echo "→ 尝试 tmpfiles.org（30天）..."
+            echo "→ 尝试 tmpfiles.org（30天）..." >&2
             R="$(curl -sS --max-time 240 -A "$UA" -F "file=@$APK_PATH" https://tmpfiles.org/api/v1/upload 2>&1 || true)"
-            echo "tmpfiles 返回: $R"
+            echo "tmpfiles 返回: $R" >&2
             U="$(echo "$R" | grep -oE 'https://tmpfiles\.org/[^"]+' | head -1)"
-            [ -n "$U" ] && echo "${U/dl//dl}"
+            [ -n "$U" ] && echo "${U/tmpfiles.org/tmpfiles.org/dl}"
           }
           try_litterbox() {
-            echo "→ 尝试 litterbox（72h）..."
+            echo "→ 尝试 litterbox（72h）..." >&2
             for i in 1 2 3; do
               R="$(curl -sSL --max-time 240 -A "$UA" -F 'time=72h' -F 'reqtype=fileupload' -F "fileToUpload=@$APK_PATH" https://litterbox.catbox.moe/resources/internals/api.php 2>&1 || true)"
+              echo "litterbox 第 $i 次返回: $R" >&2
               case "$R" in https://*) echo "$R"; return 0;; esac
               sleep 10
             done
-            echo "litterbox 3 次都失败"
+            echo "litterbox 3 次都失败" >&2
           }
 
-          URL="$(try_0x0 || true)"
-          [ -z "$URL" ] && URL="$(try_tmpfiles || true)"
+          URL="$(try_tmpfiles || true)"
           [ -z "$URL" ] && URL="$(try_litterbox || true)"
 
           if [ -z "$URL" ]; then
-            echo "❌ 3 个服务都失败"
+            echo "❌ 2 个服务都失败"
             exit 1
           fi
           printf '%s\n' "$URL" > mirror-url.txt
           echo "✅ 拿到国内直链: $URL"
-          echo "## 🚀 国内直链（GitHub runner 上传）" >> "$GITHUB_STEP_SUMMARY"
-          echo "$URL" >> "$GITHUB_STEP_SUMMARY"
 
       - name: 把直链作为 Release asset 挂回
         uses: softprops/action-gh-release@v2

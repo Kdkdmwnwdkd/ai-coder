@@ -796,7 +796,7 @@ private data class LoadDiagSnapshot(
 // 主题模式选择 Chip（3 个：浅色 / 深色 / 跟随系统）
 // ===================================================================
 @Composable
-private fun ThemeModeChip(
+private fun RowScope.ThemeModeChip(
     label: String,
     selected: Boolean,
     onClick: () -> Unit

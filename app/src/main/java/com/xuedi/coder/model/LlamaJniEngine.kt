@@ -1,26 +1,30 @@
 package com.xuedi.coder.model
 
 import android.util.Log
+import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.launch
 
 /**
- * 【M5-3 骨架版】LlamaJniEngine —— 把 JNI 调用封装成 LlmEngine 接口。
+ * 【M5-4 真机推理版】LlamaJniEngine —— 封装 JNI bridge 调用 + Kotlin Flow 回调。
  *
- * 设计说明：
- *  1. native 方法：4 个 bridge 函数（init/release/chat/cancel）。当前 v0.4b 的 C++ 层
- *     还是 M5-2 stub（libxuedi-llama.so 只有 JNI_OnLoad 占位），这些 native 方法
- *     **并没有 C++ 实现**，调用时会抛 `UnsatisfiedLinkError: No implementation found ...`。
- *     → 所有外部入口（chatFlow / release / loadModel）都用 runCatching 包裹，
- *       一旦异常就 fallback 到 MockLlmEngine，保证"装上去不崩、UI 联调继续"。
- *  2. init 时返回 long 型的 ctx ptr（用 JNI 层 `reinterpret_cast<uintptr_t>(ctx)` 写），
- *     0 表示失败；后续所有 native 调用都把它传回 C++。
- *  3. `_fallback` 在第一次真正尝试 JNI 失败后才创建（避免一开始就初始化 Mock 占内存）。
- *  4. ModelManager 当前选中的 GGUF 文件路径由 ChatViewModel / App 负责传进来：
- *     → `loadModel(ggufAbsolutePath, nCtx, nThreads)`。
+ * 相对于 M5-3 骨架，这次做了 4 个关键改变：
+ *  1) 新增内部接口 [TokenCallback]：C++ 层解码出 1 个 token 就反射调用 Java onToken(piece)，
+ *     我们在 chatFlow 里用 callbackFlow 把它转成 Flow<ChatChunk>（真流式）。
+ *  2) 移除了 nativeChat() 的阻塞式调用：因为 C++ 层会在 while(decode) 循环里**反复**回调 Java，
+ *     不再是"调用一次返回字符串"的模型。
+ *  3) 新增 nativeChatCancel() 支持用户中途取消（C++ 层每次 decode 前判断 g_cancel 原子标志）。
+ *  4) 当 JNI 层 native* 方法不存在时（例如 .so 损坏），仍 fallback MockLlmEngine，保证不崩。
  *
- * M5-4 上真推理时，只需要在 llama_jni.cpp 里补 Java_com_xuedi_coder_model_LlamaJniEngine_*
- * 四个函数的实现，这一层 Kotlin 代码零改动。
+ * 配套 C++ 实现：app/src/main/cpp/llama_jni.cpp。
+ *
+ * 已对照 llama.cpp b4835 API 验证（见 survey 输出）：
+ *   - load  ：llama_backend_init → llama_model_load_from_file → llama_init_from_model
+ *   - decode：llama_tokenize → 预填充 llama_batch_get_one → llama_decode →
+ *             llama_sampler_sample / llama_sampler_accept / llama_token_to_piece
+ *   - free  ：llama_free → llama_model_free → llama_backend_free
  */
 class LlamaJniEngine : LlmEngine {
 
@@ -35,7 +39,7 @@ class LlamaJniEngine : LlmEngine {
             libLoaded?.let { return it }
             val ok = runCatching {
                 System.loadLibrary("xuedi-llama")
-                Log.i(TAG, "System.loadLibrary(\"xuedi-llama\") ✅ 成功")
+                Log.i(TAG, "System.loadLibrary(\"xuedi-llama\") ✅ 成功（JNI_OnLoad 里已 llama_backend_init）")
                 true
             }.getOrElse { t ->
                 Log.e(TAG, "System.loadLibrary(\"xuedi-llama\") ❌ 失败：${t.javaClass.simpleName} - ${t.message}")
@@ -55,14 +59,22 @@ class LlamaJniEngine : LlmEngine {
     private fun mkFallbackIfNeed(): MockLlmEngine = fallback
         ?: synchronized(fallbackLock) {
             fallback ?: run {
-                Log.w(TAG, "🧱 进入骨架 fallback：JNI 还没接上真实推理，回答由 MockLlmEngine 出具占位内容")
+                Log.w(TAG, "🧱 进入 fallback 模式（native 未实现/失败），回答由 MockLlmEngine 出具占位内容")
                 MockLlmEngine().also { fallback = it }
             }
         }
 
-    init {
-        // 构造时就尝试 load so，失败不抛（外部拿到这个引擎对象就是"安全的"）
-        ensureLibLoaded()
+    init { ensureLibLoaded() }
+
+    // =================================================================
+    // Java ↔ C++ 回调接口（C++ 层用反射调 Java）
+    // =================================================================
+    /** C++ 解码循环每出一段 UTF-8 字节（可能是 1~多个 token 合并，提高效率）就调一次。 */
+    private interface TokenCallback {
+        /** @param piece 已经用 llama_token_to_piece 解码好的字符串片段（UTF-8，可能含 emoji/中文） */
+        fun onToken(piece: String)
+        fun onDone(reason: String)
+        fun onError(message: String)
     }
 
     // =================================================================
@@ -77,56 +89,72 @@ class LlamaJniEngine : LlmEngine {
         val newCtx = runCatching {
             nativeInit(ggufAbsolutePath, nCtx, nThreads, nGpuLayers)
         }.getOrElse { t ->
-            Log.e(TAG, "nativeInit 异常（JNI stub？）：${t.javaClass.simpleName} - ${t.message}")
+            Log.e(TAG, "nativeInit 异常（JNI 未实现？文件路径？）：${t.javaClass.simpleName} - ${t.message}")
             0L
         }
         if (newCtx == 0L) {
-            Log.w(TAG, "loadModel: 加载失败，ctx=0（通常是 C++ nativeInit stub，未上 M5-4）。 fallback Mock 模式继续。")
+            Log.w(TAG, "loadModel: 加载失败 ctx=0 → fallback Mock 模式。")
             return false
         }
         if (ctx != 0L) runCatching { nativeRelease(ctx) }
         ctx = newCtx
-        Log.i(TAG, "loadModel ✅ GGUF 已加载，ctx=$ctx；线程=$nThreads")
+        Log.i(TAG, "loadModel ✅ GGUF 已加载 ctx=$ctx；线程=$nThreads ctx=$nCtx")
         return true
     }
 
     // =================================================================
-    // LlmEngine 接口实现
+    // LlmEngine 接口实现：真流式 Flow
     // =================================================================
 
-    override fun chatFlow(system: String, user: String): Flow<ChatChunk> = flow {
+    override fun chatFlow(system: String, user: String): Flow<ChatChunk> {
         val libOk = ensureLibLoaded()
         val curCtx = ctx
-        if (libOk && curCtx != 0L) {
-            // ================================================================
-            // 【真推理分支（M5-4 启用）】
-            // 真实实现：
-            //   nativeChat(curCtx, system, user) → C++ 层循环 llama_batch_decode
-            //   + 通过 Java 回调（JavaVM AttachCurrentThread）每次拿到 token
-            //     就 reflect 调一个 onToken(text) 方法；onToken 里再 emit 流。
-            // 现在 stub：C++ 层 nativeChat 未实现，必然抛 UnsatisfiedLinkError →
-            //   onFailure fallback Mock。
-            // ================================================================
-            val ok = runCatching {
-                // 占位：骨架期没有真回调机制，直接抛让下面 catch
-                nativeChat(curCtx, system, user)
-            }.isSuccess
-            if (ok) {
-                // 真成功了，什么都不做 —— 真实实现时会由 onToken 里负责 emit Done/Error
-                // 这里保险起见 emit 一下 Done，避免 UI pending 永远 true
-                emit(ChatChunk.Done("✅ JNI 推理完成（M5-4）", "stop"))
-                return@flow
-            }
-            // 抛了 → 继续 fallback
-            Log.w(TAG, "chatFlow: nativeChat 未实现（JNI stub），转 Mock fallback")
+        // —— 条件不满足 → 直接 fallback Mock ——
+        if (!libOk || curCtx == 0L) {
+            return mkFallbackIfNeed().chatFlow(system, user)
         }
-
-        // ========== 骨架 fallback：走 MockLlmEngine ==========
-        mkFallbackIfNeed().chatFlow(system, user).collect { emit(it) }
+        // —— 真推理：callbackFlow 包 C++ 回调 ——
+        return callbackFlow {
+            // 取消时顺便让 C++ 端跳出 decode 循环（用户在聊天页中途按取消/关闭APP场景）
+            val job = launch {
+                val cb = object : TokenCallback {
+                    override fun onToken(piece: String) {
+                        trySend(ChatChunk.Token(piece))
+                    }
+                    override fun onDone(reason: String) {
+                        trySend(ChatChunk.Done(reason, "stop"))
+                        channel.close()
+                    }
+                    override fun onError(message: String) {
+                        trySend(ChatChunk.Error(message))
+                        channel.close()
+                    }
+                }
+                val ok = runCatching {
+                    nativeChat(curCtx, system, user, cb)
+                }
+                if (ok.isFailure) {
+                    val t = ok.exceptionOrNull()
+                    Log.e(TAG, "nativeChat 异常：${t?.javaClass?.simpleName} - ${t?.message}；fallback Mock")
+                    // native 抛错（常见：native 方法签名对不上 UnsatisfiedLinkError）
+                    // → 立即 fallback Mock，UI 不空白
+                    channel.close()
+                    mkFallbackIfNeed().chatFlow(system, user).collect { send(it) }
+                }
+            }
+            job.invokeOnCompletion { cause ->
+                // 取消（聊天页用户停/切后台）：C++ 端 decode while 循环判断 cancel flag
+                runCatching { nativeChatCancel(curCtx) }
+                cause?.let { Log.w(TAG, "chatFlow cancel：${it.message}") }
+            }
+            awaitClose()
+        }
     }
 
     override fun release() {
         if (ctx != 0L) runCatching {
+            nativeChatCancel(ctx)  // 先取消正在跑的推理
+            Thread.sleep(30)        // 给 C++ while 循环一点时间跳出
             nativeRelease(ctx)
             Log.i(TAG, "nativeRelease ctx=$ctx 完成")
         }.onFailure { Log.w(TAG, "nativeRelease 异常：${it.message}") }
@@ -136,6 +164,7 @@ class LlamaJniEngine : LlmEngine {
 
     // =================================================================
     // JNI native 方法（M5-4 在 llama_jni.cpp 中补实现）
+    // 注意：native 函数签名必须和 C++ 的 JavaVM FindClass/GetMethodID 严格一致！
     // =================================================================
 
     /** 返回 ctx ptr（非 0 成功；0 失败） */
@@ -145,9 +174,15 @@ class LlamaJniEngine : LlmEngine {
     private external fun nativeRelease(ctx: Long)
 
     /**
-     * 阻塞式推理：解码到 EOS / 达到最大 token 数才返回。
-     * 真实现里 C++ 端在解码循环中回调 Java onToken(String)。
-     * 当前 stub 未实现 → 抛 UnsatisfiedLinkError。
+     * 阻塞式推理，内部 while(llama_decode) 循环：
+     *   解码出 1 段（token_to_piece 结果）就反射调 [callback.onToken]；
+     *   结束 → onDone(reason)；出错 → onError(msg)。
+     *
+     * @param callback 不能写成匿名 long 传 handle，直接用 Java Object 传 C++ 层，
+     *        C++ 通过 FindClass("com/xuedi/coder/model/LlamaJniEngine$TokenCallback") 拿到 methodID。
      */
-    private external fun nativeChat(ctx: Long, system: String, user: String)
+    private external fun nativeChat(ctx: Long, system: String, user: String, callback: TokenCallback)
+
+    /** 中途取消：C++ 端设 g_cancel 原子标志，下次 llama_decode 前判断跳出 */
+    private external fun nativeChatCancel(ctx: Long)
 }

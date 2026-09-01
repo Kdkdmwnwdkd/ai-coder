@@ -87,12 +87,15 @@ set(LLAMA_WERRORS         OFF CACHE BOOL "" FORCE)
 add_subdirectory(${LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama_build)
 
 # =====================================================
-# M5-2 占位验证：llama_jni_stub.cpp → libxuedi-llama.so
-#   只做 JNI_OnLoad，确认 Gradle+NDK+CMake+链接llama静态库整个链路能过。
-# M5-4 会把这个源码替换成真正的 llama_jni.cpp（真tokenize/batch/decode）
+# M5-4 真推理：llama_jni.cpp → libxuedi-llama.so
+#   JNI_OnLoad 里缓存 TokenCallback methodIDs + llama_backend_init 一次
+#   nativeInit: llama_model_load_from_file → llama_init_from_model
+#   nativeChat: tokenize → prompt batch 预填充 → sampling chain (top_k/top_p/temp/dist)
+#               → while(sample→accept→token_to_piece→Java onToken)
+#   nativeRelease: llama_free → llama_model_free
 # =====================================================
 add_library(xuedi-llama SHARED
-    llama_jni_stub.cpp
+    llama_jni.cpp
 )
 
 target_include_directories(xuedi-llama PRIVATE

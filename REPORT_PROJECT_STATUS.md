@@ -1,8 +1,9 @@
 # AI编程助手 · 项目状态报告
 
 > 用途：上下文丢失时直接读这份文件就能无缝续上。
-> 最近更新：2026-09-01 · 最新成功构建 Run#34（commit `77f7c5f`，GitHub Actions run id `33461691965`）✅
+> 最近更新：2026-09-01 · M1-M7 全部完成 · 最新成功构建 Run#39（commit `b2d7258`，tag `v1.0.0`）✅
 > 仓库：`Kdkdmwnwdkd/ai-coder`（public，默认分支 main）
+> GitHub Release v1.0.0：https://github.com/Kdkdmwnwdkd/ai-coder/releases/tag/v1.0.0
 
 ---
 
@@ -31,8 +32,8 @@
 | M3 | UI 4 页面（聊天/插件/设置/关于）+ Navigation + Coil 照片背景 | ✅ Done |
 | M4 | 管理层 Gson + DataStore + ThemeStore + PluginManager | ✅ Done |
 | M5 | JNI llama.cpp 真推理集成 | ✅ Done（构建通过，**待真机验证**） |
-| M6 | ACTION 执行完善（openUrl/share + 健壮性 + 单测） | 🟡 待做 |
-| M7 | Release 打包（签名 Secrets + release Job + GitHub Release v1.0） | 🟢 待做 |
+| M6 | ACTION 执行完善（openUrl/share + 健壮性 + 单测） | ✅ Done |
+| M7 | Release 打包（签名 fallback + release Job + GitHub Release v1.0） | ✅ Done（v1.0.0 已发布） |
 
 ### M5 子步骤进度
 
@@ -43,6 +44,23 @@
 | M5-3 | LlamaJniEngine Kotlin 骨架 + InferenceForegroundService 前台保活 + fallback Mock | ✅ |
 | M5-4 | JNI 真推理（callbackFlow 流式 + nativeChat 回调 + nativeChatCancel 取消） | ✅ 构建通过 |
 | M5-真机 | 下载 APK → 魅族 20 五步验证 | 🔴 待做（需物理设备） |
+
+### M6 子步骤进度（✅ 全部完成）
+
+| 子步骤 | 内容 | 状态 |
+|---|---|---|
+| M6-1 | ActionExecutor 完善：open_app 找不到包→Toast+应用商店(market://)→浏览器 Play→设置页三级 fallback；新增 open_url / share；新增 friendlyName() | ✅ |
+| M6-2 | ChatPage 消息卡片下方加 ACTION 按钮 LazyRow 横向滚动，点击执行 + Toast 反馈 ✅/❌ | ✅ |
+| M6-3 | extractActions JVM 单测（13 case 覆盖各场景）+ build.gradle testOptions + testImplementation junit | ✅ |
+| M6-4 | commit + push，Run#36 (commit b0dae84) build-debug ✅ | ✅ |
+
+### M7 子步骤进度（✅ 全部完成）
+
+| 子步骤 | 内容 | 状态 |
+|---|---|---|
+| M7-1 | build.yml 加 build-release job（tag v* 触发 :app:assembleRelease，签名 fallback fixedDebug） | ✅ |
+| M7-2 | build.yml 加 publish-release job（tag v* 时下载 APK 挂 GitHub Release） | ✅ |
+| M7-3 | 打 tag v1.0.0 → Run#37 失败（storeFile missing）→ 修复 → 重打 tag → Run#39 ✅ → Release v1.0.0 已发布 | ✅ |
 
 ---
 
@@ -63,6 +81,9 @@
 | #32 `3805c4f` | C++ 编译 | `cannot jump from this goto statement to its label` | NDK clang 严格 C++：`goto cleanup_and_return` 跳过非平凡对象（sampler 等）初始化 | 删 `cleanup_and_return` label；所有取消/错误路径**就地** `sampler_free + DeleteGlobalRef + return` | → 触发 #33 |
 | #33 `8d9aae1` | Kotlin 编译 + 语义 | ① `inferred type is String but Throwable was expected` ② Done 把 reason 当 full | ① `ChatChunk.Error(msg: String)` 但构造器第一参是 `Throwable` ② `ChatChunk.Done(full, stopReason)` 把 stop reason 传成了 full 正文 | ① `Error(RuntimeException(msg), msg)` ② callbackFlow 内 `fullSb` 累积所有 onToken，onDone 时 `Done(fullSb.toString(), reason)` | → 触发 #34 |
 | **#34 `77f7c5f`** | **最终** | — | — | 两处 Kotlin bug 修完 | **✅ SUCCESS** |
+| #36 `b0dae84` | M6+M7 首推 | — | — | M6 ACTION 完善 + 单测 + M7 release job（debug 验证） | **✅ SUCCESS** |
+| #37 `b0dae84` | M7 release | `packageRelease FAILED: SigningConfig "release" is missing required property "storeFile"` | `signingConfigs.create("release")` 总会创建对象（哪怕 Secrets 没配属性没设全），`getByName("release")` 不抛异常 → 原 `runCatching{...}.getOrNull() ?: fixedDebug` 的 `?:` 永不触发，release 用了 storeFile=null 的不完整配置 | 改成显式判断 `if (releaseCfg?.storeFile != null) releaseCfg else fixedDebug` | → 触发 #39 |
+| **#39 `b2d7258`** | **M7 release 最终** | — | — | release 签名 fallback 到 fixedDebug（debug keystore），出 release APK + GitHub Release v1.0.0 | **✅ SUCCESS** |
 
 ### ChatChunk 签名（写错就重犯 #33 的错，务必照抄）
 
@@ -130,32 +151,37 @@ sealed class ChatChunk {
 
 ## 五、现在要做的事 + 之后要做的事（按优先级 🔴🟡🟢）
 
-### 🔴 最紧：下载 Run#34 APK → 真机验证（需物理魅族 20，AI 无法代劳）
+> M6/M7 已全部完成。剩余唯一工作 = 🔴 真机验证（需物理魅族 20，AI 无法代劳）。
 
-Artifact 下载页：`https://github.com/Kdkdmwnwdkd/ai-coder/actions/runs/33461691965` → Artifacts → `AI编程助手-debug-apk`（18.4 MB）
+### 🔴 最紧：下载 APK → 真机验证（需物理魅族 20，AI 无法代劳）
+
+两个可用 APK：
+- **Debug APK**：`https://github.com/Kdkdmwnwdkd/ai-coder/actions` 最新 Run#39 → Artifacts → `AI编程助手-debug-apk`（18.4 MB）
+- **Release APK**：`https://github.com/Kdkdmwnwdkd/ai-coder/releases/tag/v1.0.0`（GitHub Release v1.0.0，15.2 MB）
+
+> 推荐 release APK（更小、更接近正式版）。两者签名一致（都走 fixedDebug），可互相覆盖安装。
 
 **真机验证 5 步（每步必测，测完才算 M5 真完成）：**
 
-1. **装 APK** → 下载 Artifact → 传魅族 20 安装。签名固定了，应能直接覆盖旧版（若要卸载说明签名还错，到 §三 追加新条目）。
+1. **装 APK** → 下载 → 传魅族 20 安装。签名固定，应能直接覆盖旧版（若要卸载说明签名还错，到 §三 追加新条目）。
 2. **背景照片** → 设置页选照片 → 透明度调到 0.2 → 回聊天页看背景盒子是否出现照片。
 3. **真模型 + 真流式推理（核心！）** →
    - 下载 `Qwen2.5-Coder-3B-Instruct-Q4_K_M.gguf`（ModelScope，约 2GB）放手机
    - 设置 →「导入 GGUF 模型」→ 选它 → 等复制 →「已导入模型列表」出现 →「设为当前」
-   - 聊天页问「用 Kotlin 写一个 Android 按钮点击弹吐司」→ **看气泡逐字跳出**（真 JNI 吐 token）→ 结尾自动停 → 有 ACTION 标签点复制按钮验证剪贴板
-4. **取消推理** → 发长问题（如「写一个完整的 Android 登录页包含输入校验+ViewModel+DataStore」）→ 中途返回键退出聊天页 → Logcat 过滤 `nativeChatCancel` 出现 cancel=true → 再进聊天页不卡
-5. **魅族 Flyme 保活** → 设置「后台运行无限制」+「自启动」+「锁最近任务卡片」→ 开始长推理 → 锁屏切走 3 分钟 → 解锁回来推理还在推 token（靠前台服务）
+   - 聊天页问「用 Kotlin 写一个 Android 按钮点击弹吐司」→ **看气泡逐字跳出**（真 JNI 吐 token）→ 结尾自动停 → **有 ACTION 标签的话，消息下方会出现「复制」按钮，点击执行 + Toast 反馈**（M6 新增）
+4. **取消推理** → 发长问题 → 中途返回键退出聊天页 → Logcat 过滤 `nativeChatCancel` 出现 cancel=true → 再进聊天页不卡
+5. **魅族 Flyme 保活** → 设置「后台运行无限制」+「自启动」+「锁最近任务卡片」→ 开始长推理 → 锁屏切走 3 分钟 → 解锁回来推理还在推 token
 
-### 🟡 做完 M5 真机 → M6 ACTION 执行完善
-- ActionExecutor 补健壮性：openApp 找不到包 → 弹 Toast + 跳应用商店
-- 新增 `openUrl` / `share` 类型
-- 消息下方多个 Action 按钮横向滚动
-- 端到端单测 + Flyme 后台 3 分钟回归
+### 🟡 真机通过后的后续优化（非阻塞）
+- 用户提供 `shimmer_xuedi_release.jks` 后配 Secrets `SIGNING_*` → release 自动切正式签名（无需改代码，`build.gradle.kts` 已判断 storeFile）
+- release asset 文件名中文被处理成 `AI.`（`AI编程助手-...` 变 `AI.-...`），如需纯英文名可改 build.yml 的 OUT 变量
+- take_screenshot 需要 MediaProjection（权限+前台服务+ImageReader），当前仅 Toast 占位
 
-### 🟢 最后 M7 Release 打包
-- 用 `shimmer_xuedi_release.jks`（本地路径，**仓库内无此文件**，需从原备份 `legado-build-pub/signing/` 找，读 `signing/README.md` 拿密码）
-- base64 编码后存 GitHub Secrets：`SIGNING_STORE_FILE_B64` + `SIGNING_STORE_PASSWORD` + `SIGNING_KEY_ALIAS` + `SIGNING_KEY_PASSWORD`
-- `build.yml` 加 release Job → `:app:assembleRelease` → 出包挂 GitHub Release v1.0
-- 注意 `app/build.gradle.kts` 的 `signingConfigs.release` 已配好读这 4 个环境变量
+### ✅ 已完成里程碑（无需再动）
+- M1-M4 基础/UI/Room/管理层
+- M5 JNI llama.cpp 真推理（构建通过，待真机验证推理效果）
+- M6 ACTION 完善（open_app 三级 fallback / open_url / share / 横向按钮 / 13 case 单测）
+- M7 Release 打包（build-release job + publish-release job + GitHub Release v1.0.0 已发布）
 
 ---
 
@@ -196,11 +222,20 @@ Artifact 下载页：`https://github.com/Kdkdmwnwdkd/ai-coder/actions/runs/33461
 
 ---
 
-## 附：构建产物（Run#34，commit 77f7c5f）
+## 附：构建产物
 
-| Artifact | 大小 | artifact id | 保留 |
+### Run#39（commit `b2d7258`，tag `v1.0.0`）— 最新成功构建 ✅
+
+| Artifact | 大小 | 说明 | 保留 |
 |---|---|---|---|
-| `AI编程助手-debug-apk` | 18.4 MB | `9783403963` | 90 天 |
-| `gradle-build-debug-log` | 1.5 KB | `9783404246` | 30 天 |
+| `AI编程助手-release-apk` | 12.6 MB | release APK（fixedDebug 签名，可覆盖安装）| 90 天 |
+| `AI编程助手-debug-apk` | 18.4 MB | debug APK | 90 天 |
+| `gradle-build-release-log` | 1.7 KB | release 构建日志 | 30 天 |
+| `gradle-build-debug-log` | 1.5 KB | debug 构建日志 | 30 天 |
+
+### GitHub Release v1.0.0
+
+- URL：https://github.com/Kdkdmwnwdkd/ai-coder/releases/tag/v1.0.0
+- 资产：`AI.-release-b2d7258-arm64-v8a.apk`（15.2 MB，release APK，文件名中文被处理成 `AI.`，不影响下载）
 
 APK 内含真推理 `libxuedi-llama.so`（非 stub 假回复）。

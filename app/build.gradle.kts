@@ -24,8 +24,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 7
-        versionName = "2.2.0-M6-Formal-UI"  // v1.2.5：正式版 UI + 预热修复 + 内存状态条
+        versionCode = 8
+        versionName = "2.2.0-M7-Formal-UI"  // v1.2.6：修复 M6 build 20 个编译错误（Divider.startIndent / Triple4参数 / LoadDiagSnapshot 解构顺序）
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

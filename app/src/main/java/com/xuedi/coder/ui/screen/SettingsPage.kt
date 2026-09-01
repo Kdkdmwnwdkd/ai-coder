@@ -495,8 +495,9 @@ private fun ModelRowFormal(
     onDelete: () -> Unit
 ) {
     val mb = (m.sizeBytes / 1024 / 1024).toInt()
-    // 这个模型当前在内存中的状态
-    val (ctxVal, loadErr, _) = engineSnapshot
+    // 这个模型当前在内存中的状态（注意：data class destructuring 顺序与定义一致，
+    // 直接用属性访问更清晰，避免排错）
+    val ctxVal: Long = engineSnapshot.currentCtx
     val loadedToMemory = ctxVal != 0L
     val thisIsLastLoaded = engineSnapshot.lastLoadedPath == m.filePath
     val memStatus = when {

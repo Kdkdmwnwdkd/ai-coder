@@ -253,7 +253,7 @@ fun AboutPage() {
                         }
                         if (i < items.size - 1) {
                             Divider(
-                                startIndent = 14.dp,
+                                modifier = Modifier.padding(start = 14.dp),
                                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
                             )
                         }
@@ -324,7 +324,7 @@ fun AboutPage() {
                         }
                         if (i < items.size - 1) {
                             Divider(
-                                startIndent = 14.dp,
+                                modifier = Modifier.padding(start = 14.dp),
                                 color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f)
                             )
                         }
@@ -548,36 +548,43 @@ private val VERSION_HISTORY: List<Triple<String, String, String>> = listOf(
     )
 )
 
-private val LICENSE_ITEMS: List<Triple<String, String, String, String?>> = listOf(
-    Triple(
+private data class LicenseItem(
+    val name: String,
+    val url: String,
+    val license: String,
+    val note: String?
+)
+
+private val LICENSE_ITEMS: List<LicenseItem> = listOf(
+    LicenseItem(
         "llama.cpp", "https://github.com/ggerganov/llama.cpp", "MIT",
         "本地 GGUF 推理核心（CPU + llama.cpp C++ backend）。致敬 ggerganov 等贡献者。"
     ),
-    Triple(
+    LicenseItem(
         "AndroidX Room", "https://developer.android.com/jetpack/androidx/releases/room", "Apache-2.0",
         "SQLite 持久化层：模型/消息/话题三张表。"
     ),
-    Triple(
+    LicenseItem(
         "Jetpack Compose + Material3", "https://developer.android.com/jetpack/compose", "Apache-2.0",
         "UI 界面框架（底部 Tab / 卡片 / Drawer / 流式布局）。"
     ),
-    Triple(
+    LicenseItem(
         "Coil", "https://coil-kt.github.io/coil/", "Apache-2.0",
         "背景照片与图像异步加载（Kotlin Coroutine first）。"
     ),
-    Triple(
+    LicenseItem(
         "Kotlin Coroutines & Flow", "https://github.com/Kotlin/kotlinx.coroutines", "Apache-2.0",
         "异步调度、StateFlow 响应式 UI、Room Flow 监听。"
     ),
-    Triple(
+    LicenseItem(
         "DataStore Preferences", "https://developer.android.com/topic/libraries/architecture/datastore", "Apache-2.0",
         "主题/背景/透明度 键值持久化（ThemeStore）。"
     ),
-    Triple(
+    LicenseItem(
         "Koin", "https://insert-koin.io/", "Apache-2.0",
         "轻量级依赖注入（ViewModel / EngineHolder / DAO 管理）。"
     ),
-    Triple(
+    LicenseItem(
         "Qwen 系列模型", "https://modelscope.cn/models/Qwen/", "Apache-2.0",
         "阿里云千问开源模型，Qwen2.5-3B-Instruct 的 GGUF 量化版本为本应用推荐默认模型。"
     )

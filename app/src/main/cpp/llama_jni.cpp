@@ -355,20 +355,28 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     // -------- 4) 预填充 prompt（按 n_batch 切片） --------
     const llama_token eos = llama_vocab_eos(state->vocab);
     int32_t n_consumed = 0;
-    while (n_consumed < n_prompt) {
-        if (state->cancel.load()) {
-            cb_done(env, callback, "cancel");
-            goto cleanup_and_return;
+    {
+        bool prefillaunch = true;
+        while (n_consumed < n_prompt) {
+            if (state->cancel.load()) {
+                cb_done(env, callback, "cancel");
+                if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
+                env->DeleteGlobalRef(callback);
+                return;
+            }
+            int32_t n_eval = std::min<int32_t>(n_prompt - n_consumed, state->n_batch);
+            auto batch = llama_batch_get_one(&tokens[n_consumed], n_eval);
+            int decode_rc = llama_decode(state->ctx, batch);
+            llama_batch_free(batch);   // 必须释放（batch 内部分配了 seq_id 等指针数组，survey 注释明确说）
+            if (decode_rc != 0) {
+                cb_error(env, callback, "预填充 llama_decode FAIL（OOM？上下文不够？）");
+                if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
+                env->DeleteGlobalRef(callback);
+                return;
+            }
+            n_consumed += n_eval;
         }
-        int32_t n_eval = std::min<int32_t>(n_prompt - n_consumed, state->n_batch);
-        auto batch = llama_batch_get_one(&tokens[n_consumed], n_eval);
-        int decode_rc = llama_decode(state->ctx, batch);
-        llama_batch_free(batch);   // 必须释放（batch 内部分配了 seq_id 等指针数组，survey 注释明确说）
-        if (decode_rc != 0) {
-            cb_error(env, callback, "预填充 llama_decode FAIL（OOM？上下文不够？）");
-            goto cleanup_and_return;
-        }
-        n_consumed += n_eval;
+        (void)prefillaunch;
     }
     LOGD("nativeChat: prompt eval DONE n_consumed=%d", (int)n_consumed);
 
@@ -425,7 +433,6 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     LOGI("nativeChat: DONE. n_generated=%d, last_id=%d, eos=%d",
          (int)n_generated, (int)last_id, (int)eos);
 
-cleanup_and_return:
     if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
     env->DeleteGlobalRef(callback);
     return;

@@ -34,8 +34,6 @@ import kotlin.coroutines.CoroutineContext
  */
 class App : Application(), ImageLoaderFactory, CoroutineScope {
 
-    private companion object { const val TAG = "XuediApp" }
-
     override val coroutineContext: CoroutineContext = SupervisorJob() + Dispatchers.IO
     val appScope: CoroutineScope get() = this
 
@@ -103,6 +101,7 @@ class App : Application(), ImageLoaderFactory, CoroutineScope {
     }
 
     companion object {
+        private const val TAG = "XuediApp"
         lateinit var instance: App
             private set
     }

@@ -28,11 +28,11 @@ if (NOT EXISTS "${LLAMA_DIR}/CMakeLists.txt")
         "  找不到文件：${LLAMA_DIR}/CMakeLists.txt\n"
         "\n"
         "  正常流程：Gradle preBuild task ensureLlamaCppSource 会自动从\n"
-        "  https://github.com/ggerganov/llama.cpp/archive/refs/tags/b4812.tar.gz\n"
+        "  https://github.com/ggerganov/llama.cpp/archive/b4812.tar.gz\n"
         "  下载并解压到 cpp/llama.cpp/。\n"
         "\n"
         "  你看到这个错误 99% 是 Actions Runner 网络问题导致 curl 下载失败。\n"
-        "  手动解决：把 b4812 tag tar.gz 解压，把 llama.cpp-b4812/ 重命名为 llama.cpp/\n"
+        "  手动解决：把 b4812 压缩包（commit short hash，非 tag）解压，把 llama.cpp-b4812/ 重命名为 llama.cpp/\n"
         "  放在 app/src/main/cpp/ 下（目录结构必须 app/src/main/cpp/llama.cpp/CMakeLists.txt 直接存在）。\n"
         "------------------------------------------------------------")
 endif ()

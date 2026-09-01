@@ -225,21 +225,32 @@ tasks.register("ensureLlamaCppSource") {
     doLast {
         if (marker.exists() && marker.length() > 40_000) return@doLast
         cppDir.mkdirs()
+        // NOTE: b4812 是 commit short hash（不是 tag），URL 不带 /refs/tags/
+        //      走 GitHub archive 通用路由：https://github.com/<user>/<repo>/archive/<short_hash>.tar.gz
         val TAG = "b4812"
-        val URL = "https://github.com/ggerganov/llama.cpp/archive/refs/tags/$TAG.tar.gz"
+        val URLS = listOf(
+            "https://github.com/ggerganov/llama.cpp/archive/$TAG.tar.gz",
+            "https://mirror.ghproxy.com/https://github.com/ggerganov/llama.cpp/archive/$TAG.tar.gz",
+            "https://gh-proxy.com/https://github.com/ggerganov/llama.cpp/archive/$TAG.tar.gz",
+        )
         val tmpTgz = File(cppDir, "_dl_llama_$TAG.tar.gz")
-        println("[ensureLlamaCppSource] llama.cpp 源码缺失，下载 $URL ...")
-        // curl -L 跟随重定向；-f 失败返回非 0；--retry 重试；--max-time 300s
-        val curlResult = exec {
-            isIgnoreExitValue = true
-            commandLine(
-                "sh", "-c",
-                "curl -L -f --retry 3 --retry-delay 2 --max-time 300 -o '${tmpTgz.absolutePath}' '$URL'"
-            )
+        var lastExit = -1
+        for ((i, url) in URLS.withIndex()) {
+            println("[ensureLlamaCppSource] 下载源 #${i + 1}/${URLS.size} → $url")
+            val curlResult = exec {
+                isIgnoreExitValue = true
+                commandLine(
+                    "sh", "-c",
+                    "curl -L -f --retry 3 --retry-delay 2 --max-time 300 -o '${tmpTgz.absolutePath}' '$url'"
+                )
+            }
+            lastExit = curlResult.exitValue
+            if (curlResult.exitValue == 0 && tmpTgz.exists() && tmpTgz.length() > 1_000_000) break
+            tmpTgz.delete()
         }
-        check(curlResult.exitValue == 0 && tmpTgz.exists() && tmpTgz.length() > 1_000_000) {
-            "llama.cpp 源码下载失败（curl exit=${curlResult.exitValue}，文件大小=${tmpTgz.length()}B）。" +
-                "请手动将 https://github.com/ggerganov/llama.cpp/archive/refs/tags/$TAG.tar.gz 解压后内容放到 " +
+        check(tmpTgz.exists() && tmpTgz.length() > 1_000_000) {
+            "llama.cpp 源码下载失败（所有源失败，最后 curl exit=$lastExit，文件大小=${tmpTgz.length()}B）。" +
+                "请手动将 https://github.com/ggerganov/llama.cpp/archive/$TAG.tar.gz 解压后内容放到 " +
                 "${llamaDir.absolutePath}/（目标目录下必须直接有 CMakeLists.txt / ggml.c / llama.cpp 等文件，不能嵌套一层 llama.cpp-b4812）"
         }
         // 清理旧目录

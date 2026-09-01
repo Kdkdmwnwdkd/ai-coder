@@ -24,11 +24,10 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "2.2.0-M9-TRAE-UI+NoMoreLostToken"
-        // v1.2.8：① 卡/空气泡致命修：collectLatest→collect（之前永远cancel前一个token更新）
-        //        ② 闪退保险：Token<5w / Done<2w 截断 + firstOrNull 防NPE
-        //        ③ UI 正式 TRAE 风：去气泡内「我/AI编程助手」发送者名 → 左右圆形头像+正文；TopBar fallback=新对话 + 右➕新对话
+        versionCode = 11
+        versionName = "2.2.0-M10-CleanBuild"
+        // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
+        //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

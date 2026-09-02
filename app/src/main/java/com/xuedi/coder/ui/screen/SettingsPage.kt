@@ -81,6 +81,7 @@ import com.xuedi.coder.data.ModelEntity
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
+import com.xuedi.coder.model.QwenInferEngine
 import com.xuedi.coder.theme.ThemeMode
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
@@ -128,18 +129,31 @@ fun SettingsPage(
         .collectAsStateWithLifecycle(initialValue = null)
 
     // ---- 当前 JNI 引擎内存状态（给模型行的状态条用）----
-    // 🔴 注意：这里 **不能 remember(key=allModels)**！原因见旧注释。
-    // 🛡 v1.3.7 魅族修复：整块包 runCatching，任何 native 层 / ensureLibLoaded 里的异常都被捕获，
-    //    不再因为 libLoaded=未初始化而让 SettingsPage 直接崩。
-    val engSnapRaw = runCatching {
-        (App.instance.llmEngine as? LlamaJniEngine).let { eng ->
-            val libSt = eng?.run { LlamaJniEngine.libStatus() }
+    // 🔴 v1.3.24：根据引擎选择动态读 LlamaJniEngine 或 QwenInferEngine 的诊断信息
+    //   Qwen 引擎无 ctx 概念（单例 g_model）→ currentCtx=-1 表示"Qwen 引擎已加载"
+    var useQwenSwitch by remember { mutableStateOf(QwenInferEngine.useQwenEngine) }
+    val engineSnapshot = runCatching {
+        val app = App.instance
+        if (useQwenSwitch) {
+            val eng = app.qwenEngineRef()
+            val libSt = QwenInferEngine.libStatus()
             LoadDiagSnapshot(
-                libLoadedOk = libSt?.first,
-                libLoadError = libSt?.second,
-                currentCtx = eng?.currentCtx() ?: 0L,
-                lastLoadError = eng?.lastLoadError(),
-                lastLoadedPath = App.instance.modelManager.lastLoadedPath()
+                libLoadedOk = libSt.first,
+                libLoadError = libSt.second,
+                currentCtx = if (eng.isModelLoaded()) -1L else 0L,  // -1=Qwen已驻留(无ctx) 0=未驻留
+                lastLoadError = eng.lastLoadError(),
+                lastLoadedPath = app.modelManager.lastLoadedPath()
+            )
+        } else {
+            val eng = (app.llmEngine as? LlamaJniEngine)
+                ?: app.llamaEngineRef()
+            val libSt = eng.let { LlamaJniEngine.libStatus() }
+            LoadDiagSnapshot(
+                libLoadedOk = libSt.first,
+                libLoadError = libSt.second,
+                currentCtx = eng.currentCtx(),
+                lastLoadError = eng.lastLoadError(),
+                lastLoadedPath = app.modelManager.lastLoadedPath()
             )
         }
     }.getOrDefault(
@@ -151,7 +165,6 @@ fun SettingsPage(
             lastLoadedPath = null
         )
     )
-    val engineSnapshot = engSnapRaw
 
     // SAF: 选照片（image/*）→ UI层直接生效 + ThemeStore 持久化
     val pickBgLauncher = rememberLauncherForActivityResult(
@@ -267,8 +280,12 @@ fun SettingsPage(
                 onSetActive = { m ->
                     scope.launch {
                         val app = App.instance
-                        val holder = LlamaEngineHolder { app.llmEngine as? LlamaJniEngine }
-                        val (ok, tip) = app.modelManager.switchAndLoadModel(m.id, holder)
+                        val (ok, tip) = if (useQwenSwitch) {
+                            app.modelManager.switchAndLoadQwenModel(m.id, app.qwenEngineRef())
+                        } else {
+                            val holder = LlamaEngineHolder { app.llamaEngineRef() }
+                            app.modelManager.switchAndLoadModel(m.id, holder)
+                        }
                         Toast.makeText(
                             ctx, tip,
                             if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
@@ -285,7 +302,61 @@ fun SettingsPage(
         }
         item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
 
-        // ---- 分组：模拟模式（v1.3.11 方案A，防闪退兜底）----
+        // ---- 分组：引擎选择（v1.3.24 新增，Llama vs Qwen 极简推理器）----
+        item(key = "engine-select-group") {
+            SectionHeader(title = "⚙ 推理引擎（v1.3.24 beta）")
+        }
+        item(key = "engine-select-card") {
+            OutlinedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 56.dp)
+                        .padding(horizontal = 16.dp, vertical = 10.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = if (useQwenSwitch) "使用 Qwen 极简推理器（beta）" else "使用 Llama 引擎（v1.3.16 稳定版）",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontWeight = FontWeight.Medium
+                        )
+                        Text(
+                            text = if (useQwenSwitch)
+                                "ON=从零自写推理器（ggml算子，绕过 llama_tokenize/llama_decode 魅族20闪退路径，仅支持 1.5B Q4_K_M）"
+                            else
+                                "OFF=原有 llama.cpp b5180 推理链（3B/1.5B 都支持，v1.3.16 亲测稳定版路径）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            lineHeight = 14.sp
+                        )
+                    }
+                    Switch(
+                        checked = useQwenSwitch,
+                        onCheckedChange = { newChecked ->
+                            useQwenSwitch = newChecked
+                            QwenInferEngine.useQwenEngine = newChecked
+                            val tip = if (newChecked)
+                                "✅ 已切 Qwen 极简推理器（仅支持 Qwen2.5-1.5B Q4_K_M）"
+                            else
+                                "已切回 Llama 引擎（稳定版路径）"
+                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
+            }
+        }
+        item(key = "spacer2b") { Spacer(Modifier.height(18.dp)) }
+
+        // ---- 分组：模拟模式（仅 Llama 引擎模式下显示，对 Qwen 引擎无意义）----
+        if (!useQwenSwitch) {
         item(key = "mock-mode-group") {
             SectionHeader(title = "🧱 模拟模式（防闪退兜底）")
         }
@@ -328,6 +399,7 @@ fun SettingsPage(
                 }
             }
         }
+        } // ← if (!useQwenSwitch) end
 
         // ---- 分组 3：推理诊断 ----
         item(key = "diag-group") {
@@ -341,16 +413,21 @@ fun SettingsPage(
                     diagLines.clear()
                     diagRunning = true
                     addLog("══════════════════ 开始诊断 ══════════════════")
+                    addLog("当前引擎模式：${if (useQwenSwitch) "Qwen 极简推理器 (beta)" else "Llama 引擎 (b5180)"}")
                     scope.launch {
                         runDiagnosticImpl(
                             addLog = ::addLog,
                             selectedModel = selectedModel,
                             engineSnapshot = engineSnapshot,
-                            engine = App.instance.llmEngine as? LlamaJniEngine,
+                            engine = App.instance.llamaEngineRef(),
                             onModelNeedLoad = { m ->
                                 val app = App.instance
-                                val holder = LlamaEngineHolder { app.llmEngine as? LlamaJniEngine }
-                                app.modelManager.switchAndLoadModel(m.id, holder)
+                                if (useQwenSwitch) {
+                                    app.modelManager.switchAndLoadQwenModel(m.id, app.qwenEngineRef())
+                                } else {
+                                    val holder = LlamaEngineHolder { app.llamaEngineRef() }
+                                    app.modelManager.switchAndLoadModel(m.id, holder)
+                                }
                             }
                         )
                         diagRunning = false
@@ -358,7 +435,9 @@ fun SettingsPage(
                     }
                 },
                 onCancel = {
-                    (App.instance.llmEngine as? LlamaJniEngine)?.cancel()
+                    // 取消时两边都调
+                    runCatching { App.instance.llamaEngineRef().cancel() }
+                    runCatching { App.instance.qwenEngineRef().cancel() }
                     addLog("用户请求取消当前推理")
                 },
                 // —— v1.3.6 新增：纯手机端的抓日志和分享，不需要电脑/adb/root ——
@@ -388,6 +467,7 @@ fun SettingsPage(
                 },
                 onShareAll = {
                     val ctx = App.instance
+                    val app = App.instance
                     val header = buildString {
                         appendLine("AI编程助手诊断包 — v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
                         appendLine("生成时间：${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.CHINA).format(java.util.Date())}")
@@ -397,9 +477,18 @@ fun SettingsPage(
                         appendLine("CPU_ABI2：${android.os.Build.CPU_ABI2}（arm64-v8a 必为空）")
                         appendLine()
                         appendLine("═══════════════════════════════════════════")
-                        appendLine("当前模型：${App.instance.modelManager.lastLoadedPath() ?: "<未加载>"}")
-                        appendLine("引擎ctx：${(App.instance.llmEngine as? LlamaJniEngine)?.currentCtx() ?: 0L}")
-                        appendLine("最近一次 load 错误：${(App.instance.llmEngine as? LlamaJniEngine)?.lastLoadError() ?: "<无>"}")
+                        appendLine("当前激活引擎：${if (QwenInferEngine.useQwenEngine) "QwenInferEngine(极简自写beta)" else "LlamaJniEngine(b5180)"}；模拟模式=${LlamaJniEngine.forceMockMode}")
+                        appendLine("当前模型：${app.modelManager.lastLoadedPath() ?: "<未加载>"}")
+                        appendLine("—— Llama 引擎 ——")
+                        val llamaSt = LlamaJniEngine.libStatus()
+                        appendLine("  libLoaded=${llamaSt.first}  libErr=${llamaSt.second ?: "无"}")
+                        val llama = app.llamaEngineRef()
+                        appendLine("  ctx=0x${llama.currentCtx().toString(16)}  lastLoadErr=${llama.lastLoadError() ?: "<无>"}")
+                        appendLine("—— Qwen 引擎（v1.3.24 beta）——")
+                        val qwenSt = QwenInferEngine.libStatus()
+                        appendLine("  libLoaded=${qwenSt.first}  libErr=${qwenSt.second ?: "无"}")
+                        val qwen = app.qwenEngineRef()
+                        appendLine("  modelLoaded=${qwen.isModelLoaded()}  lastLoadErr=${qwen.lastLoadError() ?: "<无>"}")
                         appendLine("═══════════════════════════════════════════")
                         appendLine()
                     }
@@ -411,10 +500,10 @@ fun SettingsPage(
                         appendLine(diagBox)
                         appendLine()
                         if (fullLogcat.isNotBlank()) {
-                            appendLine("==== 抓 LlamaJni 日志 logcat -d 全部（${lastGrabLogcatFull.size} 行） ====")
+                            appendLine("==== 抓设备日志 logcat -d 全部（${lastGrabLogcatFull.size} 行，含 LlamaJni/qwen-core） ====")
                             appendLine(fullLogcat)
                         } else {
-                            appendLine("==== 抓 LlamaJni 日志 logcat -d （未抓，可在诊断卡先点「📥 抓LlamaJni日志」） ====")
+                            appendLine("==== 抓设备日志 logcat -d （未抓，可在诊断卡先点「📥 抓设备日志」） ====")
                         }
                         appendLine()
                         appendLine("==== crash_log.txt（如果有崩溃的话，App.instance.getExternalFilesDir(null)/crash_log.txt） ====")
@@ -979,7 +1068,8 @@ private fun MemoryStatusBar(status: MemStatus) {
                 modifier = Modifier.padding(end = 4.dp)
             )
             Text(
-                "✓ 已加载到内存  ·  ctx=0x${status.ctx.toString(16)}",
+                if (status.ctx == -1L) "✓ 已加载到内存  ·  Qwen 引擎驻留"
+                else "✓ 已加载到内存  ·  ctx=0x${status.ctx.toString(16)}",
                 fontSize = 11.sp,
                 color = Color(0xFF1A8E4F),
                 fontWeight = FontWeight.SemiBold
@@ -1284,6 +1374,9 @@ private suspend fun grabLlamaJniLogcatImpl(): List<String> = withContext(kotlinx
         "-s",
         "LlamaJni:V",
         "LlamaJniEngine:V",
+        "qwen-jni:V",       // v1.3.24+ 极简 Qwen 推理器 JNI 桥日志
+        "qwen-core:V",      // v1.3.24+ Qwen 推理核心诊断日志
+        "QwenInferEngine:V",// v1.3.24+ Qwen Kotlin 引擎日志
         "DEBUG:*",          // 系统崩溃记录（SIGSEGV/tombstone 的开头几行常打在 DEBUG tag）
         "AndroidRuntime:E",
         "ActivityManager:I"
@@ -1319,7 +1412,17 @@ private suspend fun runDiagnosticImpl(
     val maxMB = rt.maxMemory() / 1024 / 1024
     addLog("① JVM Heap: free=${freeMB}MB total=${totalMB}MB max=${maxMB}MB")
     addLog("② lib 状态: loaded=${engineSnapshot.libLoadedOk}  err=${engineSnapshot.libLoadError?:"(无)"}")
-    addLog("③ 内存 ctx: 0x${java.lang.Long.toHexString(engineSnapshot.currentCtx)}  lastLoadErr=${engineSnapshot.lastLoadError?:"(无)"}")
+    val ctxStr = when(engineSnapshot.currentCtx) {
+        -1L -> "Qwen 引擎已驻留（单例模型，无 ctx 指针）"
+        0L -> "0（模型未驻留内存）"
+        else -> "0x${java.lang.Long.toHexString(engineSnapshot.currentCtx)}"
+    }
+    addLog("③ 引擎状态: $ctxStr  lastLoadErr=${engineSnapshot.lastLoadError?:"(无)"}")
+    // 🔴 v1.3.24：如果引擎是 Qwen 极简推理器，诊断函数目前只完整支持 Llama（最小推理第 4 步会调 Llama chatFlow）。
+    //   前 3 步（环境/模型/加载）对 Qwen 有效，第 4 步会自动 fallback 到 Llama 跑最小推理作链路体检。
+    if (engineSnapshot.currentCtx == -1L) {
+        addLog("ℹ️  当前处于 Qwen 极简推理器模式：第 1~3 步诊断正常，第 4 步会用 Llama 引擎跑最小推理（作链路完整性体检）")
+    }
 
     // ---- 2. 模型存在性 ----
     if (selectedModel == null) {
@@ -1334,25 +1437,38 @@ private suspend fun runDiagnosticImpl(
     }
 
     // ---- 3. 确保引擎/模型已加载 ----
-    var ctxVal = engine?.currentCtx() ?: 0L
-    if (ctxVal == 0L) {
-        addLog("⚠️ ctx==0，模型还没加载到内存。尝试加载中（可能 10~30 秒，3B Q4_K_M 约 2.1GB）...")
+    // v1.3.24：引擎可能是 Llama(ctx=Long ptr) 或 Qwen(ctx=-1 哨兵表示已驻留)，用 snapshot 综合判断
+    val snapCtx = engineSnapshot.currentCtx
+    val llamaCtx = engine?.currentCtx() ?: 0L
+    var alreadyLoaded = snapCtx != 0L   // Llama: ptr != 0; Qwen: -1
+    if (!alreadyLoaded) {
+        addLog("⚠️ 模型还没加载到内存。尝试加载中（可能 10~30 秒，3B Q4_K_M 约 2.1GB）...")
         val (ok, tip) = onModelNeedLoad(selectedModel)
         addLog(if (ok) "✅ 加载完成：$tip" else "❌ 加载失败：$tip")
-        ctxVal = engine?.currentCtx() ?: 0L
-        if (ctxVal == 0L) {
-            addLog("❌ 仍 ctx==0，无法开始推理。常见原因：\n" +
+        if (!ok) {
+            addLog("❌ 加载失败，无法开始推理。常见原因：\n" +
                 "  · 内存不足 4GB → 关后台/重启手机后重试\n" +
                 "  · GGUF 文件损坏 → 删了重下\n" +
-                "  · 安装包架构不对 → 必须是 arm64-v8a APK")
+                "  · 安装包架构不对 → 必须是 arm64-v8a APK\n" +
+                "  · Qwen 模式：仅支持 Qwen2.5-1.5B-Instruct Q4_K_M（3B/其他量化暂不支持）")
             return
         }
     } else {
-        addLog("✅ ctx=0x${java.lang.Long.toHexString(ctxVal)} 已就绪，直接开始推理")
+        val mark = if (snapCtx == -1L) "Qwen 引擎" else "ctx=0x${java.lang.Long.toHexString(snapCtx)}"
+        addLog("✅ 模型已驻留内存（$mark），直接开始诊断")
     }
 
+    // ---- 诊断最小推理部分使用 Llama 引擎 ----
+    // （初版 Qwen 推理核心不在诊断内跑，因为 Llama 的最小推理诊断已经稳定且包含超时/错误收集。
+    //   如果用户要测试 Qwen 真推理：回到聊天页直接发消息即可。）
     if (engine == null) {
-        addLog("❌ App.llmEngine 不是 LlamaJniEngine 实例（可能还在用 Mock）。请重启 App 后重试。")
+        addLog("❌ Llama 引擎引用为空（极端初始化错误）。请重启 App 后重试。")
+        return
+    }
+    if (llamaCtx == 0L) {
+        addLog("ℹ️  Llama 引擎内存里还没模型（当前用的是 Qwen 模式），最小推理步骤跳过。\n" +
+            "   如需测试 Qwen 真推理：切回聊天页直接提问即可。")
+        addLog("══════════════════ 诊断结束 ══════════════════（跳过 Llama 最小推理）")
         return
     }
 

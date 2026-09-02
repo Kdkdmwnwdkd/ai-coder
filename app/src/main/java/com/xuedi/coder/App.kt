@@ -9,6 +9,7 @@ import com.xuedi.coder.model.LlamaJniEngine
 import com.xuedi.coder.model.LlmEngine
 import com.xuedi.coder.model.MockLlmEngine
 import com.xuedi.coder.model.ModelManager
+import com.xuedi.coder.model.QwenInferEngine
 import com.xuedi.coder.plugin.PluginManager
 import com.xuedi.coder.theme.ThemeStore
 import com.xuedi.coder.ui.screen.UiBackground
@@ -44,19 +45,39 @@ class App : Application(), ImageLoaderFactory, CoroutineScope {
     val modelManager: ModelManager by lazy { ModelManager(this) }
 
     /**
-     * M5-3 策略：优先 LlamaJniEngine（真JNI）。
-     *  什么时候 fallback Mock：
-     *   - libxuedi-llama.so 加载失败（极少见，NDK 链路已绿，除非安装包坏）
-     *   - LlamaJniEngine 构造/初始化有异常
+     * 🔴 v1.3.24：引擎双路分发。
+     *  QwenInferEngine.useQwenEngine 开关由 Settings 页切换：
+     *    · false（默认）→ 走 LlamaJniEngine（v1.3.16 稳定推理路径，已验证魅族20能跑）
+     *    · true          → 走 QwenInferEngine（从零写的极简推理器，不依赖 llama_tokenize/llama_decode）
      *
-     * 注：即便 so 加载成功，native 方法在 M5-4 前仍是 stub（无 C++ 实现），
-     * 这部分 fallback 在 LlamaJniEngine.chatFlow 内部处理，**不会抛到引擎层外面**。
+     * 两个引擎各自持有独立 native state（Llama: ctx, Qwen: g_model 单例），切换时自动 release 旧引擎。
      */
+    private val llamaEngine: LlamaJniEngine by lazy { LlamaJniEngine() }
+
+    private val qwenEngine: QwenInferEngine by lazy { QwenInferEngine() }
+
     val llmEngine: LlmEngine by lazy {
-        runCatching { LlamaJniEngine() as LlmEngine }
-            .onFailure { t -> Log.e(TAG, "LlamaJniEngine 创建失败，fallback MockLlmEngine：${t.message}") }
-            .getOrDefault(MockLlmEngine())
+        object : LlmEngine {
+            private fun active(): LlmEngine =
+                if (QwenInferEngine.useQwenEngine) qwenEngine else llamaEngine
+
+            override fun chatFlow(system: String, user: String) = active().chatFlow(system, user)
+            override fun cancel() {
+                // cancel 两边都调（防止切引擎瞬间旧引擎还在跑）
+                runCatching { llamaEngine.cancel() }
+                runCatching { qwenEngine.cancel() }
+            }
+            override fun release() {
+                runCatching { llamaEngine.release() }
+                runCatching { qwenEngine.release() }
+            }
+        }
     }
+
+    /** 直接获取 Llama 引擎引用（Settings/ModelManager 需要读 libStatus / ctx 等）*/
+    fun llamaEngineRef(): LlamaJniEngine = llamaEngine
+    /** 直接获取 Qwen 引擎引用（Settings/ModelManager 需要读 isModelLoaded / lastLoadError 等）*/
+    fun qwenEngineRef(): QwenInferEngine = qwenEngine
 
     override fun onCreate() {
         super.onCreate()
@@ -74,43 +95,45 @@ class App : Application(), ImageLoaderFactory, CoroutineScope {
             themeStore.backgroundPathFlow.collectLatest { path -> UiBackground.setUri(path) }
         }
 
-        // 3) 【M5-3 + M8 + v1.2.5】预热 LlamaJniEngine + 预加载 Room 里的当前模型
-        //    🔴 v1.2.5 关键修复：之前用 eng.loadModel() 直接加载，失败就默默 ctx=0，
-        //    用户进入 SettingsPage 看到「已选中 ✓」以为加载好了，但聊天页会报 ctx=0。
-        //    现在统一走 modelManager.switchAndLoadModel：
-        //      · 保证 nCtx=2048 低内存档
-        //      · lastLoadedPath 正确更新（SettingsPage「重新加载」不会重复 load）
-        //      · 失败时写入 lastLoadError（SettingsPage 内存状态能显示原因）
-        //      · 结果用 Toast 通知用户（用户启动 APP 就能知道模型加载成功/失败）
+        // 3) 【v1.3.24】引擎预热 + 预加载 Room 里的当前模型
+        //    · useQwenEngine=false → 走 LlamaJniEngine（通过 LlamaEngineHolder + switchAndLoadModel）
+        //    · useQwenEngine=true  → 走 QwenInferEngine（通过 switchAndLoadQwenModel，后面在 ModelManager 添加）
         appScope.launch(Dispatchers.Default) {
-            val eng = llmEngine
-            Log.i(TAG, "LlmEngine 预热完成：implementation=${eng.javaClass.simpleName}")
-            val libSt = (eng as? LlamaJniEngine)?.run { LlamaJniEngine.libStatus() }
-            libSt?.let { (ok, err) ->
-                Log.i(TAG, "JNI lib 状态 libLoaded=$ok  error=$err")
+            val useQwen = QwenInferEngine.useQwenEngine
+            Log.i(TAG, "预热：useQwenEngine=$useQwen；分发 wrapper=${llmEngine.javaClass.simpleName}")
+            // —— 打印两个引擎的 lib 状态（预热阶段都触发一次 ensureLibLoaded，避免首聊时才加载）——
+            runCatching {
+                val llamaSt = LlamaJniEngine.libStatus()
+                Log.i(TAG, "  · Llama lib status: loaded=${llamaSt.first} err=${llamaSt.second}")
             }
-            if (eng is LlamaJniEngine) {
-                val current = runCatching { modelManager.getSelected() }.getOrNull()
-                if (current != null) {
-                    Log.i(TAG, "预热加载 GGUF：${current.displayName}（nCtx=${modelManager.defaultNCtx}）")
-                    val holder = com.xuedi.coder.model.LlamaEngineHolder { eng }
-                    val (ok, tip) = runCatching {
-                        modelManager.switchAndLoadModel(current.id, holder)
-                    }.getOrElse { t ->
-                        false to "预热异常：${t.javaClass.simpleName}:${t.message}"
-                    }
-                    Log.i(TAG, "预热结果 ok=$ok tip=$tip")
-                    // 主线程 Toast 告诉用户结果（这样启动 App 就能感知到成功/失败）
-                    withContext(Dispatchers.Main) {
-                        android.widget.Toast.makeText(
-                            this@App,
-                            if (ok) "✓ 模型已自动加载：${current.displayName}" else "⚠ $tip",
-                            if (ok) android.widget.Toast.LENGTH_SHORT else android.widget.Toast.LENGTH_LONG
-                        ).show()
-                    }
+            runCatching {
+                val qwenSt = QwenInferEngine.libStatus()
+                Log.i(TAG, "  · Qwen  lib status: loaded=${qwenSt.first} err=${qwenSt.second}")
+            }
+            val current = runCatching { modelManager.getSelected() }.getOrNull()
+            if (current != null) {
+                val (ok, tip) = if (!useQwen) {
+                    // Llama 路径（与 v1.3.23 完全一致）
+                    Log.i(TAG, "预热加载(Llama)：${current.displayName} nCtx=${modelManager.defaultNCtx}")
+                    val holder = com.xuedi.coder.model.LlamaEngineHolder { llamaEngineRef() }
+                    runCatching { modelManager.switchAndLoadModel(current.id, holder) }
+                        .getOrElse { t -> false to "预热异常：${t.javaClass.simpleName}:${t.message}" }
                 } else {
-                    Log.i(TAG, "尚无选中的 GGUF 模型 → Settings → 导入后点「加载并设为当前模型」")
+                    // Qwen 路径
+                    Log.i(TAG, "预热加载(Qwen)：${current.displayName}")
+                    runCatching { modelManager.switchAndLoadQwenModel(current.id, qwenEngineRef()) }
+                        .getOrElse { t -> false to "Qwen 预热异常：${t.javaClass.simpleName}:${t.message}" }
                 }
+                Log.i(TAG, "预热结果 ok=$ok tip=$tip")
+                withContext(Dispatchers.Main) {
+                    android.widget.Toast.makeText(
+                        this@App,
+                        if (ok) "✓ 模型已自动加载(${(if(useQwen)"Qwen" else "Llama")})：${current.displayName}" else "⚠ $tip",
+                        if (ok) android.widget.Toast.LENGTH_SHORT else android.widget.Toast.LENGTH_LONG
+                    ).show()
+                }
+            } else {
+                Log.i(TAG, "尚无选中的 GGUF 模型 → Settings → 导入后点「加载并设为当前模型」")
             }
         }
     }

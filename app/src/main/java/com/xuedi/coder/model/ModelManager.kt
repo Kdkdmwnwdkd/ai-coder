@@ -186,10 +186,92 @@ class ModelManager(private val ctx: Context) {
         }
     }
 
-    /** 显式释放当前加载的模型（用户想清理内存时调用）。 */
+    /**
+     * 【v1.3.24 新】切换到指定模型并用 Qwen 极简推理器加载权重。
+     * 与 switchAndLoadModel(LlamaEngineHolder) 镜像，只是底层引擎换成 QwenInferEngine。
+     *
+     * Qwen 引擎加载参数更少（极简版内部固定 batch=1 / n_ctx 由模型超参推导），
+     * 只需要 GGUF 绝对路径。目前仅支持 Qwen2.5-1.5B Q4_K_M。
+     */
+    suspend fun switchAndLoadQwenModel(id: String, engine: QwenInferEngine): Pair<Boolean, String> = withContext(Dispatchers.IO) {
+        val m = dao.getById(id)
+            ?: return@withContext false to "❌ 模型不存在，请重新导入"
+        dao.selectOnly(id)
+
+        val libSt = QwenInferEngine.libStatus()
+        if (libSt.first == false) {
+            return@withContext false to buildString {
+                append("❌ Qwen JNI lib 未加载\n")
+                append(" · libqwen-jni.so loaded=").append(libSt.first).append("\n")
+                if (libSt.second != null) append(" · 原因：").append(libSt.second).append("\n")
+                append("\n建议：确认 APK ≥ v1.3.24（包含 libqwen-jni.so arm64-v8a），或切回 Llama 引擎模式")
+            }
+        }
+
+        if (lastLoadedPath.get() == m.filePath && engine.isModelLoaded()) {
+            return@withContext true to "✅ 已选中：${m.displayName}（Qwen 引擎已驻留内存）"
+        }
+
+        // 释放旧的（两边引擎都释放，避免互占内存）
+        runCatching {
+            engine.cancel()
+            Thread.sleep(30)
+            engine.release()
+        }
+        // 同时清 Llama 那边占的权重（切引擎场景最常见）
+        runCatching {
+            (ctx.applicationContext as? com.xuedi.coder.App)?.llamaEngineRef()?.also {
+                it.cancel(); Thread.sleep(20); it.release()
+            }
+        }
+        lastLoadedPath.set(null)
+        Thread.sleep(120)  // 稍多留一点时间给系统回收（Qwen 初版内存管理比较保守）
+
+        val f = runCatching { java.io.File(m.filePath) }.getOrNull()
+        val existSize = f?.let { if (it.exists()) "${it.length()/1024/1024}MB" else "文件不存在" } ?: "?"
+        Log.i(TAG, "switchAndLoadQwenModel 开始加载：${m.displayName} 文件=$existSize")
+
+        val ok = runCatching { engine.loadModel(ggufAbsolutePath = m.filePath) }.getOrDefault(false)
+        val loaded = engine.isModelLoaded()
+        val diagErr = engine.lastLoadError()
+
+        if (ok && loaded) {
+            lastLoadedPath.set(m.filePath)
+            Log.i(TAG, "switchAndLoadQwenModel ✅ ${m.displayName} 已加载")
+            true to buildString {
+                append("✅ Qwen 推理器加载成功：").append(m.displayName).append("\n")
+                append(" · 引擎：极简自写推理器（v1.3.24 beta）\n")
+                append(" · 文件：").append(existSize)
+            }
+        } else {
+            Log.e(TAG, "switchAndLoadQwenModel ❌ 失败：ok=$ok loaded=$loaded diag=$diagErr")
+            false to buildString {
+                append("❌ Qwen 推理器加载失败：").append(m.displayName).append("\n\n")
+                append("【诊断】\n")
+                append(" · nativeLoadModel 返回：").append(ok).append("\n")
+                append(" · 内存中是否驻留：").append(loaded).append("\n")
+                append(" · 文件状态：").append(existSize).append("\n")
+                if (diagErr != null) append(" · 错误：").append(diagErr).append("\n")
+                append("\n【初版限制 & 建议】\n")
+                append("1. 仅支持 Qwen2.5-1.5B-Instruct Q4_K_M（3B / 其他量化暂不支持）\n")
+                append("2. 关闭所有后台 App → 再点一次「🔄 加载到内存」\n")
+                append("3. 重启手机 → 打开 APP 直接设置，不要先开其他 App\n")
+                append("4. 若仍失败：Settings 里关「Qwen 新推理器」开关 → 切回 Llama 引擎（v1.3.16 稳定版路径）")
+            }
+        }
+    }
+
+    /** 显式释放当前加载的模型（用户想清理内存时调用）。同时释放 Llama + Qwen 两边。 */
     fun releaseLoaded(engine: LlamaEngineHolder) {
         runCatching {
             engine.llama()?.also {
+                it.cancel()
+                Thread.sleep(30)
+                it.release()
+            }
+        }
+        runCatching {
+            (ctx.applicationContext as? com.xuedi.coder.App)?.qwenEngineRef()?.also {
                 it.cancel()
                 Thread.sleep(30)
                 it.release()
@@ -200,14 +282,15 @@ class ModelManager(private val ctx: Context) {
 
     suspend fun deleteModel(id: String) {
         val m = dao.getById(id) ?: return
-        // 如果删除的正是当前加载的，先释放权重
+        // 如果删除的正是当前加载的，先释放权重（Llama + Qwen 两边都扫）
         if (m.filePath == lastLoadedPath.get()) {
             runCatching {
-                (ctx.applicationContext as? com.xuedi.coder.App)?.llmEngine?.also { eng ->
-                    if (eng is LlamaJniEngine) {
-                        eng.cancel()
-                        Thread.sleep(30)
-                        eng.release()
+                (ctx.applicationContext as? com.xuedi.coder.App)?.also { app ->
+                    runCatching {
+                        app.llamaEngineRef().also { it.cancel(); Thread.sleep(30); it.release() }
+                    }
+                    runCatching {
+                        app.qwenEngineRef().also { it.cancel(); Thread.sleep(30); it.release() }
                     }
                 }
             }

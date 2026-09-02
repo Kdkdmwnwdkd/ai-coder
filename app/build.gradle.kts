@@ -24,18 +24,18 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 34
-        versionName = "1.3.23-beta"
-        // v1.3.23-beta: 最保守乱码修复, 完全回退 v1.3.22 导致 SIGABRT 的改动
-        //   v1.3.22 闪退根因: 新增的 llama_tokenize("<|im_end|>") 探测调用在 b4835 +
-        //     骁龙 8 Gen 2 (魅族 20) 下触发 prefill 前 SIGABRT (jemalloc / batch 相关)
-        //   修复策略: 放弃任何 llama_tokenize 探测, 仅在 generate 停止条件内追加一行:
-        //     if (id == 151645) { cb_done(env, callback, "im_end"); break; }
-        //     其中 151645 == Qwen 系列词表中 <|im_end|> 的标准 special token id.
-        //   其他代码 100% 保持 v1.3.16 (8f90796): MAX_TOKENS=1024 不动, batch/logits/
-        //     tokenize 参数/ChatML 拼接 零行改动.
-        //   预期: 不闪退 (推理链 == v1.3.16 亲测稳定版). 若 151645 正确 → <|im_end|>
-        //     正常命中立即结束, 乱码尾巴根治; 若 151645 不对 → 行为与 v1.3.16 相同.
+        versionCode = 35
+        versionName = "1.3.24-beta"
+        // v1.3.24-beta: 新增从零自写的极简 Qwen 推理器（不依赖 llama.cpp 解码循环）
+        //   背景: v1.3.22 在魅族 20 / 骁龙 8 Gen 2 上 llama_tokenize 探测触发 prefill 前
+        //     SIGABRT, v1.3.23 硬编码 im_end id 虽不崩但仍有乱码尾巴风险.
+        //   新方案: qwen_jni.cpp + qwen_infer.cpp + ggml_loader.cpp 纯 ggml 算子推理.
+        //     · 绕过 llama_tokenize / llama_decode（自写 GGUF 解析 + BPE tokenizer + ggml 前向图）
+        //     · 仅支持 Qwen2.5-1.5B-Instruct Q4_K_M（初版，不做 3B / 速度优化）
+        //     · batch=1，每次只处理 1 个 token
+        //     · Settings 页新增「⚙ 推理引擎」开关切换：Llama 稳定版 ↔ Qwen 极简 beta
+        //   Kotlin 侧: QwenInferEngine.kt 实现 LlmEngine，App.llmEngine 变成双路分发 wrapper.
+        //   编译: CMake 新增 qwen-jni target，独立编为 libqwen-jni.so.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

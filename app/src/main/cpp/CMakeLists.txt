@@ -113,3 +113,33 @@ target_link_libraries(xuedi-llama PRIVATE
     log          # Android NDK __android_log_print
     z            # 部分 llama.cpp 版本可能需要
 )
+
+# =====================================================
+# 极简 Qwen 推理器 (v1.3.24+ 新增).
+#   与 llama JNI 完全解耦: 只用 ggml / ggml-cpu / ggml-base 做矩阵 + 算子,
+#   自写 GGUF loader + BPE tokenizer + transformer 前向图.
+# 输出为独立 libqwen-jni.so, Java 侧 com.xuedi.coder.model.QwenInferEngine 加载.
+# =====================================================
+add_library(qwen-jni SHARED
+    qwen_infer.cpp
+    ggml_loader.cpp
+    qwen_jni.cpp
+)
+
+target_include_directories(qwen-jni PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}   # qwen_infer.h / ggml_loader.h
+    ${LLAMA_DIR}/ggml/include     # ggml.h / ggml-cpu.h / ggml-backend.h ...
+)
+
+target_link_libraries(qwen-jni PRIVATE
+    ggml
+    ggml-cpu
+    ggml-base
+    log
+    z
+)
+
+# 编译期给一条 warning: 简化初版的已知问题 (让用户知道这是可运行但可能出垃圾的版本).
+target_compile_definitions(qwen-jni PRIVATE
+    QWEN_MINIMAL_V1
+)

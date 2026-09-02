@@ -20,9 +20,11 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.CheckCircle
@@ -1150,7 +1152,7 @@ private fun DiagnosticCard(
             //           an infinity maximum height」的厂商 ROM 特有崩溃。
             // 🔴 注意：rememberLazyListState / LaunchedEffect 必须在 Composable 作用域里，
             //    不能写在 LazyColumn { items {...} } DSL 块里（那不是 Composable 上下文）。
-            val diagLogListState = androidx.compose.foundation.lazy.rememberLazyListState()
+            val diagLogListState = rememberLazyListState()
             androidx.compose.runtime.LaunchedEffect(lines.size) {
                 if (lines.isNotEmpty()) runCatching {
                     // 避开 animateScrollTo：在某些厂商 ROM 下 Compose 重组会打断动画协程，
@@ -1171,7 +1173,7 @@ private fun DiagnosticCard(
                     // 🔴 关键：给一个最大高度约束，让内部 LazyColumn 的测量不是无穷大
                     .heightIn(max = 420.dp)
             ) {
-                androidx.compose.foundation.lazy.LazyColumn(
+                LazyColumn(
                     state = diagLogListState,
                     modifier = Modifier
                         .fillMaxWidth()

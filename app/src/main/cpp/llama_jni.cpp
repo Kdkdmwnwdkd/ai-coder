@@ -584,9 +584,52 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         tokens.resize((size_t)real);
     }
     int32_t n_prompt = (int32_t)tokens.size();   // 非 const：BOS 修正时会 -= 1
-    // -------- 先拿 eos/bos（做 BOS 对齐校验要用，必须在 sampler/prefill 之前） --------
+    // -------- 先拿 eos/bos（做 BOS 对齐校验要用，必须在 sampler/prefill 之前！） --------
     const llama_token eos = llama_vocab_eos(state->vocab);
     const llama_token bos = llama_vocab_bos(state->vocab);
+    // 🔴🔴 v1.3.21 Hypothesis A 自检 + Hypothesis B im_end 停止符:
+    //   A: 手动 tokenize "<|im_start|>" 和 "<|im_end|>"（parse_spec=1），
+    //      各自应该只产生 1 个 special token id。如果返回 >1 → parse_spec 失效，
+    //      ChatML 控制符被拆成散字符 → 命中 Hypothesis A 乱码根因。
+    //   B: ChatML 对话真正的"assistant 说完停止符"是 <|im_end|> 不是 eos。
+    //      之前只判断 id == eos → 永远不命中 → 写到 MAX_TOKENS=1024 才停 →
+    //      尾部续写训练数据 = 你看到的超长中英文代码杂片段。
+    llama_token im_start_id = -1;   int32_t im_start_tok_count = 0;   std::string im_start_pieces;
+    llama_token im_end_id   = -1;   int32_t im_end_tok_count   = 0;   std::string im_end_pieces;
+    {
+        llama_token buf[16];
+        auto probe = [&](const char * s, llama_token & out_id, int32_t & out_cnt, std::string & out_pcs) {
+            int32_t n = llama_tokenize(state->vocab, s, (int32_t)strlen(s), buf, 16, /*add_spec=*/0, /*parse_spec=*/1);
+            int32_t real = (n > 0) ? n : ((n < 0) ? -n : 0);
+            out_cnt = real;
+            if (real == 1) out_id = buf[0];
+            char pc[32];
+            for (int32_t i = 0; i < std::min<int32_t>(real, 8); i++) {
+                int32_t pn = llama_token_to_piece(state->vocab, buf[i], pc, sizeof(pc), 0, 0);
+                if (pn > 0) out_pcs.append(pc, (size_t)pn);
+                else if (pn < 0) {
+                    std::vector<char> big(-pn + 2);
+                    llama_token_to_piece(state->vocab, buf[i], big.data(), (int)big.size(), 0, 0);
+                    out_pcs.append(big.data());
+                }
+                out_pcs.push_back('|');
+            }
+        };
+        probe("<|im_start|>", im_start_id, im_start_tok_count, im_start_pieces);
+        probe("<|im_end|>",   im_end_id,   im_end_tok_count,   im_end_pieces);
+    }
+    LOGI("nativeChat: 📌 vocab eos=%d bos=%d | <|im_start|> tok=%d id=%d pieces=[%s] | <|im_end|> tok=%d id=%d pieces=[%s]",
+         (int)eos, (int)bos,
+         im_start_tok_count, (int)im_start_id, im_start_pieces.c_str(),
+         im_end_tok_count,   (int)im_end_id,   im_end_pieces.c_str());
+    if (im_start_tok_count != 1 || im_end_tok_count != 1) {
+        LOGW("nativeChat: ⚠️⚠️ Hypothesis A 命中！parse_spec=1 没有把 ChatML special 识别成单个 token。"
+             "  <|im_start|> 拆成了 %d 个 token，<|im_end|> 拆成了 %d 个 token。"
+             "  模型看不到对话边界，直接纯续写训练数据 → 100%% 会输出你截图里的那种乱码。",
+             im_start_tok_count, im_end_tok_count);
+    } else {
+        LOGI("nativeChat: ✅ Hypothesis A 排除：<|im_start|> 和 <|im_end|> 都是单个 special token。parse_spec=1 正常。");
+    }
     LOGI("nativeChat: 📌 vocab eos=%d bos=%d, tokenize DONE n_prompt=%d / n_ctx=%d (tokenize 耗时 %" PRId64 " ms)",
          (int)eos, (int)bos, (int)n_prompt, (int)state->n_ctx, now_ms() - t0);
 
@@ -745,11 +788,24 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         llama_sampler_accept(sampler, id);
         int64_t ts1 = now_ms();
 
-        // b. EOS / 到上下文上限 → Done
+        // b. EOS / <|im_end|> / 到上下文上限 → Done
+        //    🔴 v1.3.21 Hypothesis B 核心修复：ChatML 对话的停止符是 <|im_end|> 不是 eos。
+        //      之前只判断 id == eos → 永远不 hit → generate 硬写到 MAX_TOKENS(1024)
+        //      → 正常回复写完后继续续写训练数据里的代码/论文/多语种片段 → 就是你截图里的"乱码"。
+        //      追加 im_end_id 判断后，正常 assistant 输出到 <|im_end|> 就停，不会乱写。
+        bool is_stop = false;
+        const char * stop_reason = "stop";
         if (id == eos) {
-            LOGI("nativeChat: 🏁 EOS hit at n_generated=%d (token_id=%d). Gen total %" PRId64 " ms",
-                 (int)n_generated, (int)id, now_ms() - t_gen0);
-            cb_done(env, callback, "stop"); break;
+            stop_reason = "eos";
+            is_stop = true;
+        } else if (im_end_id != -1 && id == im_end_id) {
+            stop_reason = "im_end";   // Hypothesis B 停止符（ChatML 对话真正的结束）
+            is_stop = true;
+        }
+        if (is_stop) {
+            LOGI("nativeChat: 🏁 %s hit at n_generated=%d (token_id=%d). Gen total %" PRId64 " ms",
+                 stop_reason, (int)n_generated, (int)id, now_ms() - t_gen0);
+            cb_done(env, callback, stop_reason); break;
         }
         if (n_consumed >= state->n_ctx - 2) {
             LOGI("nativeChat: 🏁 context_limit at n_generated=%d → DONE", (int)n_generated);

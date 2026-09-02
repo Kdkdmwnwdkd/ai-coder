@@ -24,9 +24,19 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 31
-        versionName = "1.3.20"
-        // v1.3.20: 仓库 git reset --hard 8f90796(v1.3.16-beta) 后只升版本号。
+        versionCode = 32
+        versionName = "1.3.21"
+        // v1.3.21 乱码根治 + 自诊断（基于 1.3.20 基 8f90796）
+        //   Hypothesis B 修复: generate 停止条件追加 <|im_end|> token_id 判定。
+        //     v1.3.16 只判断 id == eos（GGUF 的 <|endoftext|>）→ ChatML 对话结束用的
+        //     是 <|im_end|> → 永远不命中 → 硬写满 MAX_TOKENS=1024 → 正常回复后
+        //     续写训练数据（代码/论文片段/多语种）→ 用户截图里看到的超长乱码。
+        //     命中 <|im_end|> 后立即 cb_done("im_end"), 不再乱写。(零副作用)
+        //   Hypothesis A 自诊断日志: tokenize("<|im_start|>") 和 tokenize("<|im_end|>")
+        //     分别输出 token 数与 id。正常情况下每个应产生 1 个 special token；
+        //     若 >1 说明 parse_spec=1 失效(散字符化), 即 Hypothesis A 直接命中,
+        //     日志里会显式打 ⚠️ Hypothesis A 命中。手机端设置→诊断→抓LlamaJni日志可见。
+        // v1.3.20 (code=31): reset --hard 8f90796 (v1.3.16-beta) 后只升版
         //   v1.3.17/18/19 全部抛弃：v1.3.19 虽声称"回退"但仍闪退，
         //   为排除构建缓存/残留风险，整仓库强制 reset 到用户亲测过的 8f90796。
         //   代码与 v1.3.16-beta 逐字节一致。

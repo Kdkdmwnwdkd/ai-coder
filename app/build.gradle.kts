@@ -24,31 +24,19 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 32
-        versionName = "1.3.21"
-        // v1.3.21 乱码根治 + 自诊断（基于 1.3.20 基 8f90796）
-        //   Hypothesis B 修复: generate 停止条件追加 <|im_end|> token_id 判定。
-        //     v1.3.16 只判断 id == eos（GGUF 的 <|endoftext|>）→ ChatML 对话结束用的
-        //     是 <|im_end|> → 永远不命中 → 硬写满 MAX_TOKENS=1024 → 正常回复后
-        //     续写训练数据（代码/论文片段/多语种）→ 用户截图里看到的超长乱码。
-        //     命中 <|im_end|> 后立即 cb_done("im_end"), 不再乱写。(零副作用)
-        //   Hypothesis A 自诊断日志: tokenize("<|im_start|>") 和 tokenize("<|im_end|>")
-        //     分别输出 token 数与 id。正常情况下每个应产生 1 个 special token；
-        //     若 >1 说明 parse_spec=1 失效(散字符化), 即 Hypothesis A 直接命中,
-        //     日志里会显式打 ⚠️ Hypothesis A 命中。手机端设置→诊断→抓LlamaJni日志可见。
-        // v1.3.20 (code=31): reset --hard 8f90796 (v1.3.16-beta) 后只升版
-        //   v1.3.17/18/19 全部抛弃：v1.3.19 虽声称"回退"但仍闪退，
-        //   为排除构建缓存/残留风险，整仓库强制 reset 到用户亲测过的 8f90796。
-        //   代码与 v1.3.16-beta 逐字节一致。
-        // v1.3.16 (code=27): prefill 最后 token + generate 每 token logits=1 修复
-        //   v1.3.15 把 logits[0] 写死 0 → prefill 全程不产生 logits → generate 第一次
-        //   llama_sampler_sample(sampler, ctx, -1) 拿不到 logits → 访问空指针 → SIGSEGV @ addr=0x0。
-        //   现象: v1.3.15 prefill 246/246 全部完成 (248ms 史无前例), 但 generate 第一个
-        //   token 时 SIGSEGV。这是 batch malloc 循环问题已绕过后暴露的下一个 bug。
-        //   修法: prefill 循环里 is_last_prefill_token ? 1 : 0; generate 循环统一 logits=1。
-        //   其他保持 v1.3.15 配置 (n_batch=1, llama_batch_init 预分配, b5180)。code 26→27
-        // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
-        //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
+        versionCode = 33
+        versionName = "1.3.22-beta"
+        // v1.3.22-beta: 严格按「乱码联合诊断报告最终指令」执行
+        //   基线：从 v1.3.20 (git reset --hard 8f90796, 与用户亲测 v1.3.16 逐字节一致)
+        //   1) im_end_id 获取: tokenize("<|im_end|>", parse_spec=1)
+        //   2) generate 循环: 已有 if(id==eos) 后追加 if(id==im_end_id) break
+        //      根因: v1.3.16 只判 eos(<|endoftext|>)，但 ChatML assistant 实际
+        //      结束是 <|im_end|> → 永远不命中 → 写满 1024 token → 后半段乱码尾巴
+        //   3) MAX_TOKENS: 1024 → 512 (安全网兜底)
+        //   4) 诊断日志: stop_tokens 开头打印 + cb_done 原因标准化
+        //      (stop=EOS / im_end=ChatML / max_tokens / context_limit)
+        //   禁止事项全部遵守: 未改 batch / logits / tokenize 参数 / ChatML 拼接
+        //   (v1.3.21 含超范围探针代码，已废弃; v1.3.18/19 的闪退链不再复现)
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

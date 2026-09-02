@@ -1,376 +1,338 @@
-# Xuedi Coder AI APP — 完整开发计划（PLAN.md）
+# Xuedi Coder AI APP — 完整状态与接手计划（PLAN.md）
 
-> 本文档是给执行 AI 的完整指令。用户在另一个对话开启时，直接把全文粘贴过去即可开始工作。
+> 本文档是给**下一个执行 AI**的完整指令 + 状态报告。新对话直接把全文粘贴过去即可。
 > 仓库地址: https://github.com/Kdkdmwnwdkd/ai-coder
-> 当前最新 tag: **v1.3.25-beta**（fix3，CI 通过，APK 已出，待用户验证）
-> 目标平台: Android arm64-v8a，minSdk 26，targetSdk 34
-> 模型: Qwen2.5-1.5B-Instruct Q4_K_M（当前），未来 3B Q4_K_M（一套代码自动适配）
+> 主分支: main
+> **当前最新版本**: v1.3.25-fix5 (versionCode 37, commit 26ae5b7) ✅ CI 编译成功 ✅ APK 已出
+> 目标平台: Android arm64-v8a (minSdk 26, targetSdk 34)
+> 目标模型: Qwen2.5-1.5B-Instruct Q4_K_M (940MB GGUF)
+> 目标设备: 魅族 20 / 骁龙 8 Gen 2 / 12GB RAM
 
 ---
 
-## 一、当前状态（v1.3.25-beta fix3）
+## ⚠️ 紧急：最新 Bug 真相（v1.3.25-fix5 才修复）
 
-### 1.1 已完成：自写 forward pass 全部就位
+**之前 5 个版本 fix1~fix4 全没真正解决问题，因为 GGUF v3 loader 从文件第 16 字节开始就没按规范读！** 4 处根本性格式理解错误叠加：
+
+### 根因总表（按文件位置从头开始数）
+
+| # | GGUF 字段 | 规范 | 之前的错误写法 | 后果 |
+|---|----------|------|-------------|------|
+| **fix5b** | `header.tensor_count` (offset 8, 8B) | 固定 `uint64` | `vu64()` (ULEB128 变长) | 小值(如 367)碰巧值对，但读 1~2 字节就停，文件位置**少走了 6~7 字节** |
+| **fix5b** | `header.metadata_kv_count` (offset 16, 8B) | 固定 `uint64` | `vu64()` (ULEB128 变长) | 又少走 6~7 字节 |
+| **fix5c** | KV `value_type` enum | ARRAY=9 / INT8=1 / STRING=8 / FLOAT32=6 | `if (value_type == 1) { /* ARRAY */ }` | 把 INT8 当成 ARRAY 读；真正的 string/array 走错分支，**多/少读 N 字节** |
+| **fix5c** | KV 标量值 layout | value_type 直接决定字节数，**没有额外 scalar_type 字段** | `kv.scalar_type = r.r<uint32_t>()` 多读 4B | 每个标量 KV 多跳过 4 字节 |
+| **fix5d** | `gguf_type_size(FLOAT32)` | 4 | 8 (错) | 含 float 的 KV (如 rope_freq_base) 多读 4 字节 |
+| **fix5d** | `gguf_type_size(BOOL)` | 1 | 8 (错) | 含 bool 的 KV 多读 7 字节 |
+| **fix5a** | `LOG(...)` 宏 | 需要 `#include <android/log.h>` | 之前缺 include + define | 导致 fix4 编译失败，正确的 weights_start 逻辑**根本没编进 APK** |
+| ~~fix4~~ | tensor offset 相对 weights_start | `abs_off = weights_start + off` ✓ | 之前循环内用 `r.off`（每轮在变）当 base | fix4 逻辑本身对，但因为 fix5a 编译错误**从没运行过** |
+| fix2 | tensor info 的 `ne[d]` / `offset` | 固定 `uint64` | 之前 `vu64()` | 之前修过了，已 OK |
+| fix3 | `ggml_type_size(Q4_K_M)` 张量字节 | 144 (block 144B) | 之前 256 | 之前修过了，已 OK |
+
+### GGUF v3 官方规范（必须完全照搬，一字之差都要死）
+
+来自 ggml-org/ggml 仓库 `docs/gguf.md` (commit c044a8e)：
+
+```c
+// ===== HEADER (24 bytes) =====
+struct gguf_header_t {
+  uint32_t magic;              // 4B  = 0x46554747 ("GGUF" LE)
+  uint32_t version;            // 4B  = 3
+  uint64_t tensor_count;       // 8B  固定 uint64，不是 ULEB128！
+  uint64_t metadata_kv_count;  // 8B  固定 uint64，不是 ULEB128！
+  gguf_metadata_kv_t metadata_kv[metadata_kv_count];
+};
+
+// ===== KV VALUE =====
+enum gguf_metadata_value_type : uint32_t {
+  UINT8=0, INT8=1, UINT16=2, INT16=3, UINT32=4, INT32=5,
+  FLOAT32=6,  // 4 bytes, 不是 8！
+  BOOL=7,     // 1 byte, 不是 8！
+  STRING=8,   // gguf_string_t = ULEB128 len + bytes (无 NUL)
+  ARRAY=9,    // array_type(uint32) + arr_count(uint64) + elements
+  UINT64=10, INT64=11, FLOAT64=12  // 8 bytes each
+};
+
+// ===== TENSOR INFO =====
+struct gguf_tensor_info_t {
+  gguf_string_t name;          // ULEB128 len + bytes
+  uint32_t n_dimensions;       // 4B fixed
+  uint64_t dimensions[n_dim];  // 8B each, fixed
+  uint32_t type;               // ggml_type enum (Q4_K_M=13, F16=1, F32=0, ...)
+  uint64_t offset;             // 8B fixed, 相对于 tensor_data section 起点！不是文件起点！
+};
+
+// ===== DATA SECTION =====
+// tensor info 读完后，align 到 general.alignment (默认 32) → weights_start
+// 每个 tensor data 地址 = p + weights_start + tensor.offset
+```
+
+**当前 ggml_loader.cpp 的实现状态**：commit 26ae5b7 里已按上表**全部改对**。从 fix1 到 fix5 一共 10 个坑的清单在上面表格里，不要遗漏任何一个复查。
+
+---
+
+## 一、当前状态快照（v1.3.25-fix5, commit 26ae5b7）
+
+### 1.1 源码结构
 
 ```
 app/src/main/cpp/
-├── qwen_forward.cpp    ✅ 新建，~500 行纯数学 forward pass（无 ggml 依赖）
-├── qwen_forward.h      ✅ 新建，对外接口
-├── ggml_loader.cpp     ✅ 修了 Bug#5(static) + GGUF tensor info 解析 + ggml_type_size(Q4_K_M)
-├── qwen_infer.cpp      ✅ 重写，forward_step 调 qwen_forward 接口，删掉所有 ggml hack
-├── qwen_infer.h        ✅ 保留，数据结构定义
-├── qwen_jni.cpp        ✅ JNI 桥接，不动
-├── CMakeLists.txt      ✅ qwen-jni target，不链接 ggml/ggml-cpu/ggml-base
-└── llama.cpp/          第三方源码（已不编进 libqwen-jni.so）
+├── ggml_loader.cpp  ← ⭐ 本轮主要工作文件，修了 10 个格式 bug
+├── qwen_forward.cpp ← 自写 forward pass（RMSNorm/matmul/RoPE/Attn/SwiGLU/dequant/sampler）
+├── qwen_forward.h   ← 对外接口
+├── qwen_infer.cpp   ← generate 循环、Session、BPE encode/decode 简化实现
+├── qwen_infer.h     ← 数据结构
+├── qwen_jni.cpp     ← JNI 桥接：nativeLoadModel / nativeGenerate / nativeRelease / nativeChatCancel
+├── llama_jni.cpp    ← 原有 Llama 引擎（先保留做对照组，等 Qwen 稳定后删）
+├── llama_jni_stub.cpp
+└── CMakeLists.txt   ← 两个 target: qwen-jni（不依赖 llama）+ xuedi-llama（依赖 llama.cpp）
+
+app/src/main/java/.../
+├── engine/QwenInferEngine.kt   ← Kotlin 侧 Qwen 引擎包装，开关控制
+├── engine/LlamaJniEngine.kt    ← Kotlin 侧 Llama 引擎包装（对照组）
+└── App.kt / SettingsScreen.kt  ← 双引擎切换开关 + 诊断页（抓 logcat / 分享诊断包）
 ```
 
-### 1.2 踩过的 8 个坑（全修了）
+### 1.2 已验证 / 未验证
 
-| # | Bug | 位置 | 根因 | 修复 |
-|---|-----|------|------|------|
-| 1 | ggml_tensor data 字段硬编码偏移 0x50/8 | make_weight_view() | ggml b5180 data 在 offset 176，不是 8/80 | **彻底放弃 ggml**，forward 全自写 |
-| 2 | ggml_new_tensor no_alloc 下 data=NULL | ggml 内部 | ggml_new_tensor_impl no_alloc 不分配 data | 同上，不用 ggml 了 |
-| 3 | Attention 全跳过 | qwen_infer.cpp 第 424 行 | 占位代码 `auto * attn_out = ln1` | **qwen_forward.cpp 真实现 GQA Attention** |
-| 4 | KV cache 只写 pos 没写值 | qwen_infer.cpp 第 532 行 | 占位代码 `kv_pos = pos + 1` | **write_kv_cache() 真写 FP16** |
-| 5 | static s_first/s_base 残留 | ggml_loader.cpp | 第二次 load 用第一次的 base | **去掉 static，直接算绝对偏移** |
-| 6 | Q4_K_M block 大小算成 262B | qwen_forward.cpp v1 | 以为 scales 128B，实际 12B | **block=144B (2+2+12+128)，照搬 llama.cpp get_scale_min_k4** |
-| 7 | GGUF tensor info ne[d]/offset 用 LEB128 读 | ggml_loader.cpp | GGUF v3 tensor info 用固定 uint64，不是 ULEB128 | **r.r<uint64_t>() 替换 r.vu64()** |
-| 8 | ggml_type_size(Q4_K_M) 算成 256 | ggml_loader.cpp | 以为 scales 128B，实际 12B | **改返回 144** |
+| 项 | 状态 | 说明 |
+|---|------|------|
+| CI 编译 Debug APK | ✅ 通过 | run #154 success |
+| APK 大小 | ✅ 正常 | 22.3MB |
+| 旧 Llama 引擎 (v1.3.16 路径) 加载模型 | ✅ OK | 用户截图显示 ctx=0x4bffff85737d2ef0 已加载 |
+| 旧 Llama 引擎 推理输出 | ❌ 乱码 | 用户截图"你好"回复全是垃圾字符（elsddyuncios$熟 intersectionsce…） |
+| Qwen 自写引擎 load_model | ❓ 待验证 | **之前 fix4 的 APK 根本没编译成功**，所以 fix5 是第一次包含正确 GGUF 解析的 APK |
+| Qwen 自写引擎 forward 输出 | ❓ 完全未验证 | fix5 之前模型都没加载成功过 |
+| BPE tokenize/detokenize 正确性 | ❓ 未验证 | ggml_loader.cpp 里有极简实现，极可能有 bug |
+| Q4_K_M dequantization | ❓ 未验证 | 照搬 llama.cpp b5180 公式，但未跑过真实数据 |
 
-### 1.3 三个 fix 的 commit
+### 1.3 用户上次反馈（v1.3.25-beta code 36 / fix3 版 APK）
 
-| Commit | 修了什么 |
-|--------|---------|
-| 03fc7c4 | fix1: Q4_K_M 反量化照搬 llama.cpp b5180（block 144B, fp16 d/dmin, get_scale_min_k4） |
-| fe3faff | fix2: GGUF tensor info ne[d]/offset 从 vu64()(LEB128) 改 r<uint64_t>()(fixed) |
-| 2b9f7b0 | fix3: ggml_type_size(Q4_K_M) 从 256 改成 144（scales 是 12B 不是 128B） |
+**两份诊断包要点：**
 
-### 1.4 测试结果
+**第一份（Qwen 引擎开）：**
+```
+qwen-jni: nativeLoadModel failed: tensor offset out of range
+QwenInferEngine: loadModel ❌：nativeLoadModel 返回 false
+```
+→ 因为 code 36 是 fix3，没包含 fix4 和 fix5（修 GGUF 格式 10 个坑 + LOG 编译错误）。模型加载失败是预期内的。
 
-- ✅ CI 编译通过（Debug + Release）
-- ✅ APK 大小 15.9 MB，arm64-v8a
-- ✅ libqwen-jni.so 不再链接 ggml/llama.cpp（100% 自写）
-- ❓ 用户还没验证 forward 输出是否正常（fix3 刚出）
+**第二份（Llama 引擎开）：**
+```
+LlamaJniEngine: ctx=0x4bffff85737d2ef0 (加载成功)
+推理结果: elsddyuncios熟 intersectionsce$errors无辜援
+         blanc羕y6hou pregn Każdyedom anchor ...
+```
+→ Llama 引擎 b5180 能加载 1.5B 模型，但输出乱码。原因之前已经定位过：v1.3.16 只判断 EOS（`<|endoftext|>`），ChatML 格式的 assistant 结束实际输出 `<|im_end|>` (id 151645)，两 token 不同 → 永远不停止 → 输出满 512 tokens 垃圾。后来 v1.3.22 加过 im_end 判断，但 b5180 的 `llama_tokenize` 在魅族 20 上不可靠（v1.3.22 直接崩溃）。
 
-### 1.5 可能还存在的问题（如果 fix3 还是乱码）
+**所以自写 Qwen 引擎是唯一出路，不要在 Llama 引擎上再花时间。**
 
-如果 fix3 APK 还是乱码，问题在 forward 算子本身：
-1. matmul 的行/列顺序反了（行主序 vs 列主序）
-2. RoPE 旋转方向反了（cos/sin 对调）
-3. Attention 的 mask 或 GQA repeat 逻辑错了
-4. lm_head 应该 tie token_embd.weight 但 transpose 逻辑错了
-5. dequant_tensor 对 F16/F32 权重的处理路径有 bug
+### 1.4 APK 下载
 
-**排查方法**：在 qwen_forward.cpp 每个算子前后加 LOG，打印输入输出的前几个值，看哪步开始变垃圾。
+用户下载地址（本地 HTTP serve）：
+```
+http://<workspace-host>:8080/AI%E7%BC%96%E7%A8%8B%E5%8A%A9%E6%89%8B-v1.3.25-fix5-code37-arm64-v8a.apk
+```
+APK 文件本地路径: `/workspace/_serve_apk/AI编程助手-v1.3.25-fix5-code37-arm64-v8a.apk`
+
+CI 构建地址: https://github.com/Kdkdmwnwdkd/ai-coder/actions/runs/33660906694
+
+### 1.5 logcat 标签（用户诊断包里看这几个 tag）
+
+| Tag | 来源文件 | 内容 |
+|-----|---------|------|
+| `qwen-loader` | ggml_loader.cpp | GGUF 解析：header_end / weights_start / alignment / 每个 tensor 的 off/abs/bytes/ne |
+| `qwen-core` | qwen_jni.cpp line 74 | 模型 dump：n_layer/n_embd/vocab_size/关键 tensor 找到没 |
+| `qwen-jni` | qwen_jni.cpp | JNI 入口：load 成功/失败、callback method、错误信息 |
+| `QwenInferEngine` | Kotlin | 上层 loadModel / chatFlow / cancel 状态 |
+| `LlamaJni` / `LlamaJniEngine` | llama_jni.cpp | 旧 Llama 引擎（对照组） |
 
 ---
 
-## 二、整体架构（六层，自己写五层）
+## 二、用户测试步骤（给下一个执行 AI 发用户的）
 
+用户装完 v1.3.25-fix5 APK 后**按顺序做**：
+
+1. **确认版本正确**：「关于」页 → versionName=1.3.25-fix5, code=37
+2. **设置页**：打开「使用 Qwen 极简推理器(beta)」开关
+3. **模型管理**：点「🔄 重新加载到内存」按钮
+4. **观察**：
+   - 如果显示 `✅ 已加载到内存 · ctx=...` → 模型加载成功 ✅ → 继续第 5 步
+   - 如果显示 `❌ Qwen 推理器加载失败` → **跳到下方 2.1 节** 抓日志
+5. **对话页问"你好"**，等待回复
+6. **无论结果如何**，去「设置→推理诊断」→ 点「📤 分享诊断包」→ 发给执行 AI
+
+### 2.1 如果模型加载还是失败（tensor offset out of range）
+
+抓诊断包，找 `qwen-loader` 的日志。**正常应该有：**
 ```
-┌─────────────────────────────────────────────────┐
-│ 第6层: UI 界面（Jetpack Compose，借的）          │
-│ 对话页 / 设置页 / 插件卡片 / 模型管理            │
-└────────────────────┬────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────┐
-│ 第5层: 插件路由（自己写，Kotlin）                 │
-│ PluginRouter + Plugin 接口，6+ 插件注册/卸载       │
-└────────────────────┬────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────┐
-│ 第4层: 联网与工具层（自己写，Kotlin）             │
-│ SearchEngine / GitHubEngine / WebFetchEngine /   │
-│ TermuxEngine                                     │
-└────────────────────┬────────────────────────────┘
-                     │ 拿回来的全是文本
-┌────────────────────▼────────────────────────────┐
-│ 第3层: 本地推理引擎（自己写，C++） ✅ 已完成      │
-│ ggml_loader.cpp (GGUF+mmap+BPE)                  │
-│ qwen_forward.cpp (RMSNorm/matmul/RoPE/Attn/      │
-│                  SwiGLU/Q4_K_M反量化/Sampler)     │
-│ qwen_infer.cpp (generate循环+Session)            │
-└────────────────────┬────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────┐
-│ 第2层: JNI 桥接（自己写，C++ + Kotlin） ✅ 已完成 │
-│ nativeLoadModel / nativeGenerate / nativeRelease │
-└────────────────────┬────────────────────────────┘
-                     │
-┌────────────────────▼────────────────────────────┐
-│ 第1层: Android NDK + libc（借的）                │
-│ mmap / open / close / pthread                    │
-└─────────────────────────────────────────────────┘
+I qwen-loader: GGUF header_end=?????? weights_start=?????? alignment=32
+I qwen-loader:   tensor token_embd.weight dtype=13 off=0 abs=?????? bytes=???? ne=[1536,151646,1,1]
+...
 ```
+如果没有 `qwen-loader` tag → **CI 构建没包含 LOG 宏定义**，需要看 CMake/NDK 日志是不是编译器搞错。
+如果有日志但 header_end 值看起来很小/很大 → 看 n_tensors/n_kv 是不是读对了，继续加日志。
+如果 weights_start >= flen (940MB) → alignment/offset 计算仍有问题。
 
-**关键：第3层推理引擎，一行第三方推理框架代码都没有。** 没有 ggml、没有 llama.cpp、没有 onnxruntime。就是 C++ for 循环 + 数学公式。
+### 2.2 如果模型加载成功，但回复乱码/空/崩溃
 
-**ggml_loader.cpp 里的 ggml_type_size() / ggml_blck_size() 是我们自己写的 static 查表函数**，不是 ggml 库的。C++ 代码零 ggml 依赖。
+问题出在 qwen_forward.cpp 或 BPE tokenizer 或 sampler。**加 debug log 逐步定位：**
+
+1. 先在 `qwen_jni.cpp` 的 `nativeGenerate` 入口把 prompt tokenize 结果的**前 10 个 token id 打印出来**，与 Llama 引擎 tokenize 同样 prompt 的结果对比（如果能拿到）。
+2. 在 `qwen_forward.cpp` 里 `forward_step` 入口打印 `pos`、`tokens[0]`、`W_embd` 前几行的 dequant 值，确认 embedding 不是垃圾。
+3. 打印 `output_norm` 输出、lm_head matmul 输出前 10 个 logits 值。
+4. 看 sampler：argmax 返回的第一个 token id 是不是正常中文 token（一般 2000~15000 左右是常见中文）。如果每次都返回 0 或相同 id → logits 全 0。
+5. **重点怀疑对象（按概率排序）**：
+   - **BPE tokenize 完全错**（我们用的是最简字节 fallback 版本，没做真正的 merge）
+   - Q4_K_M dequant 的 `get_scale_min_k4` 或 nibble 顺序错
+   - matmul 行/列主序转置错 (权重的 W_embd 是 [vocab, n_embd] 还是 [n_embd, vocab]?)
+   - lm_head 应该 tie `token_embd.weight` 的转置，可能没转
+   - RoPE 旋转方向：cos/sin 对调
+   - GQA Attention 的 `kv_h = h / rep` 或 repeat 逻辑错
+   - RMSNorm epsilon 默认值不对 (qwen2 默认 1e-6, 看 GGUF 里 `qwen2.attention.layer_norm_rms_epsilon`)
+
+### 2.3 如果模型加载成功，回复正常中文 ✅
+
+🎉 **地基第一关跑通！** 下一步按下面「第四节 之后要干的事」顺序推进。
 
 ---
 
-## 三、六个插件（当前），开放式插件系统
+## 三、关键代码快速定位
 
-### 3.1 插件接口设计
+### 3.1 GGUF loader 关键片段
 
-```kotlin
-interface Plugin {
-    val id: String
-    val name: String
-    val description: String
-    suspend fun handle(userInput: String): PluginResult
-    fun settingsScreen(): Composable? = null
-}
+文件: [ggml_loader.cpp](file:///workspace/ai-coder/app/src/main/cpp/ggml_loader.cpp)
+- L83-100: gguf_type_size() for KV metadata types (FLOAT32=4, BOOL=1, others strict)
+- L102-136: gguf_reader (vu64() only for gguf_string, **never for count/dims/offset!**)
+- L226-286: consume_kv_value() (switch value_type 0-12, STRICT GGUF v3)
+- L299-311: header parse (magic/version/**n_tensors=r<uint64_t>**/**n_kv=r<uint64_t>**)
+- L395-424: tensor info 读 (dims=r<uint64_t>, dtype=r<uint32_t>, off=r<uint64_t>, all FIXED!)
+- L425-432: **weights_start = (header_end + alignment - 1)/alignment * alignment** → 这是关键
+- L443-463: abs_off = weights_start + ti.off (GGUF v3 spec 严格)
 
-class PluginCapabilities(
-    val textEngine: TextEngine,      // 本地推理（就是我们写的 forward）
-    val searchEngine: SearchEngine,   // 联网搜索
-    val githubEngine: GitHubEngine,   // GitHub API
-    val execEngine: ExecEngine,       // Termux 执行
-    val webFetch: WebFetchEngine      // 抓网页
-)
-```
+### 3.2 Forward 关键片段
 
-### 3.2 六个插件分别挂在哪
+文件: [qwen_forward.cpp](file:///workspace/ai-coder/app/src/main/cpp/qwen_forward.cpp)
+- 反量化: dequant_q4_K_M_block() / dequant_tensor() — **必须和 llama.cpp b5180 完全一致**
+- 每个算子: rms_norm_fp32 / rope_neox_apply_inplace / swiglu_fp32 / matmul_fp32 / attn_with_kvcache
+- KV cache 格式: `kv_cache[layer*2 + kv][pos][kv_head][head_dim]` (fp16)
+- Sampler: simple argmax first (跑通再加 temp/top-p)
 
-| 插件 | 用什么能力 | 推理引擎 | 状态 |
-|------|-----------|---------|------|
-| ① 文本聊天 | textEngine | 本地自写 forward | ✅ 地基，已完成 |
-| ② 生成照片 | textEngine + TermuxEngine | textEngine（写 prompt）+ Termux 跑 SD | 🟡 后干 |
-| ③ 执行插件 | textEngine + TermuxEngine | textEngine（写代码） | 🟡 后干 |
-| ④ 编辑插件 | textEngine + GitHubEngine | textEngine（改代码） | 🟡 后干 |
-| ⑤ GitHub 模式 | textEngine + GitHubEngine | textEngine（总结搜索结果） | 🟡 后干 |
-| ⑥ 联网模式 | textEngine + SearchEngine + WebFetchEngine | textEngine | 🟡 后干 |
+### 3.3 JNI 桥接关键片段
 
-### 3.3 插件增删
-
-- 内置插件默认 register，Settings 里开关控制
-- 加插件 = `router.register(newPlugin)`
-- 删插件 = `router.unregister(id)`
-- **地基一行代码不动**
+文件: [qwen_jni.cpp](file:///workspace/ai-coder/app/src/main/cpp/qwen_jni.cpp)
+- nativeLoadModel (L99): 调 qwen_load_model，失败打印 qwen-jni: nativeLoadModel failed: XXX
+- nativeGenerate (L125): 调 qwen_start_session → qwen_generate 循环 → callback token
 
 ---
 
-## 四、之后要干的事（优先级排序）
+## 四、之后要干的事（严格按优先级）
 
-### 🔴 优先级 0: 验证 fix3 APK 的 forward 输出是否正常
+### 🔴 P0：用户测 fix5 APK，确认模型能加载
 
-**用户装 fix3 APK 后：**
-1. Settings → 开 Qwen 引擎开关
-2. 模型管理 → 点"重新加载到内存"
-3. 看 modelLoaded 是否变成 true
-4. 去对话页问"你好"
-5. 看 logcat 里 qwen-jni 的日志
+**这是当前最紧急的事！** 直到用户反馈加载成功前，不做其他推进。
 
-**如果还是乱码/崩溃：**
-- 加 debug log 到 qwen_forward.cpp 每个算子前后
-- 打印 embeddings 前几个值、RMSNorm 输出前几个值、matmul 输出前几个值
-- 定位哪步开始变垃圾
-- 可能的问题点：matmul 顺序、RoPE 方向、Attention GQA、lm_head transpose
+**成功后立即 P0a：** 在 `qwen_forward.cpp` 前/中/后加 debug print 输出到 `FWD_LOG` 或 loader LOG，问"你好"看中间变量。目标：**第一句正常中文回复**。
 
-**如果能输出正常中文：**
-- 🎉 地基跑通了！
-- 开始考虑删 Llama 引擎（等 Qwen 完全稳定）
+**可能要修的层（按概率从高到低排好队，逐个试，不要同时改两个！）：**
 
-### 🔴 优先级 1: 删 Llama 引擎（如果 Qwen 稳定）
+| 顺序 | 嫌疑 | 怎么查 | 修法参考 |
+|-----|-------|-------|---------|
+| **1st** | BPE tokenize 极简实现不对 | 拿 LlamaJniEngine tokenize("你好") 结果对比（如果能取到）；或在 generate 前 dump 前 20 token id 给 llama.cpp 离线工具验 | 真实现 byte-pair merge loop；或直接嵌入 tokenizer.json 的 merges 数组 |
+| **2nd** | Q4_K_M dequant 错 | 随机选 W_embd[0] 前 10 个权重，离线 llama.cpp 工具 dequant 同位置对比 | 逐行对照 llama.cpp b5180 的 get_scale_min_k4 / dequantize_row_q4_K_M 函数 |
+| **3rd** | lm_head tie 错/transpose 错 | 正常第一个 token logits 中 "<|im_start|>" 附近应该分数高 | 确认 lm_head 形状: [vocab, n_embd] @ x[n_embd] → [vocab] |
+| **4th** | matmul (X@W) 的行列顺序 | X=[1,n_embd] W=[n_embd, n_ff], 结果应为 [1,n_ff]; 不要把权重本身当转置读 | 直接跑一个单元素小矩阵: X=[1,2], W=[[3,4],[5,6]] → 预期 [13, 16] |
+| **5th** | RoPE 方向 | 不用 RoPE (直接 apply 0) 先看能不能出"差不多的词"; 如果停用 RoPE 能出中文 → 就是 RoPE 问题 | 翻 llama.cpp RoPE 公式或 qwen.cpp 开源实现 |
+| **6th** | GQA repeat / 缓存位置 | 单步打印 Q/K dot product | 对照规范: kv_h = h / (n_head/n_head_kv) |
+| **7th** | RMSNorm epsilon | 打印 norm 前后 mean/std | 用 GGUF 里 `qwen2.attention.layer_norm_rms_epsilon` 值, 默认 1e-6 |
+| **8th** | EOS/im_end stop | 看生成的 token id 流，151645(im_end) 或 151643(eos) 出现就停 | 硬编码 151645/151643 判断（不要依赖 tokenize）|
 
-要删的东西：
+### 🔴 P1：如果 Qwen 推理成功输出中文
+
+- 把 Llama 引擎从 APK 删掉（减小体积、消除闪退路径）
+  - 文件删列表: llama_jni.cpp, llama_jni_stub.cpp, CMakeLists.txt 去掉 xuedi-llama target
+  - Kotlin 删: LlamaJniEngine.kt, App.kt 去掉双引擎分发
+  - UI 删: SettingsPage 引擎切换开关
+  - 保留 libqwen-jni.so 单一 target
+
+### 🟡 P2：BPE tokenizer 升级到真 merge
+
+当前是字节 fallback（每个单字节一个 token → 不能合并长词 → prompt 太长 → 推理慢）。需要真实现：
 ```
-app/src/main/cpp/
-├── llama.cpp/                    删除整个目录
-├── llama_jni.cpp                 删除
-├── CMakeLists.txt                去掉 llama-jni target, 去掉 llama.cpp add_subdirectory
-├── build.gradle.kts              去掉 externalNativeBuild 的 llama target
-
-app/src/main/java/
-├── model/LlamaJniEngine.kt       删除
-├── App.kt                        去掉 llamaEngine / llmEngine 双路分发, 直接用 qwenEngine
-└── ui/screen/SettingsPage.kt     去掉引擎切换开关
+1. 从 GGUF tokenizer.ggml.merges (KV ARRAY of STRING) 读 merge 列表
+2. 把 "a b" 形式的 merge 拆成 pair(a,b) → 构建 map<pair<string,string>, int> 合并优先级
+3. tokenize 算法: 先 bytefallback → 循环找最高优先级的 pair → merge → 直到无可 merge
 ```
 
-删完 APK 体积会小一大块（libxuedi-llama.so 比 libqwen-jni.so 大）。
+### 🟡 P3：联网搜索插件（Kotlin）
 
-### 🟡 优先级 2: 联网搜索（SearchEngine）
+DuckDuckGo lite 版抓 HTML 解析。不碰 C++。
 
-- DuckDuckGo lite 版: `https://lite.duckduckgo.com/lite/?q=xxx`
-- 返回干净 HTML，解析搜索结果摘要
-- 搜回来的文本拼进 prompt 的 context
-- Kotlin 侧实现，不碰 C++
+### 🟡 P4：GitHub 插件（Kotlin）
 
-### 🟡 优先级 3: GitHub 能力（GitHubEngine）
+匿名读仓库 / 列 commit / 读 raw 文件。用 `https://api.github.com`，token 让用户填 Settings。
 
-- 匿名读: REST API `/repos/{owner}/{repo}` 拿仓库信息、读文件、列 issue
-- 需要 token 写: 用户手动填 GitHub Personal Token
-- API 基础路径: `https://api.github.com`
-- 国内 fallback: 直连失败换 ghproxy
+### 🟡 P5：代码执行插件（Termux）
 
-### 🟡 优先级 4: 代码执行（TermuxEngine）
+检测 Termux → `am start` 或 `termux-exec` 跑 Python。stdout 回聊天框。
 
-- 检测 Termux 是否安装
-- 调 Termux 执行 Python/Node.js
-- 代码由文本插件（就是我们的推理引擎）生成
-- stdout/stderr 回传聊天窗口
+### 🟡 P6：图片生成
 
-### 🟡 优先级 5: 图片生成
+Termux Python + diffusers 跑 SD 1.5。先能出图不管质量。
 
-- Termux + python + diffusers 跑 SD 1.5 量化版
-- prompt 由文本插件生成
-- 先能跑就行，不追求质量
+### 🟢 P7：NEON SIMD 加速
 
-### 🟢 优先级 6: NEON 优化
-
-- naive matmul 跑通后，写 ARM NEON SIMD 加速
-- Q4_K_M 反量化可以 NEON 并行
-- 这是提速，不是正确性，放最后
-
-### 🟢 优先级 7: 云端 API 可选开关
-
-- 用户手动开的开关，默认关
-- 支持 OpenRouter / 硅基流动 / 自搭服务
-- 三种模式共存: 离线 / 联网搜索+本地推理 / 云端
+Q4_K_M dequant 可以 NEON 一次 8 通道；matmul 用 `smull` / `smlal` 4 位乘加；预计 2~3x 提速。
 
 ---
 
-## 五、快速参考
+## 五、CI / 发布流程（标准操作，不要自己发明）
 
-### 仓库信息
-- URL: https://github.com/Kdkdmwnwdkd/ai-coder
-- 主要分支: main
-- 当前 tag: v1.3.25-beta（force push 过，commit 2b9f7b0）
-
-### APK 下载链接
-- **fix3**: https://github.com/Kdkdmwnwdkd/ai-coder/releases/download/v1.3.25-beta/xuedi-coder-v1.3.25-fix3-arm64-v8a.apk
-- Release 页: https://github.com/Kdkdmwnwdkd/ai-coder/releases/tag/v1.3.25-beta
-
-### 版本号
-- versionCode: 36
-- versionName: 1.3.25-beta
-
-### CI 工作流
-- 文件: `.github/workflows/build.yml`
-- tag `v*` 自动触发 Release 构建
-- 构建约 4-5 分钟
-- APK 挂在 Release 的 assets 里
-- APK 文件名统一: `xuedi-coder-v{版本}-beta-arm64-v8a.apk`（纯 ASCII，不要中文）
-
-### 测试设备
-- 魅族 20，骁龙 8 Gen 2
-- Android，arm64-v8a
-- 已验证 1.5B Q4_K_M GGUF 文件在设备上（940MB）
-
-### GGUF 文件（用户设备上的）
-- 路径: `/data/data/com.xuedi.coder/files/models/Qwen2.5-1.5B-Instruct-Q4_K_M.gguf`
-- 大小: 940MB
-- arch: qwen2, n_layer=28, n_embd=1536, n_head=12, n_head_kv=2, n_ff=8960, head_dim=128
-- vocab: 151646 tokens (byte-level BPE, special tokens included)
-
-### Q4_K_M block 格式（已验证正确）
-```
-每个 256 元素一组 = 144 bytes:
-  offset 0:   ggml_half d       (2B, super-block scale, fp16)
-  offset 2:   ggml_half dmin    (2B, super-block min scale, fp16)
-  offset 4:   uint8  scales[12]  (12B, 6-bit 量化的 scale/min 对, K_SCALE_SIZE=12)
-  offset 16:  uint8  qs[128]    (128B, 4bit 数据: 低 4bit=elem[i*2], 高 4bit=elem[i*2+1])
-
-反量化 (照搬 llama.cpp b5180 get_scale_min_k4 + dequantize_row_q4_K):
-  每 64 元素一组, 用 get_scale_min_k4 从 scales[12] 解出 2 组 (sc, m)
-  get_scale_min_k4(j, scales, &sc, &m):
-    if j < 4:  sc = scales[j] & 63;   m = scales[j+4] & 63;
-    else:      sc = (scales[j+4]&0xF) | ((scales[j-4]>>6)<<4);
-               m  = (scales[j+4]>>4)  | ((scales[j-0]>>6)<<4);
-  d1 = d * sc; m1 = min * m     (sc/m 是 6-bit 整数 0..63)
-  前 32: y[l] = d1 * (q[l] & 0xF) - m1
-  后 32: y[l] = d2 * (q[l] >> 4)  - m2
-
-block 总大小: 2 + 2 + 12 + 128 = 144 bytes (不是 256 也不是 262!)
-ggml_type_size(Q4_K_M) 应返回 144
-ggml_blck_size(Q4_K_M) 应返回 256 (每 256 元素一组)
+```bash
+# 每次修后步骤
+1. git status                    # 确认只改了预期文件
+2. git diff --stat               # 同上
+3. 修改 app/build.gradle.kts
+   - versionCode += 1            # 37→38→39...
+   - versionName = "1.3.25-fixN" # fix5→fix6→fix7
+4. git add -A
+5. git commit -m "v1.3.25-fixN: 一句话说明修啥
+                   
+详细根因说明...（多行 message 更清楚）"
+6. git push origin main
+7. 等 5 分钟 → GitHub Actions → 看最新 run 是否 success
+   失败 → 看 build log → 修编译错误
+8. 成功 → 去 run artifacts 页面下 AI编程助手-debug-*.apk
+   或直接用 API:
+   GET /repos/Kdkdmwnwdkd/ai-coder/actions/runs/{id}/artifacts
+   artifact 名一般是 "AI编程助手-debug-apk"（zip，里面是 apk）
+9. 把 apk 拷到 /workspace/_serve_apk/ 开 python -m http.server
+   把下载链接发用户
 ```
 
-### GGUF v3 tensor info 格式（已验证正确）
-```
-name: ULEB128 len + bytes        ← LEB128 变长
-n_dims: uint32 (4B fixed)        ← 固定大小, 不是 LEB128!
-dims[n_dims]: uint64 each (8B)   ← 固定大小, 不是 LEB128! (之前错用 vu64())
-dtype: uint32 (4B fixed)
-offset: uint64 (8B fixed)        ← 固定大小, 不是 LEB128! (之前错用 vu64())
-```
-
-### RoPE NeoX 公式
-```
-inv_freq[i] = exp(-2 * i * log(freq_base) / head_dim)   // i = 0..head_dim/2-1
-// 对 q[k] 的 [2i, 2i+1] 两维:
-cos_val = cos(pos * inv_freq[i])
-sin_val = sin(pos * inv_freq[i])
-new_q[2i]   = q[2i] * cos_val - q[2i+1] * sin_val
-new_q[2i+1] = q[2i] * sin_val + q[2i+1] * cos_val
-k 同理
-Qwen2 freq_base = 1000000
-```
-
-### Qwen2 SwiGLU
-```
-gate = X @ W_gate    // [1, n_embd] @ [n_embd, n_ff] → [1, n_ff]
-up   = X @ W_up
-hidden = silu(gate) ⊙ up   // 逐元素乘, silu(x) = x * sigmoid(x)
-out = hidden @ W_down   // [1, n_ff] @ [n_ff, n_embd] → [1, n_embd]
-```
-
-### GQA Attention
-```
-Q: [n_head, head_dim]        — 每个 head 一行, 共 n_head 行
-K: [n_head_kv, head_dim]     — 只有 kv head 数
-V: [n_head_kv, head_dim]
-rep = n_head / n_head_kv     // 12/2 = 6
-
-对每个 Q head h:
-  kv_h = h / rep
-  scores[t] = Q[h] · K_cache[kv_h, t] / sqrt(head_dim)   // 对所有历史位置
-  scores = softmax(scores)
-  out[h] = Σ_t scores[t] * V_cache[kv_h, t]
-```
+**token 存在 git remote URL 里（`https://USER:ghp_XXX@github.com/...`），不要在任何对话/打印里暴露完整值。**
 
 ---
 
-## 六、安全和上下文管理
+## 六、给执行 AI 的指令清单
 
-### 6.1 敏感信息泄露风险
+### 新对话启动 checklist（必按顺序）
 
-**仓库 Remote URL 里有 GitHub Personal Access Token！**
-- 当前 remote: `https://github.com/Kdkdmwnwdkd/ai-coder.git`（token 在本地 git config）
-- **绝对不要在对话历史里粘贴 token 值！**
-- 如果 token 泄露，去 GitHub → Settings → Developer settings → Personal access tokens → 立刻 revoke
+1. ✅ 读完整 PLAN.md
+2. ✅ 确认 HEAD 是否落后于 main（`git fetch; git status`）
+3. ✅ 看用户最新反馈（诊断包 / 聊天截图 / 文字描述）
+4. ✅ 判断当前在哪一级：P0 加载 / P0a 正常输出 / P1 删 Llama / P2+ 插件
+5. ✅ 不要跳级！加载没过不要碰 forward；forward 没过不要碰插件
+6. ✅ 每修一轮：更新 PLAN.md → commit → push → 等 APK → 发用户
 
-### 6.2 每个新对话的标准启动流程
+### 严格禁止的事
 
-```
-1. 用户把 PLAN.md 全文粘贴给执行 AI
-2. 执行 AI 快速过一遍 PLAN.md，确认理解
-3. 执行 AI 直接跳到当前状态（fix3 已推，等用户验证）
-4. 如果 fix3 已出正常中文 → 推进优先级 1（删 Llama 引擎）
-5. 如果 fix3 还是乱码 → 在 qwen_forward.cpp 加 debug log，定位问题
-6. 不要重新读源文件，不要重新查 ggml 源码，不要重新 git log
-```
-
-### 6.3 如果遇到 PLAN.md 里没有的问题
-
-- 先在 PLAN.md 里更新这部分内容
-- 然后写代码
-- 下次新对话就不用再重新发现这个问题了
+- ❌ **不要改 LlamaJniEngine 或 llama.cpp 代码**：自写引擎是唯一出路
+- ❌ **不要改 App.kt / SettingsScreen 引擎切换逻辑**：除非 Qwen 跑通进入 P1
+- ❌ **不要引入任何第三方推理/ML 框架**（ggml / onnxruntime / mnn 都不行）
+- ❌ **不要自己发明 GGUF 格式或 Q4_K_M 格式**：全部照搬 llama.cpp b5180 或 ggml-org 官方文档
+- ❌ **不要同时改多个潜在问题点**：控制变量！一次只改一个嫌疑算子，验证后再改下一个
 
 ---
 
-## 七、给执行 AI 的注意事项
-
-1. **积分省着用**：每一步都写好再 commit，避免多次来回
-2. **push 前检查**：`git diff --stat` 确认只改了预期文件；`git log --oneline -1` 确认没有 token
-3. **不要引入新依赖**：推理引擎一行第三方推理框架都不要加
-4. **forward 里绝对不能硬编码数字**：12、28、1536 这些全是 cfg 里的值
-5. **APK 文件名保持 ASCII**：`xuedi-coder-v{版本}-fix{N}-arm64-v8a.apk`
-6. **遇到 PLAN.md 里没有的问题**：先更新 PLAN.md，再写代码
-7. **绝对禁止**：改 LlamaJniEngine.kt（除非确认要删）、加新的第三方推理框架依赖
-8. **所有张量偏移/反量化格式都照搬 llama.cpp b5180 源码**：已经验证过正确，不要再自己发明
-
----
-
-**报告结束。**
+**PLAN.md 最后更新：v1.3.25-fix5 (2026-09-02)。任何重大变更都要先更新本文件再写代码。**

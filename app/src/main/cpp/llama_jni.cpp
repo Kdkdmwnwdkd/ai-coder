@@ -660,12 +660,23 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
 
     // -------- 4) 预填充 prompt（按 n_batch 切片） --------
     int32_t n_consumed = 0;
+    // 🔴 v1.3.15 终极 malloc 排查: 一次性 llama_batch_init(1, 0, 1) 预分配 batch，
+    //   循环里只改 batch.token[0] / batch.pos[0] / batch.n_tokens = 1，零 malloc/free。
+    //   背景：v1.3.14 (n_batch=1) 仍在 prefill 第 64 个 token 左右 SIGABRT。
+    //   每轮用 llama_batch_get_one → 内部 malloc 4 个数组 (tokens/embd/pos/seq_id) +
+    //   llama_batch_free → free。246 轮 = 984 次 malloc/free。魅族 20 的 jemalloc 在
+    //   骁龙 8 Gen 2 大/中/小核频繁切换下，反复小对象分配触发碎片化 / 元数据损坏。
+    //   如果本版能出字 → 锁定崩溃根因是 batch malloc/free 循环，不是 ggml 推理核心。
+    //   如果本版仍崩 → 排除 malloc 因素，ggml 推理核心本身不兼容魅族 20，放弃真推理，
+    //     v1.3.11 模拟模式为魅族 20 最终版。
+    struct llama_batch one_batch = llama_batch_init(1, /*embd=*/0, /*n_seq_max=*/1);
     {
         const int64_t t_pre0 = now_ms();
         int batch_idx = 0;
         bool prefillaunch = true;
         while (n_consumed < n_prompt) {
             if (state->cancel.load()) {
+                llama_batch_free(one_batch);
                 cb_done(env, callback, "cancel");
                 if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
                 env->DeleteGlobalRef(callback);
@@ -674,25 +685,32 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             }
             int32_t n_eval = std::min<int32_t>(n_prompt - n_consumed, state->n_batch);
             int64_t tb0 = now_ms();
-            auto batch = llama_batch_get_one(&tokens[n_consumed], n_eval);
-            int decode_rc = llama_decode(state->ctx, batch);
-            llama_batch_free(batch);
+            // 填 batch：只放 1 个 token（n_batch=1 已强制）。不 malloc，纯赋值。
+            one_batch.token[0]   = tokens[n_consumed];
+            one_batch.pos[0]     = n_consumed;  // KV cache 位置索引（必须单调递增）
+            one_batch.n_seq_id[0]      = 0;      // 单序列对话
+            one_batch.seq_id[0][0]     = 0;
+            one_batch.logits[0]        = 0;      // 最后一个 token 需要 logits
+            one_batch.n_tokens = 1;
+            if (n_eval == 0) n_eval = 1;  // 防御性
+            int decode_rc = llama_decode(state->ctx, one_batch);
             int64_t tb1 = now_ms();
             if (decode_rc != 0) {
                 LOGE("nativeChat: prefill decode #%d FAIL rc=%d (n_eval=%d, consumed=%d) — 耗时 %" PRId64 " ms",
                      batch_idx, decode_rc, n_eval, n_consumed, tb1 - tb0);
                 cb_error(env, callback, "预填充 llama_decode FAIL（OOM？上下文不够？）rc=" + std::to_string(decode_rc));
+                llama_batch_free(one_batch);
                 if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
                 env->DeleteGlobalRef(callback);
                 crash_guard_pop();
                 return;
             }
-            LOGI("nativeChat: ⏳ prefill batch #%d: n_eval=%d, consumed_now=%d/%d, cost=%" PRId64 "ms (total prefill so far %" PRId64 "ms)",
-                 batch_idx, n_eval, n_consumed + n_eval, n_prompt, tb1 - tb0, tb1 - t_pre0);
-            CRASH_CHECK(env, callback);  // 🔴 每个 batch 后检查有没有 SIGSEGV
+            LOGI("nativeChat: ⏳ prefill #%d: token[%d]=%d, cost=%" PRId64 "ms (total prefill so far %" PRId64 "ms)",
+                 batch_idx, n_consumed, (int)tokens[n_consumed], tb1 - tb0, tb1 - t_pre0);
+            CRASH_CHECK(env, callback);  // 🔴 每个 token 后检查有没有 SIGABRT
             n_consumed += n_eval;
             batch_idx++;
-            // 🔴 预填充进度回调（每完成一批通知一次）——UI 显示百分比，避免一直白转圈圈
+            // 🔴 预填充进度回调（每完成 1 token 通知一次）——UI 显示百分比，避免一直白转圈圈
             if (g_mid_onPrefill && callback) {
                 env->CallVoidMethod(callback, g_mid_onPrefill, (jint)n_consumed, (jint)n_prompt);
                 if (env->ExceptionCheck()) { env->ExceptionClear(); }
@@ -745,10 +763,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             piece.assign(piece_buf.data(), (size_t)n);
             cb_token(env, callback, piece);
         }
-        // d. decode 下一步（单个 token）
+        // d. decode 下一步（单个 token）—— 复用上面预分配的 one_batch，零 malloc
         int64_t td0 = now_ms();
         last_id = id;
-        auto batch = llama_batch_get_one(&id, 1);
+        one_batch.token[0]   = id;
+        one_batch.pos[0]     = n_consumed;  // 生成阶段的 pos = 已消费 token 数（下一个位置）
+        one_batch.n_seq_id[0]      = 0;
+        one_batch.seq_id[0][0]     = 0;
+        one_batch.logits[0]        = 0;    // generate 最后一个 token 需要 logits 供 sample
+        one_batch.n_tokens = 1;
         // 🔴 v1.3.9 修复二（DeepSeek 报告）：generate decode 前防御性检查。
         //   诊断显示 prefill(21225ms)成功但 generate 第一个 llama_decode SIGABRT
         //   (OOM mmap 失败, addr=0x2868...)。prefill 已成功用 ctx → ctx 正常，
@@ -757,11 +780,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         if (state->ctx == nullptr) {
             LOGE("nativeChat: generate decode 前 ctx==null（KV cache 未分配？）→ cb_error 回 Java");
             cb_error(env, callback, "generate decode 前 ctx 为空，KV cache 未分配，请降低 n_ctx");
-            llama_batch_free(batch);
             break;
         }
-        int decode_rc = llama_decode(state->ctx, batch);
-        llama_batch_free(batch);
+        int decode_rc = llama_decode(state->ctx, one_batch);
         int64_t td1 = now_ms();
         if (decode_rc != 0) {
             LOGE("nativeChat: generate decode FAIL rc=%d at token %d (sample=%" PRId64 "ms, decode=%" PRId64 "ms)",
@@ -790,6 +811,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
          (int)n_generated, (int)last_id, (int)eos);
 
     if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
+    // 🔴 v1.3.15: 释放预分配的 one_batch（若未在错误路径提前释放）
+    llama_batch_free(one_batch);
     env->DeleteGlobalRef(callback);
     crash_guard_pop();
     return;

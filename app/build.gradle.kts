@@ -24,16 +24,15 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 25
-        versionName = "1.3.14-beta"
-        // v1.3.14 最终绕路版: n_batch=1, n_ubatch=1 绕开 batch 切换崩溃。
-        //   崩溃模式 (v1.3.8→v1.3.13 全版本一致): prefill 第一个 batch (128 tokens) 成功,
-        //   第二个 batch 的 llama_decode SIGABRT。b5180 多线程崩 / 单线程崩 / 1.5B 小模型也崩 →
-        //   排除内存/模型大小/线程数 → 锁定崩溃点在 llama_decode 处理 batch 切换时的内部状态机。
-        //   解法: n_batch=1 → prefill 循环每次只喂 1 token, 从根本上消除 batch 切换。
-        //   用户指令里的编译参数是 no-op: GGML_USE_ARM_SVE 不存在 (当前 GGML_NATIVE=OFF 已关),
-        //   -O2 是 NDK Release 默认 (b5180 不强制 -O3), LLAMA_NUMA 不存在 (b5180 编译期无此选项)。
-        //   线程数回退正常 (v1.3.13 单线程也崩, 排除线程因素)。code 24→25
+        versionCode = 26
+        versionName = "1.3.15-beta"
+        // v1.3.15 终极 malloc 排查版: llama_batch_init(1, 0, 1) 一次性预分配 batch,
+        //   prefill + generate 循环全程复用, 消除 v1.3.14 残留的 984 次 malloc/free 循环
+        //   (llama_batch_get_one 每次 malloc 4 个数组 + llama_batch_free, 246 tokens × 2 循环)。
+        //   v1.3.14 (n_batch=1) 仍在 prefill 第 64 token 左右 SIGABRT, 崩溃点与 malloc
+        //   循环高度吻合 (魅族 20 jemalloc 在 8Gen2 大中小核切换下碎片化)。
+        //   决策: 本版能出字 → 锁定 batch malloc 循环; 仍崩 → ggml 推理核心本身不兼容,
+        //         放弃真推理, v1.3.11 模拟模式为魅族 20 最终版。code 25→26
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

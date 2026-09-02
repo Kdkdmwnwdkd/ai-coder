@@ -24,8 +24,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 36
-        versionName = "1.3.25-beta"
+        versionCode = 37
+        versionName = "1.3.25-fix5"
         // v1.3.24-beta: 新增从零自写的极简 Qwen 推理器（不依赖 llama.cpp 解码循环）
         //   背景: v1.3.22 在魅族 20 / 骁龙 8 Gen 2 上 llama_tokenize 探测触发 prefill 前
         //     SIGABRT, v1.3.23 硬编码 im_end id 虽不崩但仍有乱码尾巴风险.

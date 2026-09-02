@@ -23,6 +23,11 @@
 #include <vector>
 #include <algorithm>
 
+// ---- Android log ----
+#include <android/log.h>
+#define LOG_TAG "qwen-loader"
+#define LOG(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+
 // ---- ggml type 值 (来自 llama.cpp b5180 ggml.h, 保持一致) ----
 enum : int {
     GGML_TYPE_F32      = 0,
@@ -76,7 +81,7 @@ static size_t ggml_blck_size(int t) {
 }
 
 static int gguf_type_size(uint32_t t) {
-    // GGUF v3 type sizes (元数据类型, 不是量化类型)
+    // GGUF v3 metadata type sizes (NOT tensor quant types)
     switch (t) {
         case 0: return 1;   // uint8
         case 1: return 1;   // int8
@@ -84,13 +89,12 @@ static int gguf_type_size(uint32_t t) {
         case 3: return 2;   // int16
         case 4: return 4;   // uint32
         case 5: return 4;   // int32
-        case 6: return 8;   // float32
-        case 7: return 8;   // bool -> 实际是字节对齐 1, 但按 GGUF v3 spec = uint8
-        case 8: return 8;   // string: 存储为 (u64 len + data)
-        case 9: return 8;   // array: 存储为 (u32 type + u64 count + data)
+        case 6: return 4;   // float32 ← 之前错写成 8
+        case 7: return 1;   // bool    ← 之前错写成 8 (GGUF v3 spec: 1 byte)
         case 10: return 8;  // uint64
         case 11: return 8;  // int64
         case 12: return 8;  // float64
+        default: return 0;  // string(8) 和 array(9) 无固定 size, 单独处理
     }
     return 0;
 }
@@ -218,32 +222,65 @@ struct kv_entry {
     std::string value_string;  // 对 string scalar
 };
 
+// Fix v1.3.25-fix5c: 彻底按 GGUF v3 规范重写.
+// GGUF v3 metadata value_type enum:
+//   0=UINT8, 1=INT8, 2=UINT16, 3=INT16, 4=UINT32, 5=INT32,
+//   6=FLOAT32(4B), 7=BOOL(1B), 8=STRING, 9=ARRAY,
+//   10=UINT64, 11=INT64, 12=FLOAT64(8B)
 static void consume_kv_value(gguf_reader & r, kv_entry & kv) {
     kv.value_type = r.r<uint32_t>();
-    if (kv.value_type == 1) {   // VALUE = array
-        kv.arr_type  = r.r<uint32_t>();
-        kv.arr_count = r.r<uint64_t>();
-        if (kv.arr_type == 8) {  // string[]
-            for (uint64_t i = 0; i < kv.arr_count; ++i) {
-                kv.arr_strings.push_back(r.r_str());
+    switch (kv.value_type) {
+        case 0: case 1:    // UINT8 / INT8 (1B)
+            kv.scalar_type = kv.value_type;
+            if (r.eof(1)) { r.ok=false; return; }
+            kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+1); r.off += 1; break;
+        case 2: case 3:    // UINT16 / INT16 (2B)
+            kv.scalar_type = kv.value_type;
+            if (r.eof(2)) { r.ok=false; return; }
+            kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+2); r.off += 2; break;
+        case 4: case 5:    // UINT32 / INT32 (4B)
+            kv.scalar_type = kv.value_type;
+            if (r.eof(4)) { r.ok=false; return; }
+            kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+4); r.off += 4; break;
+        case 6:            // FLOAT32 (4B!) — 之前的 gguf_type_size 错写成 8
+            kv.scalar_type = kv.value_type;
+            if (r.eof(4)) { r.ok=false; return; }
+            kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+4); r.off += 4; break;
+        case 7:            // BOOL (1B)
+            kv.scalar_type = kv.value_type;
+            if (r.eof(1)) { r.ok=false; return; }
+            kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+1); r.off += 1; break;
+        case 8:            // STRING
+            kv.scalar_type = kv.value_type;
+            kv.value_string = r.r_str(); break;
+        case 9: {          // ARRAY: array_type (uint32) + arr_count (uint64) + elements
+            kv.arr_type  = r.r<uint32_t>();
+            kv.arr_count = r.r<uint64_t>();
+            if (kv.arr_type == 8) {  // string array
+                for (uint64_t i = 0; i < kv.arr_count; ++i) {
+                    kv.arr_strings.push_back(r.r_str());
+                }
+            } else {
+                size_t es = gguf_type_size(kv.arr_type);
+                if (es == 0) { r.ok = false; return; }
+                size_t total = es * (size_t)kv.arr_count;
+                if (r.eof(total)) { r.ok = false; return; }
+                kv.arr_bytes.assign(r.base + r.off, r.base + r.off + total);
+                r.off += total;
             }
-        } else {
-            size_t es = gguf_type_size(kv.arr_type);
-            size_t total = es * (size_t)kv.arr_count;
-            if (r.eof(total)) { r.ok = false; return; }
-            kv.arr_bytes.assign(r.base + r.off, r.base + r.off + total);
-            r.off += total;
+            break;
         }
-    } else {                    // VALUE = scalar
-        kv.scalar_type = r.r<uint32_t>();
-        if (kv.scalar_type == 8) {  // string
-            kv.value_string = r.r_str();
-        } else {
-            size_t es = gguf_type_size(kv.scalar_type);
-            if (r.eof(es)) { r.ok=false; return; }
-            kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+es);
-            r.off += es;
-        }
+        case 10: case 11:  // UINT64 / INT64 (8B)
+            kv.scalar_type = kv.value_type;
+            if (r.eof(8)) { r.ok=false; return; }
+            kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+8); r.off += 8; break;
+        case 12:           // FLOAT64 (8B)
+            kv.scalar_type = kv.value_type;
+            if (r.eof(8)) { r.ok=false; return; }
+            kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+8); r.off += 8; break;
+        default:
+            LOG("consume_kv_value: unknown value_type=%u, abort", kv.value_type);
+            r.ok = false; break;
     }
 }
 
@@ -297,8 +334,10 @@ char * qwen_load_model(const char * gguf_path, QwenModel * & out_model) {
     }
     uint32_t ver = r.r<uint32_t>();
     if (ver != 3 && ver != 2) return err("only GGUF v2/v3 supported");
-    uint64_t n_tensors = r.vu64();
-    uint64_t n_kv      = r.vu64();
+    // Fix v1.3.25-fix5: GGUF header 的 tensor_count / metadata_kv_count 是固定 uint64,
+    // 不是 ULEB128! 之前用 vu64() 读会导致文件位置从头偏移, 后面所有东西全错.
+    uint64_t n_tensors = r.r<uint64_t>();
+    uint64_t n_kv      = r.r<uint64_t>();
     if (!r.ok) return err("header parse failed");
 
     // kv

@@ -1,9 +1,12 @@
 package com.xuedi.coder.ui.screen
 
 import android.content.Intent
+import android.net.Uri
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -25,10 +28,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.CloudOff
+import androidx.compose.material.icons.outlined.ContentCopy
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
+import androidx.compose.material.icons.outlined.IosShare
 import androidx.compose.material.icons.outlined.PauseCircle
 import androidx.compose.material.icons.outlined.PhotoLibrary
+import androidx.compose.material.icons.outlined.ReceiptLong
 import androidx.compose.material.icons.outlined.Refresh
 import androidx.compose.material.icons.outlined.Source
 import androidx.compose.material.icons.outlined.Verified
@@ -73,8 +79,10 @@ import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
 import com.xuedi.coder.theme.ThemeMode
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.res.stringResource
 import java.text.SimpleDateFormat
@@ -190,6 +198,8 @@ fun SettingsPage(
     val diagTsFmt = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.CHINA) }
     fun ts() = diagTsFmt.format(Date())
     fun addLog(line: String) { diagLines.add("[${ts()}] $line") }
+    // ---- 🆕 v1.3.6 手机端：上一次抓日志完整内容缓存（分享时能导全部） ----
+    var lastGrabLogcatFull by remember { mutableStateOf(emptyList<String>()) }
 
     // ⛔ v1.3.5 彻底删除外层 Column + verticalScroll：之前 SettingsPage 一直有
     //    「超过屏幕高度被静默裁剪」vs「加 verticalScroll 后嵌套 LazyColumn 崩」的矛盾。
@@ -285,6 +295,88 @@ fun SettingsPage(
                 onCancel = {
                     (App.instance.llmEngine as? LlamaJniEngine)?.cancel()
                     addLog("用户请求取消当前推理")
+                },
+                // —— v1.3.6 新增：纯手机端的抓日志和分享，不需要电脑/adb/root ——
+                onGrabLogcat = {
+                    scope.launch {
+                        addLog("")
+                        addLog("══════════ 📥 抓取 LlamaJni 设备日志（手机端 logcat -d） ══════════")
+                        addLog("说明：Android 5+ 允许每个 App 读取自己 UID 产生的 logcat 条目，无需任何权限。")
+                        val grabbed = runCatching { grabLlamaJniLogcatImpl() }
+                        if (grabbed.isFailure) {
+                            addLog("❌ 抓日志失败：${grabbed.exceptionOrNull()?.message ?: grabbed.exceptionOrNull()?.toString() ?: "unknown"}")
+                        } else {
+                            val lines = grabbed.getOrThrow()
+                            if (lines.isEmpty()) {
+                                addLog("⚠️  没抓到任何 LlamaJni / LlamaJniEngine 条目。")
+                                addLog("    → 请先：① 点模型卡「🔄 重新加载到内存」② 或在聊天页发一条消息，再回来点一次这个按钮")
+                            } else {
+                                addLog("✅ 抓到 ${lines.size} 行（只显示最后 120 行，完整内容点「📤 分享诊断包」导出）：")
+                                addLog("")
+                                val tail = lines.takeLast(120)
+                                tail.forEach { addLog(it) }
+                                // 同时把全部 lines 存到一个临时缓存，分享时一起带上
+                                lastGrabLogcatFull = lines
+                            }
+                        }
+                    }
+                },
+                onShareAll = {
+                    val ctx = App.instance
+                    val header = buildString {
+                        appendLine("AI编程助手诊断包 — v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
+                        appendLine("生成时间：${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.CHINA).format(java.util.Date())}")
+                        appendLine("设备：${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (${android.os.Build.DEVICE})")
+                        appendLine("ABI：${android.os.Build.SUPPORTED_ABIS.joinToString("/")}")
+                        appendLine("总内存：${runCatching { val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager; val mi = android.app.ActivityManager.MemoryInfo().also { am?.getMemoryInfo(it) }; "${mi.totalMem / 1024 / 1024}MB (avail=${mi.availMem / 1024 / 1024}MB, lowMemory=${mi.lowMemory})" }.getOrDefault("n/a")}")
+                        appendLine("CPU_ABI2：${android.os.Build.CPU_ABI2}（arm64-v8a 必为空）")
+                        appendLine()
+                        appendLine("═══════════════════════════════════════════")
+                        appendLine("当前模型：${App.instance.modelManager.lastLoadedPath() ?: "<未加载>"}")
+                        appendLine("引擎ctx：${(App.instance.llmEngine as? LlamaJniEngine)?.currentCtx() ?: 0L}")
+                        appendLine("最近一次 load 错误：${(App.instance.llmEngine as? LlamaJniEngine)?.lastLoadError() ?: "<无>"}")
+                        appendLine("═══════════════════════════════════════════")
+                        appendLine()
+                    }
+                    val fullLogcat = lastGrabLogcatFull.joinToString("\n")
+                    val diagBox = diagLines.joinToString("\n")
+                    val content = buildString {
+                        append(header)
+                        appendLine("==== 诊断框（页面黑底日志框）内容 ====")
+                        appendLine(diagBox)
+                        appendLine()
+                        if (fullLogcat.isNotBlank()) {
+                            appendLine("==== 抓 LlamaJni 日志 logcat -d 全部（${lastGrabLogcatFull.size} 行） ====")
+                            appendLine(fullLogcat)
+                        } else {
+                            appendLine("==== 抓 LlamaJni 日志 logcat -d （未抓，可在诊断卡先点「📥 抓LlamaJni日志」） ====")
+                        }
+                        appendLine()
+                        appendLine("==== crash_log.txt（如果有崩溃的话，App.instance.getExternalFilesDir(null)/crash_log.txt） ====")
+                        runCatching {
+                            val dir: File? = ctx.getExternalFilesDir(null)
+                            val crashF = File(dir, "crash_log.txt")
+                            if (crashF.exists()) crashF.readText() else "（不存在 / 本次还没崩过）"
+                        }.onSuccess { append(it) }
+                            .onFailure { append("读取失败：${it.message}") }
+                    }
+                    runCatching {
+                        val dir: File? = ctx.externalCacheDir
+                        val outFile = File(dir, "ai-coder-diag-${System.currentTimeMillis()}.txt")
+                        outFile.writeText(content)
+                        val uri: Uri = FileProvider.getUriForFile(
+                            ctx, "${BuildConfig.APPLICATION_ID}.fileprovider", outFile
+                        )
+                        val intent = Intent(Intent.ACTION_SEND).apply {
+                            type = "text/plain"
+                            putExtra(Intent.EXTRA_STREAM, uri)
+                            putExtra(Intent.EXTRA_SUBJECT, "AI编程助手诊断包 v${BuildConfig.VERSION_NAME}")
+                            addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        }
+                        ctx.startActivity(Intent.createChooser(intent, "分享诊断包给…").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                    }.onFailure { t ->
+                        Toast.makeText(ctx, "分享失败：${t.message ?: t}", Toast.LENGTH_LONG).show()
+                    }
                 }
             )
         }
@@ -928,7 +1020,9 @@ private fun DiagnosticCard(
     lines: List<String>,
     running: Boolean,
     onStart: () -> Unit,
-    onCancel: () -> Unit
+    onCancel: () -> Unit,
+    onGrabLogcat: () -> Unit,    // 📥 手机端抓 LlamaJni 日志
+    onShareAll: () -> Unit      // 📤 一键把诊断日志 + 探针日志 写文件唤起分享菜单
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -982,6 +1076,52 @@ private fun DiagnosticCard(
                         )
                         Text("取消", fontSize = 12.sp, color = Color(0xFFC24141))
                     }
+                }
+            }
+
+            // —— 🆕 v1.3.6 手机端专用按钮（纯手机就能抓日志/分享，不需要电脑/adb/root）——
+            Row(
+                Modifier
+                    .fillMaxWidth()
+                    .padding(top = 10.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val ctx2 = androidx.compose.ui.platform.LocalContext.current
+                FilledTonalButton(
+                    onClick = onGrabLogcat,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp),
+                    enabled = !running
+                ) {
+                    Icon(Icons.Outlined.ReceiptLong, null, Modifier.padding(end = 4.dp))
+                    Text("📥 抓LlamaJni日志", fontSize = 11.5.sp)
+                }
+                OutlinedButton(
+                    onClick = onShareAll,
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
+                ) {
+                    Icon(Icons.Outlined.IosShare, null, Modifier.padding(end = 4.dp))
+                    Text("📤 分享诊断包", fontSize = 11.5.sp)
+                }
+                Spacer(Modifier.weight(1f))
+                FilledTonalButton(
+                    onClick = {
+                        val txt = lines.joinToString("\n")
+                        if (txt.isBlank()) {
+                            Toast.makeText(ctx2, "日志框为空，先点「开始诊断」或「抓LlamaJni日志」", Toast.LENGTH_SHORT).show()
+                            return@FilledTonalButton
+                        }
+                        val cm = ctx2.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                as? android.content.ClipboardManager
+                        cm?.setPrimaryClip(android.content.ClipData.newPlainText("ai-coder-diagnostic", txt))
+                        Toast.makeText(ctx2, "已复制到剪贴板（约${txt.length}字）", Toast.LENGTH_SHORT).show()
+                    },
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier.height(36.dp)
+                ) {
+                    Icon(Icons.Outlined.ContentCopy, null, Modifier.padding(end = 4.dp))
+                    Text("复制全部", fontSize = 11.5.sp)
                 }
             }
 
@@ -1039,6 +1179,35 @@ private fun DiagnosticCard(
             }
         }
     }
+}
+
+// ===================================================================
+// 🆕 v1.3.6 手机端专用：纯 JVM 调用 logcat -d 抓 LlamaJni/LlamaJniEngine tag 的日志
+//   关键：Android 5+ / UID 隔离下，每个 App 默认能读到「自己 UID 产生的 logcat 条目」，
+//        不需要 READ_LOGS 权限、不需要 root、不需要电脑/adb。
+//   -s tag 只看相关标签，避免一次拉几万行卡住；-d 一次性 dump 不阻塞。
+// ===================================================================
+private suspend fun grabLlamaJniLogcatImpl(): List<String> = withContext(kotlinx.coroutines.Dispatchers.IO) {
+    val pb = ProcessBuilder(
+        "logcat", "-d", "-v", "threadtime",
+        "-s",
+        "LlamaJni:V",
+        "LlamaJniEngine:V",
+        "DEBUG:*",          // 系统崩溃记录（SIGSEGV/tombstone 的开头几行常打在 DEBUG tag）
+        "AndroidRuntime:E",
+        "ActivityManager:I"
+    )
+        .redirectErrorStream(true)
+    val proc: Process = pb.start()
+    val stdout: String = proc.inputStream.bufferedReader(java.nio.charset.StandardCharsets.UTF_8).use { it.readText() }
+    runCatching {
+        if (!proc.waitFor(2, java.util.concurrent.TimeUnit.SECONDS)) proc.destroyForcibly()
+    }
+    val lines = stdout.lineSequence()
+        .map { it.trimEnd() }
+        .filterNot { it.isEmpty() }
+        .toList()
+    lines
 }
 
 // ===================================================================

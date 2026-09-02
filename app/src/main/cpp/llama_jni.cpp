@@ -1,7 +1,10 @@
 /*
  * 【M5-4 真推理】xuedi-coder JNI bridge：llama_jni.cpp
  *
- * 严格对照 llama.cpp b4835 官方 API（拉自 https://raw.githubusercontent.com/ggml-org/llama.cpp/b4835/include/llama.h）
+ * 严格对照 llama.cpp b5180 官方 API（拉自 https://raw.githubusercontent.com/ggml-org/llama.cpp/b5180/include/llama.h）
+ *   v1.3.12 方案B：b4835→b5180 升级。已逐函数核对签名：llama_batch_get_one(tokens,n)、
+ *   llama_tokenize(7参)、llama_token_to_piece(6参)、llama_n_batch、llama_sampler_* 等
+ *   全部与 b4835 源码级兼容，本文件零改动。
  * 写之前做过 survey 实锤存在：
  *   - llama_backend_init / llama_backend_free
  *   - llama_model_load_from_file / llama_init_from_model / llama_model_free / llama_free

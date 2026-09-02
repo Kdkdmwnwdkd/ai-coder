@@ -1,7 +1,7 @@
 # =====================================================
 # 【M5-2】xuedi-coder JNI 入口 CMakeLists.txt
 # —— 对应 #26 失败教训（2026/09/01 Run#26 ld.lld error: unable to find library -lcommon）——
-#   1. llama.cpp b4835 在 LLAMA_BUILD_EXAMPLES=OFF 时不编 common target，
+#   1. llama.cpp b5180 在 LLAMA_BUILD_EXAMPLES=OFF 时不编 common target，
 #      链接写 -lcommon 直接炸 → target_link_libraries 中移除 common。
 #   2. 强制所有依赖编译为静态库（BUILD_SHARED_LIBS=OFF），
 #      最终只有一个 libxuedi-llama.so 打进 APK，避免多 .so 拆分后的加载路径/符号问题。
@@ -30,11 +30,11 @@ if (NOT EXISTS "${LLAMA_DIR}/CMakeLists.txt")
         "  找不到文件：${LLAMA_DIR}/CMakeLists.txt\n"
         "\n"
         "  正常流程：Gradle preBuild task ensureLlamaCppSource 会自动从\n"
-        "  https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/b4835\n"
+        "  https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/b5180\n"
         "  下载并解压到 cpp/llama.cpp/。\n"
         "\n"
         "  你看到这个错误 99% 是 Actions Runner 网络问题导致 curl 下载失败。\n"
-        "  手动解决：把 b4835 tag 压缩包解压，把 llama.cpp-b4835/ 重命名为 llama.cpp/\n"
+        "  手动解决：把 b5180 tag 压缩包解压，把 llama.cpp-b5180/ 重命名为 llama.cpp/\n"
         "  放在 app/src/main/cpp/ 下（目录结构必须 app/src/main/cpp/llama.cpp/CMakeLists.txt 直接存在）。\n"
         "------------------------------------------------------------")
 endif ()
@@ -81,7 +81,7 @@ set(LLAMA_WERRORS         OFF CACHE BOOL "" FORCE)
 # =====================================================
 # 把 llama.cpp 作为子目录拉进来
 # —— 会产出 4 个 static lib target：ggml-base、ggml-cpu、ggml、llama
-#    （b4835 版本 ggml 拆分了 base/cpu 两级架构；LLAMA_BUILD_EXAMPLES=OFF，
+#    （b5180 版本 ggml 拆分了 base/cpu 两级架构；LLAMA_BUILD_EXAMPLES=OFF，
 #     因此 common 子模块不编，链接时不能写 common，否则 ld 找不到 -lcommon）
 # =====================================================
 add_subdirectory(${LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama_build)
@@ -104,7 +104,7 @@ target_include_directories(xuedi-llama PRIVATE
 )
 
 # 注意：target_link_libraries 里严禁再写 common！
-#      b4835 + LLAMA_BUILD_EXAMPLES=OFF 时该 target 不存在。
+#      b5180 + LLAMA_BUILD_EXAMPLES=OFF 时该 target 不存在。
 target_link_libraries(xuedi-llama PRIVATE
     llama
     ggml

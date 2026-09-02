@@ -24,12 +24,13 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 22
-        versionName = "1.3.11"
-        // v1.3.11 方案A（治标）：加「模拟模式」开关，forceMockMode=true 时 chatFlow 直接
-        //   返回 MockLlmEngine 预设回复流，绕过 llama.cpp b4835 arm64 batch 处理 SIGABRT
-        //   （n_ctx/n_batch 调优均无效，崩溃点完全一致）。SettingsPage 诊断卡上方 Switch 切换；
-        //   code 21→22
+        versionCode = 23
+        versionName = "1.3.12-beta"
+        // v1.3.12 方案B（治本）：llama.cpp 子模块 b4835 → b5180 升级。
+        //   b5180 已合入 2025 初社区修复的 arm64 多 batch 处理 bug（b4835 在 prefill 第2个
+        //   batch 切换时 SIGABRT，n_ctx/n_batch 调优均无效）。C API 与 b4835 源码级兼容
+        //   (llama_batch_get_one/llama_tokenize/llama_token_to_piece/llama_n_batch 签名全部
+        //   未变)，llama_jni.cpp 零改动，仅切换下载 TAG。code 22→23
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
@@ -248,10 +249,12 @@ tasks.register("ensureLlamaCppSource") {
     doLast {
         if (marker.exists() && marker.length() > 40_000) return@doLast
         cppDir.mkdirs()
-        // NOTE: 用 llama.cpp 官方真实存在的 release tag（b4835），而不是 short hash。
+        // NOTE: 用 llama.cpp 官方真实存在的 release tag，而不是 short hash。
         //      同时直接写最终组织 ggml-org（ggerganov/llama.cpp 已迁移到 ggml-org/llama.cpp，
         //      archive 路由经过 301 时偶尔会把路径拼成 404）。codeload 直链比 github.com archive 稳定。
-        val TAG = "b4835"
+        // 🔴 v1.3.12 方案B：b4835 → b5180。b5180 含 arm64 多 batch 修复（b4835 prefill 第2
+        //    batch 切换 SIGABRT）。C API 源码级兼容，llama_jni.cpp 零改动。
+        val TAG = "b5180"
         val URLS = listOf(
             "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/$TAG",
             "https://github.com/ggml-org/llama.cpp/archive/refs/tags/$TAG.tar.gz",

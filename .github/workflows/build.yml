@@ -300,6 +300,9 @@ jobs:
   # =====================================================
   upload-mirror:
     name: 生成国内直链（GitHub runner · 多服务 fallback）
+    # 🔴 关键修复：必须 needs publish-release！否则本 job 跟发布 job 并行跑，
+    #   gh release download 时 Release 还没建好 → "release not found" → 直链永远拿不到。
+    needs: publish-release
     if: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v') }}
     runs-on: ubuntu-latest
     permissions:

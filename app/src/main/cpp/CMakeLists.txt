@@ -115,31 +115,30 @@ target_link_libraries(xuedi-llama PRIVATE
 )
 
 # =====================================================
-# 极简 Qwen 推理器 (v1.3.24+ 新增).
-#   与 llama JNI 完全解耦: 只用 ggml / ggml-cpu / ggml-base 做矩阵 + 算子,
-#   自写 GGUF loader + BPE tokenizer + transformer 前向图.
+# 极简 Qwen 推理器 (v1.3.25 重写).
+#   forward pass 全部自写 (qwen_forward.cpp: RMSNorm/matmul/RoPE/Attention/SwiGLU),
+#   纯数学算子, 零 ggml / llama.cpp 依赖.
+#   保留: ggml_loader.cpp (GGUF 解析) + BPE tokenizer + JNI 桥接 (v1.3.24 已验证正确).
 # 输出为独立 libqwen-jni.so, Java 侧 com.xuedi.coder.model.QwenInferEngine 加载.
 # =====================================================
 add_library(qwen-jni SHARED
-    qwen_infer.cpp
-    ggml_loader.cpp
-    qwen_jni.cpp
+    qwen_forward.cpp       # 🆕 自写 forward pass, 纯数学
+    qwen_infer.cpp         # generate 循环 + QwenSession 生命周期
+    ggml_loader.cpp        # GGUF 解析 + BPE tokenizer (v1.3.25 修 Bug#5 static 残留)
+    qwen_jni.cpp           # JNI 桥接 (不动)
 )
 
 target_include_directories(qwen-jni PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}   # qwen_infer.h / ggml_loader.h
-    ${LLAMA_DIR}/ggml/include     # ggml.h / ggml-cpu.h / ggml-backend.h ...
+    ${CMAKE_CURRENT_SOURCE_DIR}   # qwen_infer.h / qwen_forward.h / ggml_loader
 )
+# ⚠️ 不再需要 ${LLAMA_DIR}/ggml/include — 自写 forward 零 ggml 依赖
 
 target_link_libraries(qwen-jni PRIVATE
-    ggml
-    ggml-cpu
-    ggml-base
     log
     z
+    # ⚠️ 不再链接 ggml / ggml-cpu / ggml-base — forward 全自写
 )
 
-# 编译期给一条 warning: 简化初版的已知问题 (让用户知道这是可运行但可能出垃圾的版本).
 target_compile_definitions(qwen-jni PRIVATE
-    QWEN_MINIMAL_V1
+    QWEN_MINIMAL_V2   # v1.3.25: 自写 forward pass, 纯数学, 零 ggml
 )

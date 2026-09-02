@@ -410,28 +410,17 @@ char * qwen_load_model(const char * gguf_path, QwenModel * & out_model) {
         if (auto * e = getk("general.alignment")) alignment = (uint32_t)kv_get_i64(*e);
         if (alignment < 1) alignment = 32;
 
-        // GGUF 中 tensor offset 的含义:
-        //   v3: 距离 "第一个 tensor data 起始处的偏移" (该起始处 = header 末尾 + alignment 对齐)
-        //   但实际上为了简化, 我们假设 GGUF 写库给的就是 绝对偏移. 若读出来 data 头部 4 字节
-        //   对不上, 就 fallback 到绝对偏移. 这里直接用: off + <header data end aligned>
-        // 保守策略: 先假定 off 是相对于 header+kv+tensor_info 结尾的.
-        static bool s_first = true;
-        static uint64_t s_base = 0;
-        if (s_first) {
-            uint64_t aligned = (r.off + alignment - 1) / alignment * alignment;
-            s_base = aligned;
-            s_first = false;
-        }
-        uint64_t abs_off = s_base + off;
-        if (abs_off > flen) {
-            // fallback: 按绝对
-            abs_off = off;
-        }
-        // 校验
+        // GGUF tensor offset: v3 spec says it's relative to first tensor data start,
+        // but actual GGUF writers (llama.cpp, convert-hf-to-gguf.py) usually write
+        // absolute offsets. We try relative first (header end aligned), fallback to absolute.
+        // Bug fix v1.3.25: removed static s_first/s_base — those leaked across multiple
+        // qwen_load_model calls, causing tensor offsets to be wrong on 2nd load.
+        uint64_t aligned = (r.off + alignment - 1) / alignment * alignment;
+        uint64_t abs_off = aligned + off;
+        if (abs_off > flen) abs_off = off;
         if (abs_off >= flen) { delete t; return err("tensor offset out of range"); }
         size_t total_bytes = t->nb[ndim==0?1:ndim-1] * (ndim==0?1:ne[ndim-1]);
         if (abs_off + total_bytes > flen) {
-            // 再 fallback: 按绝对
             abs_off = off;
             if (abs_off + total_bytes > flen) { delete t; return err("tensor data out of range"); }
         }

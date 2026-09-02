@@ -24,8 +24,10 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 17
-        versionName = "1.3.6"
+        versionCode = 18
+        versionName = "1.3.7"
+        // v1.3.7：P0 魅族设置页闪退（同向嵌套滚动/无生命周期 collectAsState）；
+        //        code 17→18
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

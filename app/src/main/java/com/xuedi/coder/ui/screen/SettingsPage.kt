@@ -23,7 +23,6 @@ import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BugReport
 import androidx.compose.material.icons.outlined.CheckCircle
@@ -54,13 +53,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -109,31 +108,38 @@ fun SettingsPage(
     val scope = rememberCoroutineScope()
 
     // ---- Room 流：已导入模型 + 当前选中模型 ----
+    // 🔴 v1.3.7 魅族修复：统一用 collectAsStateWithLifecycle（与 PluginsPage 保持一致），
+    //    避免旧的 collectAsState 在某些厂商 ROM 进入 Settings Tab 时因无生命周期感知
+    //    在重组期间 collect 未完成时 null 解引用 / Flow cancellation race 导致崩溃。
     val allModels by App.instance.modelManager.observeAll()
-        .collectAsState(initial = emptyList())
+        .collectAsStateWithLifecycle(initialValue = emptyList())
     val selectedModel by App.instance.modelManager.observeSelected()
-        .collectAsState(initial = null)
+        .collectAsStateWithLifecycle(initialValue = null)
 
     // ---- 当前 JNI 引擎内存状态（给模型行的状态条用）----
-    // 🔴 注意：这里 **不能 remember**！
-    //   如果 remember(key=allModels)，当用户点「设为当前」导致 loadModel return false，
-    //   allModels 没变化 → remember 不重算 → engineSnapshot.lastLoadError / currentCtx
-    //   永远停留在第一次进入页面的快照 → 状态条一直是「未加载」甚至 Failed reason 为空。
-    //   LlamaJniEngine.lastLoadError / currentCtx / libStatus 都是纯内存读（无 IO），
-    //   每次重组直接取不会影响性能。
-    val engSnapRaw = (App.instance.llmEngine as? LlamaJniEngine).let { eng ->
-        val libSt = eng?.run { LlamaJniEngine.libStatus() }
+    // 🔴 注意：这里 **不能 remember(key=allModels)**！原因见旧注释。
+    // 🛡 v1.3.7 魅族修复：整块包 runCatching，任何 native 层 / ensureLibLoaded 里的异常都被捕获，
+    //    不再因为 libLoaded=未初始化而让 SettingsPage 直接崩。
+    val engSnapRaw = runCatching {
+        (App.instance.llmEngine as? LlamaJniEngine).let { eng ->
+            val libSt = eng?.run { LlamaJniEngine.libStatus() }
+            LoadDiagSnapshot(
+                libLoadedOk = libSt?.first,
+                libLoadError = libSt?.second,
+                currentCtx = eng?.currentCtx() ?: 0L,
+                lastLoadError = eng?.lastLoadError(),
+                lastLoadedPath = App.instance.modelManager.lastLoadedPath()
+            )
+        }
+    }.getOrDefault(
         LoadDiagSnapshot(
-            libLoadedOk = libSt?.first,
-            libLoadError = libSt?.second,
-            currentCtx = eng?.currentCtx() ?: 0L,
-            lastLoadError = eng?.lastLoadError(),
-            lastLoadedPath = App.instance.modelManager.lastLoadedPath()
+            libLoadedOk = false,
+            libLoadError = "UI层读取快照失败",
+            currentCtx = 0L,
+            lastLoadError = null,
+            lastLoadedPath = null
         )
-    }
-    // 但为了避免「一次重组内多次取」有微秒级差导致 Compose smart-cast 警告，
-    // 这里包一层 remember(Unit) 在**单次帧重组内只算一次**（下一次重组还是会重拿）。
-    //   — 核心：永远不用 allModels/selectedModel 当 key，任何状态变更都重算最新值。
+    )
     val engineSnapshot = engSnapRaw
 
     // SAF: 选照片（image/*）→ UI层直接生效 + ThemeStore 持久化
@@ -425,7 +431,9 @@ private fun AppearanceCard(
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
     val themeStore = App.instance.themeStore
-    val themeMode by themeStore.themeModeFlow.collectAsState(initial = ThemeMode.FOLLOW_SYSTEM)
+    // 🔴 v1.3.7 魅族修复：collectAsStateWithLifecycle 替换 collectAsState，避免进入/离开 Settings Tab
+    //    时因为无生命周期感知导致的「collect 已取消但 Compose 还在重组」的 NPE/崩溃。
+    val themeMode by themeStore.themeModeFlow.collectAsStateWithLifecycle(initialValue = ThemeMode.FOLLOW_SYSTEM)
 
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1128,6 +1136,29 @@ private fun DiagnosticCard(
             Spacer(Modifier.height(10.dp))
 
             // 日志输出区：等宽字体 + 可滚动 + 深色背景
+            // 🔴🔴🔴 v1.3.7 魅族修复（最高优先级）：
+            //    之前这里用的是 Column(Modifier.verticalScroll(...))，
+            //    而它本身又处在整个 SettingsPage 的根 LazyColumn(垂直滚动) 里。
+            //    → 荣耀平板 / 模拟器侥幸不崩，但魅族 20 的 Compose Runtime 对
+            //      「同向嵌套滚动 + 父测量是 Inf/AtMost」检查更严格，点设置 Tab 直接崩。
+            //    根治方案：
+            //      1) 日志区内部不用 verticalScroll，改用 LazyColumn(同样是垂直滚动 Composable，
+            //         但 LazyColumn 内部高度是 bounded 测量，能过魅族的 runtime 检查)。
+            //      2) 给外层 OutlinedCard 加一个 heightIn 上限，保证子项测量有界，
+            //         避免「父 height=AtMost Inf → 子 verticalScroll 报
+            //           IllegalStateException: Vertically scrollable component was measured with
+            //           an infinity maximum height」的厂商 ROM 特有崩溃。
+            // 🔴 注意：rememberLazyListState / LaunchedEffect 必须在 Composable 作用域里，
+            //    不能写在 LazyColumn { items {...} } DSL 块里（那不是 Composable 上下文）。
+            val diagLogListState = androidx.compose.foundation.lazy.rememberLazyListState()
+            androidx.compose.runtime.LaunchedEffect(lines.size) {
+                if (lines.isNotEmpty()) runCatching {
+                    // 避开 animateScrollTo：在某些厂商 ROM 下 Compose 重组会打断动画协程，
+                    // 导致 IllegalStateException。直接 scrollToItem 不做动画，稳为上。
+                    val idx = if (lines.lastIndex >= 0) lines.lastIndex else 0
+                    diagLogListState.scrollToItem(idx)
+                }
+            }
             OutlinedCard(
                 shape = RoundedCornerShape(12.dp),
                 colors = CardDefaults.cardColors(
@@ -1137,29 +1168,30 @@ private fun DiagnosticCard(
                 modifier = Modifier
                     .fillMaxWidth()
                     .defaultMinSize(minHeight = 220.dp)
+                    // 🔴 关键：给一个最大高度约束，让内部 LazyColumn 的测量不是无穷大
+                    .heightIn(max = 420.dp)
             ) {
-                val scroll = rememberScrollState()
-                // 有新行时自动滚到底（用 effect 形式更稳）
-                androidx.compose.runtime.LaunchedEffect(lines.size) {
-                    if (lines.isNotEmpty()) runCatching { scroll.animateScrollTo(scroll.maxValue) }
-                }
-                Column(
-                    Modifier
+                androidx.compose.foundation.lazy.LazyColumn(
+                    state = diagLogListState,
+                    modifier = Modifier
                         .fillMaxWidth()
-                        .verticalScroll(scroll)
-                        .padding(10.dp)
+                        .padding(10.dp),
+                    verticalArrangement = Arrangement.spacedBy(0.dp)
                 ) {
                     if (lines.isEmpty()) {
-                        Text(
-                            "（还没跑过。点右上角「开始诊断」。\n" +
-                                "结果会按时间顺序从上到下显示。）",
-                            fontSize = 11.sp,
-                            color = Color(0xFF7A7D82),
-                            fontFamily = FontFamily.Monospace,
-                            lineHeight = 15.sp
-                        )
+                        item(key = "empty-hint") {
+                            Text(
+                                "（还没跑过。点右上角「开始诊断」。\n" +
+                                    "结果会按时间顺序从上到下显示。）",
+                                fontSize = 11.sp,
+                                color = Color(0xFF7A7D82),
+                                fontFamily = FontFamily.Monospace,
+                                lineHeight = 15.sp
+                            )
+                        }
                     } else {
-                        lines.forEach { line ->
+                        items(lines.size, key = { i -> "diag-line-$i" }) { i ->
+                            val line = lines[i]
                             Text(
                                 text = line,
                                 fontSize = 10.5.sp,

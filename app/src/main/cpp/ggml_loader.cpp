@@ -389,54 +389,70 @@ char * qwen_load_model(const char * gguf_path, QwenModel * & out_model) {
     // Bug fix v1.3.25: ne[d] and off were read with vu64() (LEB128),
     //   but GGUF uses fixed uint64. This caused "tensor header corrupt"
     //   because the read position was wrong.
-    for (uint64_t i=0; i<n_tensors; ++i) {
-        std::string name = r.r_str();
-        uint32_t    ndim = r.r<uint32_t>();
-        if (ndim > 4 || !r.ok) return err("tensor header corrupt");
-        size_t ne[4] = {1,1,1,1};
-        for (uint32_t d=0; d<ndim; ++d) ne[d] = (size_t)r.r<uint64_t>();  // ← fixed uint64, NOT vu64
-        uint32_t dtype = r.r<uint32_t>();
-        uint64_t off   = r.r<uint64_t>();  // ← fixed uint64, NOT vu64
-        if (!r.ok) return err("tensor info parse failed");
+    // Bug fix v1.3.25-fix4: tensor offset 是相对于 weights section 起点的.
+    // weights section 起点 = 所有 header (kv info + tensor info) 读完后对齐到 alignment.
+    // 之前在循环内用 r.off 算, r.off 是当前 tensor info 读完后的位置, 完全错.
+    // 现在: 先收集所有 tensor info, 读完所有 tensor info 后算 weights_start, 再算 abs_off.
 
+    struct raw_tensor_info {
+        std::string name;
+        uint32_t    ndim;
+        size_t      ne[4];
+        uint32_t    dtype;
+        uint64_t    off;
+    };
+    std::vector<raw_tensor_info> raw_tensors;
+    raw_tensors.reserve(n_tensors);
+
+    for (uint64_t i=0; i<n_tensors; ++i) {
+        raw_tensor_info ti;
+        ti.name = r.r_str();
+        ti.ndim = r.r<uint32_t>();
+        if (ti.ndim > 4 || !r.ok) return err("tensor header corrupt");
+        ti.ne[0] = ti.ne[1] = ti.ne[2] = ti.ne[3] = 1;
+        for (uint32_t d=0; d<ti.ndim; ++d) ti.ne[d] = (size_t)r.r<uint64_t>();
+        ti.dtype = r.r<uint32_t>();
+        ti.off   = r.r<uint64_t>();
+        if (!r.ok) return err("tensor info parse failed");
+        raw_tensors.push_back(std::move(ti));
+    }
+
+    // 所有 header 读完, 算 weights section 起点
+    uint32_t alignment = 32;
+    if (auto * e = getk("general.alignment")) alignment = (uint32_t)kv_get_i64(*e);
+    if (alignment < 1) alignment = 32;
+    uint64_t header_end   = r.off;
+    uint64_t weights_start = (header_end + alignment - 1) / alignment * alignment;
+    LOG("GGUF header_end=%llu weights_start=%llu alignment=%u", (unsigned long long)header_end, (unsigned long long)weights_start, alignment);
+
+    for (auto & ti : raw_tensors) {
         auto * t = new QwenTensor();
-        t->name = std::move(name);
-        t->type = (int)dtype;
-        t->ndim = ndim;
-        memcpy(t->ne, ne, sizeof(ne));
-        // nb 计算: nb[0]=block bytes, nb[k]=nb[k-1]*ne[k-1]
-        size_t es = ggml_type_size((int)dtype);
-        size_t bs = ggml_blck_size((int)dtype);
-        // 首维以 block 为单位对齐个数
-        size_t ne0_blocks = (ne[0] + bs - 1)/bs;
+        t->name = std::move(ti.name);
+        t->type = (int)ti.dtype;
+        t->ndim = ti.ndim;
+        memcpy(t->ne, ti.ne, sizeof(ti.ne));
+
+        size_t es = ggml_type_size((int)ti.dtype);
+        size_t bs = ggml_blck_size((int)ti.dtype);
+        size_t ne0_blocks = (ti.ne[0] + bs - 1)/bs;
         t->nb[0] = es;
         t->nb[1] = ne0_blocks * es;
-        t->nb[2] = t->nb[1] * ne[1];
-        t->nb[3] = t->nb[2] * ne[2];
-        // 找 data 起点: GGUF tensor data 按 32B 对齐放, 偏移是"相对 alignment 后起点"
-        //   但实际值一般 = 绝对偏移 (自文件起始). 我们读 general.alignment
-        uint32_t alignment = 32;
-        if (auto * e = getk("general.alignment")) alignment = (uint32_t)kv_get_i64(*e);
-        if (alignment < 1) alignment = 32;
+        t->nb[2] = t->nb[1] * ti.ne[1];
+        t->nb[3] = t->nb[2] * ti.ne[2];
 
-        // GGUF tensor offset: v3 spec says it's relative to first tensor data start,
-        // but actual GGUF writers (llama.cpp, convert-hf-to-gguf.py) usually write
-        // absolute offsets. We try relative first (header end aligned), fallback to absolute.
-        // Bug fix v1.3.25: removed static s_first/s_base — those leaked across multiple
-        // qwen_load_model calls, causing tensor offsets to be wrong on 2nd load.
-        uint64_t aligned = (r.off + alignment - 1) / alignment * alignment;
-        uint64_t abs_off = aligned + off;
-        if (abs_off > flen) abs_off = off;
+        // tensor offset 相对于 weights_start (GGUF v3 spec)
+        uint64_t abs_off = weights_start + ti.off;
         if (abs_off >= flen) { delete t; return err("tensor offset out of range"); }
-        size_t total_bytes = t->nb[ndim==0?1:ndim-1] * (ndim==0?1:ne[ndim-1]);
-        if (abs_off + total_bytes > flen) {
-            abs_off = off;
-            if (abs_off + total_bytes > flen) { delete t; return err("tensor data out of range"); }
-        }
+        size_t total_bytes = t->nb[ti.ndim==0?1:ti.ndim-1] * (ti.ndim==0?1:ti.ne[ti.ndim-1]);
+        if (abs_off + total_bytes > flen) { delete t; return err("tensor data out of range"); }
+
         t->data = (char*)p + abs_off;
         t->owned = false;
         t->size_bytes = total_bytes;
         m->tensors.push_back(t);
+        LOG("  tensor %s dtype=%u off=%llu abs=%llu bytes=%zu ne=[%zu,%zu,%zu,%zu]",
+            t->name.c_str(), ti.dtype, (unsigned long long)ti.off, (unsigned long long)abs_off, total_bytes,
+            ti.ne[0], ti.ne[1], ti.ne[2], ti.ne[3]);
     }
 
     m->build_name_map();

@@ -390,24 +390,28 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     // 🔴 v1.3.8：n_ctx 最终值用 ERROR 级打印，诊断包必抓到
     LOGE("cparams.n_ctx set to %d (safe_n_ctx=%d, real_avail=%d MB)",
          cparams.n_ctx, safe_n_ctx, real_avail_mb);
-    // 🔴 v1.3.9：n_batch/n_ubatch 从 256→128，降低 decode 瞬时内存峰值
-    //   (3B 模型在手机上 n_batch=256 偏大，128 更安全，牺牲少量速度换稳定性)
-    cparams.n_batch      = std::min<uint32_t>((uint32_t)safe_n_ctx, 128U);
-    cparams.n_ubatch     = std::min<uint32_t>((uint32_t)safe_n_ctx, 128U);
-    LOGE("cparams.n_batch=%d n_ubatch=%d (v1.3.9: 256→128 削峰)", cparams.n_batch, cparams.n_ubatch);
+    // 🔴 v1.3.14-beta 最终绕路：强制 n_batch=1, n_ubatch=1。
+    //   崩溃模式（v1.3.8→v1.3.13 全版本一致）：prefill 第一个 batch (128 tokens) 成功，
+    //   第二个 batch 的 llama_decode SIGABRT。b5180 多线程崩 / 单线程崩 / 1.5B 小模型也崩 →
+    //   排除内存/模型大小/线程数 → 锁定崩溃点在 llama_decode 处理 batch 切换时的内部状态机。
+    //   解法：n_batch=1 → prefill 循环每次只喂 1 token（llama_batch_get_one 永远只返回 1 token），
+    //   从根本上消除 batch 切换，绕开崩溃点。
+    //   ⚠️ 代价：prefill 变慢（246 tokens 要调 246 次 llama_decode，比 n_batch=128 慢 10-20x），
+    //      但 generate 阶段本来就是 1 token decode，不受影响。
+    //   为什么用户指令里的编译参数是 no-op：
+    //     - GGML_USE_ARM_SVE 不存在（b5180 无此选项；SVE 通过 GGML_NATIVE→-march=native 自动探测，
+    //       当前 CMakeLists L60 GGML_NATIVE=OFF 已关）
+    //     - -O2（NDK Release 默认就是 -O2，b5180 不强制 -O3）
+    //     - LLAMA_NUMA 不存在（b5180 编译期无此选项）
+    //   所以不做 no-op 改动，直接改 n_batch=1 这个真变量。
+    cparams.n_batch      = 1;
+    cparams.n_ubatch     = 1;
+    LOGE("cparams.n_batch=1 n_ubatch=1 (v1.3.14: 绕开 batch 切换崩溃, 246 tokens 分 246 次 decode)");
     cparams.logits_all   = false;
-    // 线程数：直接在 cparams 里设置（llama.h 317-318 行：n_threads 生成单 token / n_threads_batch 批处理）
-    // 🔴 v1.3.13-beta 单线程测试版：强制 n_threads=1，验证 b5180 崩溃是否为多线程同步 bug。
-    //   核对结论：当前 -O2（NDK Release 默认）/ 无 SVE（CMakeLists L60 GGML_NATIVE=OFF，
-    //   不走 if(GGML_NATIVE) 的 -march=native 自动探测 SVE 分支）/ 无 NUMA（b5180 编译期
-    //   无此选项）已全部满足，用户列的编译参数前 3 项是 no-op；唯一剩的真变量是多线程。
-    //   ⚠️ 临时测试版：单线程 prefill 会慢（246 tokens 在 8Gen2 单核约 12-25s），
-    //      generate 约 200-500ms/token，只为验证不崩，不为性能。
-    //   若单线程能出字 → 锁定多线程同步 bug；若仍 SIGABRT → 排除线程，转引擎/模型层。
-    //   验证完下个版回退此行到 std::max(1, (int)nThreads)。
-    int32_t n_threads_use = 1;
-    cparams.n_threads       = 1;
-    cparams.n_threads_batch = 1;
+    // 线程数回退到正常（v1.3.13 单线程也崩，排除线程因素；恢复多线程 prefill 更快）
+    int32_t n_threads_use = std::max(1, (int)nThreads);
+    cparams.n_threads       = n_threads_use;
+    cparams.n_threads_batch = n_threads_use;
     state->ctx = llama_init_from_model(state->model, cparams);
     if (!state->ctx) {
         LOGE("nativeInit: llama_init_from_model FAIL（内存不足？12G 机型留 3G）");

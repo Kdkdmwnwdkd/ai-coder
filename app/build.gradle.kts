@@ -24,13 +24,16 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 24
-        versionName = "1.3.13-beta"
-        // v1.3.13 编译参数排查版（单线程测试）：核对 b5180 真实 CMake 后发现用户列的
-        //   编译参数前 3 项当前已全部满足（-O2=NDK Release 默认；无 SVE=CMakeLists L60
-        //   GGML_NATIVE=OFF；无 NUMA=b5180 编译期无此选项），单独打 -O2 版是 no-op。
-        //   唯一剩的真变量是多线程 → 本版强制 cparams.n_threads=1/n_threads_batch=1
-        //   （llama_jni.cpp L408-410），验证 b5180 崩溃是否多线程同步 bug。code 23→24
+        versionCode = 25
+        versionName = "1.3.14-beta"
+        // v1.3.14 最终绕路版: n_batch=1, n_ubatch=1 绕开 batch 切换崩溃。
+        //   崩溃模式 (v1.3.8→v1.3.13 全版本一致): prefill 第一个 batch (128 tokens) 成功,
+        //   第二个 batch 的 llama_decode SIGABRT。b5180 多线程崩 / 单线程崩 / 1.5B 小模型也崩 →
+        //   排除内存/模型大小/线程数 → 锁定崩溃点在 llama_decode 处理 batch 切换时的内部状态机。
+        //   解法: n_batch=1 → prefill 循环每次只喂 1 token, 从根本上消除 batch 切换。
+        //   用户指令里的编译参数是 no-op: GGML_USE_ARM_SVE 不存在 (当前 GGML_NATIVE=OFF 已关),
+        //   -O2 是 NDK Release 默认 (b5180 不强制 -O3), LLAMA_NUMA 不存在 (b5180 编译期无此选项)。
+        //   线程数回退正常 (v1.3.13 单线程也崩, 排除线程因素)。code 24→25
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

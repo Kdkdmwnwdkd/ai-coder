@@ -29,9 +29,15 @@
 #include <cinttypes>
 
 // ---------- logging ----------
-#define LOG(...) do { if (g_log_cb) { char _buf[256]; snprintf(_buf,sizeof(_buf),__VA_ARGS__); g_log_cb(nullptr,_buf); } } while(0)
+#define LOG(...) do { if (g_log_cb) { char _buf[256]; snprintf(_buf,sizeof(_buf),__VA_ARGS__); g_log_cb(g_log_ud,_buf); } } while(0)
 static qwen_cb_log g_log_cb = nullptr;
 static void * g_log_ud    = nullptr;
+
+// ---------- error helper (returns strdup'd message, caller must free) ----------
+static char * err(const char * msg) {
+    LOG("ERROR: %s", msg ? msg : "(null)");
+    return msg ? strdup(msg) : strdup("unknown error");
+}
 
 // ---------- fp16 helpers ----------
 static inline uint16_t f32_to_f16(float f) {
@@ -353,14 +359,28 @@ static int forward_step(
         // GQA: 把 K,V 的 kv head repeat 到 n_head.
         //   Q shape: [head_dim, n_head=12, 1]
         //   K shape: [head_dim, n_head_kv=2, pos+1]
-        //   repeat K → [head_dim, n_head=12, pos+1], 用 ggml_repeat + reshape trick:
-        //   把 K reshape 到 [head_dim, 1, n_head_kv, pos+1], repeat dim1=6, flatten.
+        //   ggml_repeat(ctx, a, b) 把 a 重复填充到 b 的 shape.
+        //   先 reshape K → [head_dim, 1, n_head_kv, pos+1],
+        //   再 repeat 到 [head_dim, rep, n_head_kv, pos+1], 最后 flatten dim1+2 → [head_dim, n_head, pos+1].
         int rep = c.n_head / c.n_head_kv; // 6
         k = ggml_reshape_4d(ctx, k, c.head_dim, 1, c.n_head_kv, pos+1);
-        k = ggml_repeat(ctx, k, rep);   // dim1 repeat → [head_dim, 6, n_head_kv, pos+1]
+        {
+            // 创建目标 shape tensor: [head_dim, rep, n_head_kv, pos+1]
+            bool pr = ggml_get_no_alloc(ctx);
+            ggml_set_no_alloc(ctx, true);
+            auto * tgt = ggml_new_tensor_4d(ctx, k->type, c.head_dim, rep, c.n_head_kv, pos+1);
+            ggml_set_no_alloc(ctx, pr);
+            k = ggml_repeat(ctx, k, tgt);
+        }
         k = ggml_reshape_3d(ctx, k, c.head_dim, c.n_head, pos+1);
         v = ggml_reshape_4d(ctx, v, c.head_dim, 1, c.n_head_kv, pos+1);
-        v = ggml_repeat(ctx, v, rep);
+        {
+            bool pr = ggml_get_no_alloc(ctx);
+            ggml_set_no_alloc(ctx, true);
+            auto * tgt = ggml_new_tensor_4d(ctx, v->type, c.head_dim, rep, c.n_head_kv, pos+1);
+            ggml_set_no_alloc(ctx, pr);
+            v = ggml_repeat(ctx, v, tgt);
+        }
         v = ggml_reshape_3d(ctx, v, c.head_dim, c.n_head, pos+1);
 
         // Q*K^T: Q[hd, nh, 1], K[hd, nh, n_ctx]. 按 nh 独立算.
@@ -470,20 +490,20 @@ static int forward_step(
 
     // top-k
     int vsz = c.vocab_size;
-    std::vector<std::pair<float,int>> p; p.reserve(vsz);
-    for (int i = 0; i < vsz; ++i) p.emplace_back(logits[i], i);
+    std::vector<std::pair<float,int>> candidates; candidates.reserve(vsz);
+    for (int i = 0; i < vsz; ++i) candidates.emplace_back(logits[i], i);
     int k = (top_k <= 0 || top_k > vsz) ? vsz : top_k;
-    if ((size_t)k < p.size()) {
-        std::nth_element(p.begin(), p.begin() + k, p.end(),
+    if ((size_t)k < candidates.size()) {
+        std::nth_element(candidates.begin(), candidates.begin() + k, candidates.end(),
             [](const auto & a, const auto & b){ return a.first > b.first; });
-        for (size_t i = k; i < p.size(); ++i) logits[p[i].second] = -1e30f;
+        for (size_t i = k; i < candidates.size(); ++i) logits[candidates[i].second] = -1e30f;
     }
     // softmax + top-p
-    float m = *std::max_element(logits.begin(), logits.end());
+    float max_logit = *std::max_element(logits.begin(), logits.end());
     double sum = 0.0;
-    for (auto f : logits) { float v = std::exp(f - m); sum += v; f = v; }
+    for (auto f : logits) { float v = std::exp(f - max_logit); sum += v; f = v; }
     std::vector<float> probs(vsz);
-    for (int i = 0; i < vsz; ++i) probs[i] = std::exp(logits[i] - m) / (float)sum;
+    for (int i = 0; i < vsz; ++i) probs[i] = std::exp(logits[i] - max_logit) / (float)sum;
 
     if (top_p > 0.0f && top_p < 1.0f) {
         std::vector<int> idx(vsz); for (int i=0;i<vsz;++i) idx[i]=i;

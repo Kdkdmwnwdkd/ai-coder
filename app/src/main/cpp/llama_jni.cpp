@@ -587,21 +587,6 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     // -------- 先拿 eos/bos（做 BOS 对齐校验要用，必须在 sampler/prefill 之前） --------
     const llama_token eos = llama_vocab_eos(state->vocab);
     const llama_token bos = llama_vocab_bos(state->vocab);
-    // 🔴 v1.3.22 乱码修复 1/3：取 ChatML 对话停止符 <|im_end|> 的 token id。
-    //   v1.3.16 只判断 id==eos(<|endoftext|>)，但 ChatML 对话模式下 assistant
-    //   输出结束标记是 <|im_end|>，两个 token id 不一样 → 永远不命中 EOS →
-    //   硬写满 MAX_TOKENS(1024) → 后半段续写训练数据 = 用户截图的乱码。
-    //   parse_spec=1 确保 <|im_end|> 作为单个 special token 被解析。
-    llama_token im_end_id = -1;
-    {
-        llama_token im_end_buf[1];
-        int32_t im_end_count = llama_tokenize(state->vocab, "<|im_end|>", 9, im_end_buf, 1, 0, 1);
-        int32_t real = (im_end_count > 0) ? im_end_count : ((im_end_count < 0) ? -im_end_count : 0);
-        if (real == 1) im_end_id = im_end_buf[0];
-        LOGI("nativeChat: im_end_id=%d (parse_spec=1, token_count=%d)", (int)im_end_id, (int)real);
-    }
-    // 🔴 v1.3.22 诊断日志：开头打印所有停止 token id
-    LOGI("nativeChat: stop_tokens: eos=%d im_end=%d", (int)eos, (int)im_end_id);
     LOGI("nativeChat: 📌 vocab eos=%d bos=%d, tokenize DONE n_prompt=%d / n_ctx=%d (tokenize 耗时 %" PRId64 " ms)",
          (int)eos, (int)bos, (int)n_prompt, (int)state->n_ctx, now_ms() - t0);
 
@@ -743,8 +728,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
              (int)n_consumed, (int)n_prompt, now_ms() - t_pre0, now_ms() - t0);
     }
 
-    // -------- 5) 生成循环：最多 512 token（v1.3.22 乱码修复 3/3：从 1024 降到 512 作安全网） --------
-    const int32_t MAX_TOKENS = 512;
+    // -------- 5) 生成循环：最多 1024 token --------
+    const int32_t MAX_TOKENS = 1024;
     int32_t n_generated = 0;
     std::string piece_buf;
     piece_buf.resize(32);  // token_to_piece 通常 4~16 字节，32 覆盖大多数 emoji/中文字符
@@ -760,17 +745,20 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         llama_sampler_accept(sampler, id);
         int64_t ts1 = now_ms();
 
-        // b. EOS / <|im_end|> / 到上下文上限 → Done
+        // b. EOS / <|im_end|> (Qwen 词表标准 id=151645) / 到上下文上限 → Done
         if (id == eos) {
             LOGI("nativeChat: 🏁 EOS hit at n_generated=%d (token_id=%d). Gen total %" PRId64 " ms",
                  (int)n_generated, (int)id, now_ms() - t_gen0);
             cb_done(env, callback, "stop"); break;
         }
-        // 🔴 v1.3.22 乱码修复 2/3：ChatML 对话停止符 <|im_end|> 命中 → 立即结束。
-        //   v1.3.16 只有上面的 EOS 判断，但 ChatML 模式 assistant 实际输出 <|im_end|>
-        //   不输出 <|endoftext|>(eos)，导致永远不停 → 写满 MAX_TOKENS → 乱码尾巴。
-        if (im_end_id != -1 && id == im_end_id) {
-            LOGI("nativeChat: 🏁 im_end hit at n_generated=%d — ChatML 对话正常结束. Gen total %" PRId64 " ms",
+        // 🔴 v1.3.23: 硬编码 Qwen 标准 <|im_end|> token_id=151645, 命中即停止.
+        //   v1.3.22 闪退根因: llama_tokenize("<|im_end|>") 探测调用在 b4835 + 骁龙 8 Gen 2
+        //   下触发 prefill 前 SIGABRT. 现完全放弃探测, 用常量一行追加判断:
+        //   - 若 151645 正确: 模型输出 <|im_end|> 后立即结束 (根治乱码尾巴)
+        //   - 若 151645 错误: 最坏行为 == v1.3.16, 不会崩溃, 只是写满 MAX_TOKENS(1024) 乱码
+        //   不新增任何 llama_tokenize 调用, MAX_TOKENS 保持 1024 不动.
+        if (id == 151645) {
+            LOGI("nativeChat: 🏁 im_end (hardcoded=151645) hit at n_generated=%d. Gen total %" PRId64 " ms",
                  (int)n_generated, now_ms() - t_gen0);
             cb_done(env, callback, "im_end");
             break;
@@ -833,10 +821,10 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         }
     }
 
-    // 正常 MAX_TOKENS 达到（没 EOS / im_end 且没 cancel） → 也算 Done（安全网兜底）
-    if (n_generated >= MAX_TOKENS && !state->cancel.load() && last_id != eos && last_id != im_end_id) {
+    // 正常 MAX_TOKENS 达到（没 EOS 且没 cancel） → 也算 Done
+    if (n_generated >= MAX_TOKENS && !state->cancel.load() && last_id != eos) {
         LOGI("nativeChat: 🏁 MAX_TOKENS 达到 n_generated=%d", (int)n_generated);
-        cb_done(env, callback, "max_tokens");   // v1.3.22: 原因明确标记 "max_tokens"
+        cb_done(env, callback, "length");
     }
     LOGI("nativeChat: ⭐ EXIT n_generated=%d n_consumed=%d total elapsed=%" PRId64 " ms (enter→now)",
          (int)n_generated, (int)n_consumed, now_ms() - t0);

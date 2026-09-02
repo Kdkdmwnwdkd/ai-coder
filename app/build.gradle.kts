@@ -24,19 +24,18 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 33
-        versionName = "1.3.22-beta"
-        // v1.3.22-beta: 严格按「乱码联合诊断报告最终指令」执行
-        //   基线：从 v1.3.20 (git reset --hard 8f90796, 与用户亲测 v1.3.16 逐字节一致)
-        //   1) im_end_id 获取: tokenize("<|im_end|>", parse_spec=1)
-        //   2) generate 循环: 已有 if(id==eos) 后追加 if(id==im_end_id) break
-        //      根因: v1.3.16 只判 eos(<|endoftext|>)，但 ChatML assistant 实际
-        //      结束是 <|im_end|> → 永远不命中 → 写满 1024 token → 后半段乱码尾巴
-        //   3) MAX_TOKENS: 1024 → 512 (安全网兜底)
-        //   4) 诊断日志: stop_tokens 开头打印 + cb_done 原因标准化
-        //      (stop=EOS / im_end=ChatML / max_tokens / context_limit)
-        //   禁止事项全部遵守: 未改 batch / logits / tokenize 参数 / ChatML 拼接
-        //   (v1.3.21 含超范围探针代码，已废弃; v1.3.18/19 的闪退链不再复现)
+        versionCode = 34
+        versionName = "1.3.23-beta"
+        // v1.3.23-beta: 最保守乱码修复, 完全回退 v1.3.22 导致 SIGABRT 的改动
+        //   v1.3.22 闪退根因: 新增的 llama_tokenize("<|im_end|>") 探测调用在 b4835 +
+        //     骁龙 8 Gen 2 (魅族 20) 下触发 prefill 前 SIGABRT (jemalloc / batch 相关)
+        //   修复策略: 放弃任何 llama_tokenize 探测, 仅在 generate 停止条件内追加一行:
+        //     if (id == 151645) { cb_done(env, callback, "im_end"); break; }
+        //     其中 151645 == Qwen 系列词表中 <|im_end|> 的标准 special token id.
+        //   其他代码 100% 保持 v1.3.16 (8f90796): MAX_TOKENS=1024 不动, batch/logits/
+        //     tokenize 参数/ChatML 拼接 零行改动.
+        //   预期: 不闪退 (推理链 == v1.3.16 亲测稳定版). 若 151645 正确 → <|im_end|>
+        //     正常命中立即结束, 乱码尾巴根治; 若 151645 不对 → 行为与 v1.3.16 相同.
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables { useSupportLibrary = true }
         ndk { abiFilters += listOf("arm64-v8a") }

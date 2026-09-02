@@ -361,12 +361,28 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
 
     // 3) create context — n_ctx 全部用 dynamic_n_ctx，不再用 Java 传进来的 nCtx
     auto cparams = llama_context_default_params();
-    cparams.n_ctx        = (uint32_t)dynamic_n_ctx;
-    // 🔴 v1.3.8 任务二 2.2：n_ctx 最终值用 ERROR 级打印，诊断包必抓到
-    LOGE("cparams.n_ctx set to %d", cparams.n_ctx);
-    // 🔴 n_batch/n_ubatch 仍用 256（用户指令禁改，保留原值）
-    cparams.n_batch      = std::min<uint32_t>((uint32_t)dynamic_n_ctx, 256U);
-    cparams.n_ubatch     = std::min<uint32_t>((uint32_t)dynamic_n_ctx, 256U);
+    // 🔴 v1.3.9 修复一（DeepSeek 报告）：KV cache 内存安全降级 + n_batch 256→128。
+    //   诊断显示 prefill(21225ms)成功但 generate 阶段第一个 llama_decode SIGABRT
+    //   (addr=0x2868... OOM mmap 失败)。根因：n_ctx=4096 的 KV cache 在 decode 时
+    //   瞬时内存峰值超限。按 real_avail_mb 分级降级 + 降低 n_batch 削峰。
+    int32_t safe_n_ctx = dynamic_n_ctx;
+    if (real_avail_mb < 3000) {
+        safe_n_ctx = std::min(safe_n_ctx, 2048);
+    }
+    if (real_avail_mb < 2500) {
+        safe_n_ctx = std::min(safe_n_ctx, 1024);
+    }
+    // 魅族 20 real_avail_mb=4096 → safe_n_ctx 维持 4096（不降级），
+    // 但 n_batch=128 会降低 decode 内存峰值，是本次修复关键。
+    cparams.n_ctx        = (uint32_t)safe_n_ctx;
+    // 🔴 v1.3.8：n_ctx 最终值用 ERROR 级打印，诊断包必抓到
+    LOGE("cparams.n_ctx set to %d (safe_n_ctx=%d, real_avail=%d MB)",
+         cparams.n_ctx, safe_n_ctx, real_avail_mb);
+    // 🔴 v1.3.9：n_batch/n_ubatch 从 256→128，降低 decode 瞬时内存峰值
+    //   (3B 模型在手机上 n_batch=256 偏大，128 更安全，牺牲少量速度换稳定性)
+    cparams.n_batch      = std::min<uint32_t>((uint32_t)safe_n_ctx, 128U);
+    cparams.n_ubatch     = std::min<uint32_t>((uint32_t)safe_n_ctx, 128U);
+    LOGE("cparams.n_batch=%d n_ubatch=%d (v1.3.9: 256→128 削峰)", cparams.n_batch, cparams.n_ubatch);
     cparams.logits_all   = false;
     // 线程数：直接在 cparams 里设置（llama.h 317-318 行：n_threads 生成单 token / n_threads_batch 批处理）
     int32_t n_threads_use = std::max(1, (int)nThreads);
@@ -709,6 +725,17 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         int64_t td0 = now_ms();
         last_id = id;
         auto batch = llama_batch_get_one(&id, 1);
+        // 🔴 v1.3.9 修复二（DeepSeek 报告）：generate decode 前防御性检查。
+        //   诊断显示 prefill(21225ms)成功但 generate 第一个 llama_decode SIGABRT
+        //   (OOM mmap 失败, addr=0x2868...)。prefill 已成功用 ctx → ctx 正常，
+        //   此处二次确认 ctx 非空避免访问空指针；OOM 峰值由 nativeInit 的 n_batch=128 削峰。
+        //   注：不用 llama_state_get_size，该 API 在本项目 b4812 未确认存在，避免编译风险。
+        if (state->ctx == nullptr) {
+            LOGE("nativeChat: generate decode 前 ctx==null（KV cache 未分配？）→ cb_error 回 Java");
+            cb_error(env, callback, "generate decode 前 ctx 为空，KV cache 未分配，请降低 n_ctx");
+            llama_batch_free(batch);
+            break;
+        }
         int decode_rc = llama_decode(state->ctx, batch);
         llama_batch_free(batch);
         int64_t td1 = now_ms();

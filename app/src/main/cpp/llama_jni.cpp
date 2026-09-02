@@ -651,10 +651,17 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     {
         auto sp = llama_sampler_chain_default_params();
         sampler = llama_sampler_chain_init(sp);
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95f, /*min_keep=*/1));
-        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
-        llama_sampler_chain_add(sampler, llama_sampler_init_dist((uint32_t)::time(nullptr) ^ 0xC0FFEEu));
+        // 🔴 v1.3.17 温度 0 测试（乱码排查）：用 argmax 确定性采样
+        //   v1.3.16 输出是"有汉字+随机英文+/////"乱码——模型在"尝试"但轨道不对。
+        //   温度 0 能彻底消除采样随机性：如果输出正常 → 原来的 temp=0.7 乱码是温度太高;
+        //   如果还是乱码 → 根因在 KV cache / pos / prompt 格式，不是采样。
+        // 🔧 诊断完就改回 temp=0.7 + top_k/top_p
+        // llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
+        // llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95f, /*min_keep=*/1));
+        // llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
+        // llama_sampler_chain_add(sampler, llama_sampler_init_dist((uint32_t)::time(nullptr) ^ 0xC0FFEEu));
+        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.0f));
+        llama_sampler_chain_add(sampler, llama_sampler_init_dist(0));
     }
     for (llama_token t : tokens) llama_sampler_accept(sampler, t);
 

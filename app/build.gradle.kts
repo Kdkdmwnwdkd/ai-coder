@@ -24,15 +24,15 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 27
-        versionName = "1.3.16-beta"
-        // v1.3.16 关键修复: prefill 最后一个 token 必须 logits=1, generate 每个 token 必须 logits=1
-        //   v1.3.15 把 logits[0] 写死 0 → prefill 全程不产生 logits → generate 第一次
-        //   llama_sampler_sample(sampler, ctx, -1) 拿不到 logits → 访问空指针 → SIGSEGV @ addr=0x0。
-        //   现象: v1.3.15 prefill 246/246 全部完成 (248ms 史无前例), 但 generate 第一个
-        //   token 时 SIGSEGV。这是 batch malloc 循环问题已绕过后暴露的下一个 bug。
-        //   修法: prefill 循环里 is_last_prefill_token ? 1 : 0; generate 循环统一 logits=1。
-        //   其他保持 v1.3.15 配置 (n_batch=1, llama_batch_init 预分配, b5180)。code 26→27
+        versionCode = 28
+        versionName = "1.3.17-beta"
+        // v1.3.17 温度 0 诊断版: 用 temp=0.0 (argmax) 确定性采样排查 v1.3.16 乱码
+        //   v1.3.16 prefill→generate→sample→token_to_piece 全链路通了! 但输出是
+        //   "有汉字+随机英文+/////" 乱码——模型在尝试但轨道不对。
+        //   本版用 argmax 彻底消除采样随机性:
+        //     ✅ 输出正常 → 原来 temp=0.7 + top_k/top_p 噪音太大
+        //     ❌ 还是乱码 → 根因在 KV cache / pos / prompt 格式
+        //   诊断完就改回正常采样。code 27→28
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

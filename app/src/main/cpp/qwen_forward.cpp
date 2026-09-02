@@ -51,49 +51,85 @@ static inline float f16_to_f32(uint16_t h) {
 }
 
 // =====================================================
-// 1. Q4_K_M 反量化 (PLAN.md 九/Q4_K_M block 格式)
+// 1. Q4_K_M 反量化 (严格照搬 llama.cpp b5180 dequantize_row_q4_K)
 //
-// block 格式 (256 元素一组 = 262 bytes):
-//   off 0:  int16 d_min    (2B)
-//   off 2:  int16 d        (2B)
-//   off 4:  int8  scales[128]  (128B, 每 2 元素共享一个 scale)
-//   off 132: uint8 data[128]   (128B, 4bit/elem)
+// block_q4_K 结构 (256 元素 = 144 字节):
+//   off 0:  ggml_half d       (2B, super-block scale, fp16)
+//   off 2:  ggml_half dmin    (2B, super-block min scale, fp16)
+//   off 4:  uint8 scales[12]  (12B, 6-bit 量化的 scale/min 对)
+//   off 16: uint8 qs[128]     (128B, 4bit 数据, 高低 nibble)
+//   总计: 144 bytes
 //
-// 反量化:
-//   scale_i = d + (d_min - d) * scales[i] / 127.0    // i = 0..127, 每 2 元素共用
-//   value   = scale_i * (nibble - 8)                 // nibble 0..15, 减 8 移到对称
+// 反量化公式:
+//   每 64 元素一组, 用 get_scale_min_k4 从 scales[12] 解出 2 组 (sc, m)
+//   d1 = d * sc; m1 = min * m     (sc/m 是 6-bit 整数 0..63)
+//   前 32: y[l] = d1 * (q[l] & 0xF) - m1
+//   后 32: y[l] = d2 * (q[l] >> 4)  - m2
 // =====================================================
-static void dequant_q4km_block(float * out, const uint8_t * blk) {
-    int16_t d_min, d;
-    memcpy(&d_min, blk + 0, 2);
-    memcpy(&d,     blk + 2, 2);
-    const int8_t  * scales = (const int8_t *)(blk + 4);
-    const uint8_t * data   = blk + 132;
 
-    for (int bi = 0; bi < 128; ++bi) {
-        float s = (float)d + ((float)d_min - (float)d) * (float)scales[bi] / 127.0f;
-        uint8_t db = data[bi];
-        int lo = db & 0x0F;
-        int hi = (db >> 4) & 0x0F;
-        out[bi * 2 + 0] = s * (float)(lo - 8);
-        out[bi * 2 + 1] = s * (float)(hi - 8);
+// fp16 → fp32 (和上面 f16_to_f32 重复, 这里只用于 d/dmin)
+static inline float fp16_to_fp32_raw(uint16_t h) {
+    union { uint32_t u; float f; } u;
+    uint32_t sign = h >> 15;
+    int32_t  exp  = (h >> 10) & 0x1F;
+    uint32_t frac = h & 0x3FF;
+    if (exp == 0 && frac == 0) { u.u = (sign << 31); return u.f; }
+    if (exp == 31) { u.u = (sign << 31) | 0x7F800000; return u.f; }
+    exp = exp - 15 + 127;
+    u.u = (sign << 31) | (exp << 23) | (frac << 13);
+    return u.f;
+}
+
+// get_scale_min_k4: 从 12 字节 scales 解出 6-bit sc 和 m
+// 对应 llama.cpp get_scale_min_k4()
+static inline void get_scale_min_k4(int j, const uint8_t * q, uint8_t * d, uint8_t * m) {
+    if (j < 4) {
+        *d = q[j] & 63; *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j+4] & 0xF) | ((q[j-4] >> 6) << 4);
+        *m = (q[j+4] >>  4) | ((q[j-0] >> 6) << 4);
+    }
+}
+
+// 一个 block (256 元素 = 144 字节) 反量化
+static void dequant_q4km_block(float * out, const uint8_t * blk) {
+    uint16_t d_raw, dmin_raw;
+    memcpy(&d_raw,   blk + 0, 2);
+    memcpy(&dmin_raw, blk + 2, 2);
+    const float d   = fp16_to_fp32_raw(d_raw);
+    const float min = fp16_to_fp32_raw(dmin_raw);
+    const uint8_t * scales = blk + 4;
+    const uint8_t * q = blk + 16;
+
+    int is = 0;
+    uint8_t sc, m;
+    for (int j = 0; j < 256; j += 64) {
+        get_scale_min_k4(is + 0, scales, &sc, &m);
+        const float d1 = d * sc; const float m1 = min * m;
+        get_scale_min_k4(is + 1, scales, &sc, &m);
+        const float d2 = d * sc; const float m2 = min * m;
+        for (int l = 0; l < 32; ++l) *out++ = d1 * (q[l] & 0xF) - m1;
+        for (int l = 0; l < 32; ++l) *out++ = d2 * (q[l] >> 4)  - m2;
+        q += 32; is += 2;
     }
 }
 
 // 反量化整个 Q4_K_M 张量到 F32 buffer
-// ggml Q4_K_M: ne0 个元素, 每 256 一个 block
-// nb1 = 262 * ((ne0 + 255) / 256)  (每 256 元素 262 字节)
+// QK_K=256 元素一组, 每 block 144 字节
+// nb1 来自 GGUF (ggml_loader 已正确读取)
 static void dequant_q4km_tensor(float * out, const uint8_t * data,
                                 int64_t ne0, int64_t ne1, size_t nb1) {
-    int64_t nb0_blocks = (ne0 + 255) / 256;
+    static const int BLOCK_SIZE_BYTES = 144;  // sizeof(block_q4_K) = 2+2+12+128
+    static const int BLOCK_NELEM     = 256;  // QK_K
+
+    int64_t nb0_blocks = (ne0 + BLOCK_NELEM - 1) / BLOCK_NELEM;
     for (int64_t r = 0; r < ne1; ++r) {
         const uint8_t * row = data + r * nb1;
         for (int64_t b = 0; b < nb0_blocks; ++b) {
-            const uint8_t * blk = row + b * 262;
-            float * dst = out + r * ne0 + b * 256;
-            // 最后一个 block 可能不满 256
-            int n_elem = (int)std::min<int64_t>(256, ne0 - b * 256);
-            float tmp[256];
+            const uint8_t * blk = row + b * BLOCK_SIZE_BYTES;
+            float * dst = out + r * ne0 + b * BLOCK_NELEM;
+            int n_elem = (int)std::min<int64_t>(BLOCK_NELEM, ne0 - b * BLOCK_NELEM);
+            float tmp[BLOCK_NELEM];
             dequant_q4km_block(tmp, blk);
             for (int i = 0; i < n_elem; ++i) dst[i] = tmp[i];
         }

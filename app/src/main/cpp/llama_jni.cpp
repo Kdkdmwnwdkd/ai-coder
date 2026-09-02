@@ -690,7 +690,14 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             one_batch.pos[0]     = n_consumed;  // KV cache 位置索引（必须单调递增）
             one_batch.n_seq_id[0]      = 0;      // 单序列对话
             one_batch.seq_id[0][0]     = 0;
-            one_batch.logits[0]        = 0;      // 最后一个 token 需要 logits
+            // 🔴 v1.3.16 关键修复（DeepSeek 报告 SIGSEGV @ addr=0x0 根因）：
+            //   v1.3.15 把 logits[0] 写死为 0（"不要 logits"）→ prefill 全程不产生 logits
+            //   → generate 阶段第一次 llama_sampler_sample(sampler, ctx, -1) 拿不到 logits
+            //   → 访问空指针 → SIGSEGV @ addr=0x0 在生成第一个 token 时崩。
+            //   修法：prefill 最后一个 token 必须 logits=1（让 ctx 暴露 logits 给 sampler），
+            //   其他 token logits=0（省算力，中间 token 不需要 sample）。
+            bool is_last_prefill_token = (n_consumed + n_eval >= n_prompt);
+            one_batch.logits[0] = is_last_prefill_token ? 1 : 0;
             one_batch.n_tokens = 1;
             if (n_eval == 0) n_eval = 1;  // 防御性
             int decode_rc = llama_decode(state->ctx, one_batch);
@@ -770,7 +777,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         one_batch.pos[0]     = n_consumed;  // 生成阶段的 pos = 已消费 token 数（下一个位置）
         one_batch.n_seq_id[0]      = 0;
         one_batch.seq_id[0][0]     = 0;
-        one_batch.logits[0]        = 0;    // generate 最后一个 token 需要 logits 供 sample
+        // 🔴 v1.3.16 关键修复：generate 阶段每个 token 都要 sample，所以每个都要 logits=1。
+        //   v1.3.15 这里写成 0 → 第二个 token sample 又会空指针（如果有第二个 token 的话）。
+        one_batch.logits[0]        = 1;    // generate 每个 token 都要 logits 供下一轮 sample
         one_batch.n_tokens = 1;
         // 🔴 v1.3.9 修复二（DeepSeek 报告）：generate decode 前防御性检查。
         //   诊断显示 prefill(21225ms)成功但 generate 第一个 llama_decode SIGABRT

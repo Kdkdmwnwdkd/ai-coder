@@ -24,15 +24,15 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 26
-        versionName = "1.3.15-beta"
-        // v1.3.15 终极 malloc 排查版: llama_batch_init(1, 0, 1) 一次性预分配 batch,
-        //   prefill + generate 循环全程复用, 消除 v1.3.14 残留的 984 次 malloc/free 循环
-        //   (llama_batch_get_one 每次 malloc 4 个数组 + llama_batch_free, 246 tokens × 2 循环)。
-        //   v1.3.14 (n_batch=1) 仍在 prefill 第 64 token 左右 SIGABRT, 崩溃点与 malloc
-        //   循环高度吻合 (魅族 20 jemalloc 在 8Gen2 大中小核切换下碎片化)。
-        //   决策: 本版能出字 → 锁定 batch malloc 循环; 仍崩 → ggml 推理核心本身不兼容,
-        //         放弃真推理, v1.3.11 模拟模式为魅族 20 最终版。code 25→26
+        versionCode = 27
+        versionName = "1.3.16-beta"
+        // v1.3.16 关键修复: prefill 最后一个 token 必须 logits=1, generate 每个 token 必须 logits=1
+        //   v1.3.15 把 logits[0] 写死 0 → prefill 全程不产生 logits → generate 第一次
+        //   llama_sampler_sample(sampler, ctx, -1) 拿不到 logits → 访问空指针 → SIGSEGV @ addr=0x0。
+        //   现象: v1.3.15 prefill 246/246 全部完成 (248ms 史无前例), 但 generate 第一个
+        //   token 时 SIGSEGV。这是 batch malloc 循环问题已绕过后暴露的下一个 bug。
+        //   修法: prefill 循环里 is_last_prefill_token ? 1 : 0; generate 循环统一 logits=1。
+        //   其他保持 v1.3.15 配置 (n_batch=1, llama_batch_init 预分配, b5180)。code 26→27
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

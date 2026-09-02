@@ -52,6 +52,7 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -211,6 +212,9 @@ fun SettingsPage(
     // ---- 诊断运行态 ----
     val diagLines = remember { mutableStateListOf<String>() }
     var diagRunning by remember { mutableStateOf(false) }
+    // 🔴 v1.3.11 方案A：模拟模式开关状态（镜像 LlamaJniEngine.forceMockMode，
+    //    用 remember/mutableStateOf 让 Compose 重组；切换时同步回静态变量）
+    var mockMode by remember { mutableStateOf(LlamaJniEngine.forceMockMode) }
     val diagTsFmt = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.CHINA) }
     fun ts() = diagTsFmt.format(Date())
     fun addLog(line: String) { diagLines.add("[${ts()}] $line") }
@@ -280,6 +284,50 @@ fun SettingsPage(
             )
         }
         item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
+
+        // ---- 分组：模拟模式（v1.3.11 方案A，防闪退兜底）----
+        item(key = "mock-mode-group") {
+            SectionHeader(title = "🧱 模拟模式（防闪退兜底）")
+        }
+        item(key = "mock-mode-card") {
+            OutlinedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 56.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "启用模拟回复（不跑真模型，防闪退）",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "ON=逐字返回预设回复，绕过 C++ 引擎；OFF=调用真推理（如仍崩，等方案B升级 llama.cpp）",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = mockMode,
+                        onCheckedChange = { newChecked ->
+                            mockMode = newChecked
+                            LlamaJniEngine.forceMockMode = newChecked
+                            val tip = if (newChecked) "已切换到模拟模式" else "已切换到真实推理模式"
+                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
+            }
+        }
 
         // ---- 分组 3：推理诊断 ----
         item(key = "diag-group") {

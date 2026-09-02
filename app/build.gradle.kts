@@ -24,12 +24,12 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 21
-        versionName = "1.3.10"
-        // v1.3.10：魅族 20 prefill 仍崩(128/246 后 SIGABRT) → n_ctx 强制 4096→2048 验证 KV cache 假设;
-        //   init 冷启动不再自动加载最近对话(启动空状态, 发消息时 createTopic, 历史走顶部按钮);
-        //   修复二/四已存在(prefill decode_rc 检查 + 顶部历史/新对话按钮), 无需改;
-        //   code 20→21
+        versionCode = 22
+        versionName = "1.3.11"
+        // v1.3.11 方案A（治标）：加「模拟模式」开关，forceMockMode=true 时 chatFlow 直接
+        //   返回 MockLlmEngine 预设回复流，绕过 llama.cpp b4835 arm64 batch 处理 SIGABRT
+        //   （n_ctx/n_batch 调优均无效，崩溃点完全一致）。SettingsPage 诊断卡上方 Switch 切换；
+        //   code 21→22
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

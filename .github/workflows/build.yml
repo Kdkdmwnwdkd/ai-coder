@@ -305,7 +305,9 @@ jobs:
     permissions:
       contents: write
     env:
-      TAG: v1.3.0
+      # 🔴 修复：原来硬编码 v1.3.0，导致每次只给 v1.3.0 找镜像、新版永远没直链。
+      #   改成动态取当前 tag（tag 推送时 = refs/tags/v1.3.11 → ref_name=v1.3.11）。
+      TAG: ${{ github.ref_name }}
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - name: 从 GitHub Release 下载 APK

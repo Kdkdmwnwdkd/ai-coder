@@ -380,14 +380,23 @@ char * qwen_load_model(const char * gguf_path, QwenModel * & out_model) {
     if (cfg.max_seq_len <= 0)    cfg.max_seq_len = 4096;
 
     // --- 读 tensor 信息 ---
+    // GGUF v3 tensor info format (fixed-size integers, NOT LEB128):
+    //   name: string (ULEB128 len + bytes)
+    //   n_dims: uint32 (4B)
+    //   dims[n_dims]: uint64 each (8B each)
+    //   dtype: uint32 (4B)
+    //   offset: uint64 (8B)
+    // Bug fix v1.3.25: ne[d] and off were read with vu64() (LEB128),
+    //   but GGUF uses fixed uint64. This caused "tensor header corrupt"
+    //   because the read position was wrong.
     for (uint64_t i=0; i<n_tensors; ++i) {
         std::string name = r.r_str();
         uint32_t    ndim = r.r<uint32_t>();
         if (ndim > 4 || !r.ok) return err("tensor header corrupt");
         size_t ne[4] = {1,1,1,1};
-        for (uint32_t d=0; d<ndim; ++d) ne[d] = (size_t)r.vu64();
+        for (uint32_t d=0; d<ndim; ++d) ne[d] = (size_t)r.r<uint64_t>();  // ← fixed uint64, NOT vu64
         uint32_t dtype = r.r<uint32_t>();
-        uint64_t off   = r.vu64();
+        uint64_t off   = r.r<uint64_t>();  // ← fixed uint64, NOT vu64
         if (!r.ok) return err("tensor info parse failed");
 
         auto * t = new QwenTensor();

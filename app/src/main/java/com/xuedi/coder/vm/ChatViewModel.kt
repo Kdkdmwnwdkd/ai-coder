@@ -113,14 +113,14 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             topicDao.observeAll().collectLatest { list ->
                 _topics.value = list
-                // 🔴 防卡死关键：只有启动时没选话题（冷启动/删光后为空），才自动选最近活跃的那个。
-                // 平时 sendMessage 里 touchActive(topicId) 会让 observeAll emit 新列表，如果这里
-                // 也调 switchTopicInternal → 从 DB 重新 getByTopic → 把内存里正在流式 token 的
-                // _messages 覆盖成 DB 里的旧值（流式每 64B 才 flush）→ UI 来回抖动/死循环/ANR！
-                // 所以正常 observeAll 更新时绝不碰 _messages。
-                if (_currentTopicId.value == null && list.isNotEmpty()) {
-                    switchTopicInternal(list.first().id)
-                }
+                // 🔴 v1.3.10 修复三：冷启动不再自动加载最近对话。
+                //   之前：_currentTopicId==null && list.isNotEmpty() → switchTopicInternal(list.first().id)
+                //   → 启动就跳进历史最近对话，想新对话要手动操作且没入口。
+                //   现在：启动保持空状态(_currentTopicId=null, _messages=empty)，用户发消息时
+                //   sendMessage 第 255 行 `?: createTopic()` 自动新建话题。历史对话走 ChatPage
+                //   TopAppBar 的「📜历史」按钮切换、「➕新对话」按钮调 newTopic()。
+                //   保留：正常 observeAll 更新时绝不碰 _messages（避免覆盖正在流式 token 的列表 →
+                //   抖动/死循环/ANR）。删除后自动切换逻辑也保留（删除是用户主动操作，切到最近合理）。
                 // 唯一例外：当前 topic 被删了 → 必须切到下一个或新建空话题
                 if (_currentTopicId.value != null && list.none { it.id == _currentTopicId.value }) {
                     val currentDeletedId = _currentTopicId.value

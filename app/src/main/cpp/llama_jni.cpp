@@ -372,8 +372,17 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     if (real_avail_mb < 2500) {
         safe_n_ctx = std::min(safe_n_ctx, 1024);
     }
-    // 魅族 20 real_avail_mb=4096 → safe_n_ctx 维持 4096（不降级），
-    // 但 n_batch=128 会降低 decode 内存峰值，是本次修复关键。
+    // 🔴 v1.3.10 修复一（DeepSeek 报告）：魅族 20 特殊降级验证。
+    //   v1.3.9 诊断：n_batch=128 后 prefill 仍崩（128/246 完成后 SIGABRT），
+    //   说明不是 n_batch 问题，是 n_ctx=4096 的 KV cache 分配/索引在 3B 模型上有问题。
+    //   魅族 20 real_avail 探测 4096（>=4000 && <4200）→ 强制 n_ctx 降到 2048 验证。
+    //   若 2048 跑通 → 锁定 KV cache 内存分配；若仍崩 → llama.cpp 内部逻辑/指令集问题。
+    if (real_avail_mb >= 4000 && real_avail_mb < 4200) {
+        safe_n_ctx = 2048;
+        LOGE("nativeInit: ⚠️ 魅族20特殊降级: n_ctx %d → %d (验证 KV cache 假设)",
+             dynamic_n_ctx, safe_n_ctx);
+    }
+    // 魅族 20 real_avail_mb=4096 → v1.3.10 降级到 2048（KV cache 减半验证）。
     cparams.n_ctx        = (uint32_t)safe_n_ctx;
     // 🔴 v1.3.8：n_ctx 最终值用 ERROR 级打印，诊断包必抓到
     LOGE("cparams.n_ctx set to %d (safe_n_ctx=%d, real_avail=%d MB)",

@@ -24,14 +24,12 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 20
-        versionName = "1.3.9"
-        // v1.3.9：修复 generate 阶段 llama_decode SIGABRT（OOM mmap 失败）。
-        //   DeepSeek 报告：prefill 成功但 generate 第一个 decode 崩（addr=0x2868...）。
-        //   nativeInit: safe_n_ctx 按 real_avail_mb 分级降级(<3000→2048,<2500→1024) +
-        //     n_batch/n_ubatch 256→128 削峰（魅族 20 维持 n_ctx=4096，靠 n_batch=128 降峰值）;
-        //   nativeChat: generate decode 前加 ctx 非空防御检查(cb_error 回 Java);
-        //   code 19→20
+        versionCode = 21
+        versionName = "1.3.10"
+        // v1.3.10：魅族 20 prefill 仍崩(128/246 后 SIGABRT) → n_ctx 强制 4096→2048 验证 KV cache 假设;
+        //   init 冷启动不再自动加载最近对话(启动空状态, 发消息时 createTopic, 历史走顶部按钮);
+        //   修复二/四已存在(prefill decode_rc 检查 + 顶部历史/新对话按钮), 无需改;
+        //   code 20→21
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

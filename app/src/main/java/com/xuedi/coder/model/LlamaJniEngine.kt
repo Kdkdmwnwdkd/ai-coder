@@ -88,55 +88,12 @@ class LlamaJniEngine : LlmEngine {
     init { ensureLibLoaded() }
 
     // =================================================================
-    // OOM 防护：内存预检（loadModel 和 chatFlow 调用前都查，避免 SIGSEGV 闪退）
-    //
-    // 🔴 修正（v1.3.4 第二个 hotfix）：
-    //   上一版阈值 loadModel<4GB / chatFlow<3GB 太高。
-    //   ActivityManager.MemoryInfo.availMem 是「系统全局可用 RAM（不含 cached buffer
-    //   内可被 kernel 回收的 page cache / slab / 压缩后的 zram）」。
-    //   - 魅族 Flyme：后台杀得激进，但「cached」部分不算在 availMem 里 → availMem 常报 2.8~3.2GB
-    //   - 荣耀 MagicOS / 平板 8GB：系统 + HarmonyUI + 桌面 + 必选服务就占 4.5~5GB，availMem 才 2.5~3GB
-    //   但 Qwen2.5-3B Q4_K_M 本身才 2007MB + kv cache(4096ctx) 约 350MB + 激活层峰值 600~800MB
-    //   → 实际最低 ~3GB 就能加载；加载完推理时 ~2GB 峰值就够。
-    //   所以阈值下调为：loadModel=3000MB / chatFlow=2000MB，并加所有字段打 log。
+    // ⛔ Kotlin 层不再做任何"按 availMem 猜阈值"的内存预检（v1.3.5 删除）。
+    //   之前 ActivityManager.MemoryInfo.availMem 不含 cached/zram 可回收部分，
+    //   导致 12GB 的魅族和 8GB 的荣耀都被误杀。
+    //   真实可用 native mmap 上限改由 C++ 层 nativeInit 开头的
+    //   probe_max_continuous_mb() 二分探测函数决定（见 llama_jni.cpp）。
     // =================================================================
-    private data class MemSnapshot(
-        val availMB: Long,
-        val totalMB: Long,
-        val thresholdMB: Long,  // 低于这个值系统就开始杀后台
-        val lowMemory: Boolean, // Android 判定进入低内存（即将触发 LMK）
-        val appHeapMB: Long     // Runtime maxMemory - JVM 侧最大堆（对 native OOM 参考不大，但一起打）
-    )
-    private fun memSnapshot(): MemSnapshot {
-        val am = App.instance.getSystemService(Context.ACTIVITY_SERVICE) as? ActivityManager
-        val info = am?.let {
-            ActivityManager.MemoryInfo().also { mi -> it.getMemoryInfo(mi) }
-        }
-        val rt = Runtime.getRuntime()
-        return MemSnapshot(
-            availMB = info?.availMem?.div(1024L * 1024L) ?: Long.MAX_VALUE,
-            totalMB = info?.totalMem?.div(1024L * 1024L) ?: -1L,
-            thresholdMB = info?.threshold?.div(1024L * 1024L) ?: -1L,
-            lowMemory = info?.lowMemory ?: false,
-            appHeapMB = rt.maxMemory() / (1024L * 1024L)
-        )
-    }
-    private fun availableMemMB(): Long = memSnapshot().availMB
-
-    private fun checkMemAndReason(minMB: Long, stage: String): String? {
-        val m = memSnapshot()
-        Log.i(TAG, "[mem:$stage] avail=${m.availMB}MB  total=${m.totalMB}MB  " +
-            "threshold=${m.thresholdMB}MB  lowMemory=${m.lowMemory}  " +
-            "JVM_maxHeap=${m.appHeapMB}MB  (本次需要>=$minMB MB)")
-        return when {
-            m.availMB < minMB -> "可用内存不足（当前 avail=${m.availMB}MB < 最低要求 ${minMB}MB）。\n" +
-                "【系统内存快照】total=${m.totalMB}MB  low-threshold=${m.thresholdMB}MB  " +
-                "进入LMK=${m.lowMemory}\n" +
-                "请：① 关闭所有后台 App（微信、QQ、浏览器等）② 重启手机彻底释放内存 ③ 再尝试加载"
-            m.lowMemory && m.availMB < minMB * 2 -> null   // 进 LMK 但还够 2x 需求就放行，别误杀
-            else -> null
-        }
-    }
 
     // =================================================================
     // Java ↔ C++ 回调接口（C++ 层用反射调 Java）
@@ -185,13 +142,6 @@ class LlamaJniEngine : LlmEngine {
         }
         if (f.length() < 1024 * 1024) {
             lastLoadError = "模型文件过小（${f.length()} bytes），非有效 GGUF"
-            return false
-        }
-        // 🔴 OOM 防护 1：加载前查可用内存（3B Q4_K_M → 最低 3GB 就够，之前设 4GB 把平板/魅族都误杀了），
-        //    内存不够时直接友好报错，不要让 llama_decode 硬顶 → SIGSEGV 闪退。
-        checkMemAndReason(minMB = 3000, stage = "loadModel")?.let {
-            lastLoadError = it
-            Log.w(TAG, "loadModel ❌ 内存不足：$it")
             return false
         }
         // 🔴 闪退修复 v2：loadModel 前先 cancel 旧 nativeChat + 把 ctx 清 0，
@@ -264,16 +214,6 @@ class LlamaJniEngine : LlmEngine {
             }
             Log.e(TAG, "chatFlow ❌ ctx=0 → 返回 Error。diag=$diag")
             return flowOf(ChatChunk.Error(RuntimeException(diag), msg))
-        }
-
-        // 🔴 OOM 防护 2：聊天前再查一次内存（要 2GB 以上——模型已在内存里，
-        //    只需要留激活层/批处理余量即可；之前设 3GB 会把刚加载完模型的平板误杀）
-        checkMemAndReason(minMB = 2000, stage = "chatFlow")?.let { reason ->
-            Log.w(TAG, "chatFlow ❌ 内存不足：$reason")
-            return flowOf(ChatChunk.Error(
-                RuntimeException("memory_low"),
-                "❌ $reason\n\n另外，建议关闭「场景」页面中不必要的开关，减少 system prompt 占用。"
-            ))
         }
 
         // —— 真推理：callbackFlow 包 C++ 回调 ——

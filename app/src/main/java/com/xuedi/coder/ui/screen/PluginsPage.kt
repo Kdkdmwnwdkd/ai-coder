@@ -59,98 +59,102 @@ fun PluginsPage(appScope: CoroutineScope) {
         .collectAsStateWithLifecycle(initialValue = null)
     val refreshing by pluginManager.refreshing.collectAsStateWithLifecycle()
 
-    Column(
-        Modifier
+    // ⛔ v1.3.5 脱壳：删掉外层 Column —— 列表内容本身用 LazyColumn(...) 实现，
+    //    多包一层 Column 没有任何用处，反而将来有人手欠在 Column 上补 verticalScroll
+    //    就会触发「LazyColumn 嵌同方向滚动父」IllegalStateException。
+    //    现在 LazyColumn 直接当根布局，自带垂直滚动 + 唯一正确 padding。
+    LazyColumn(
+        modifier = Modifier
             .fillMaxSize()
-            // ✅ 场景页本身内容在 LazyColumn(L119)，LazyColumn 自带垂直滚动，
-            //    外层 Column 绝对不能再套 .verticalScroll()，
-            //    否则一打开场景页就崩：IllegalStateException:
-            //    Vertically scrollable component was measured with an infinity maximum height constraints
             .padding(
                 start = 14.dp,
                 end = 14.dp,
                 top = 14.dp,
                 bottom = 34.dp
-            )
+            ),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(
-                "场景 · 插件开关",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary
-            )
-            if (refreshing) {
-                Spacer(Modifier.height(12.dp))
-                CircularProgressIndicator(
-                    Modifier
-                        .padding(start = 10.dp)
-                        .padding(vertical = 2.dp),
-                    strokeWidth = 2.dp
+        item(key = "header") {
+            Column {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        "场景 · 插件开关",
+                        fontSize = 15.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    if (refreshing) {
+                        Spacer(Modifier.height(12.dp))
+                        CircularProgressIndicator(
+                            Modifier
+                                .padding(start = 10.dp)
+                                .padding(vertical = 2.dp),
+                            strokeWidth = 2.dp
+                        )
+                    }
+                }
+                Spacer(Modifier.height(6.dp))
+                Text(
+                    "打开的场景会把对应的 System Prompt 注入到 AI 回答里。开关写入 Room 数据库，关掉APP重开也保存。",
+                    fontSize = 12.sp,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
             }
         }
-        Spacer(Modifier.height(6.dp))
-        Text(
-            "打开的场景会把对应的 System Prompt 注入到 AI 回答里。开关写入 Room 数据库，关掉APP重开也保存。",
-            fontSize = 12.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant
-        )
-        Spacer(Modifier.height(14.dp))
 
         when {
             list == null -> {
-                Row(
-                    Modifier.fillMaxWidth().padding(top = 30.dp),
-                    horizontalArrangement = Arrangement.Center
-                ) {
-                    CircularProgressIndicator()
+                item(key = "loading") {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 30.dp),
+                        horizontalArrangement = Arrangement.Center
+                    ) { CircularProgressIndicator() }
                 }
             }
             list!!.isEmpty() -> {
-                Text(
-                    "暂无插件。App 启动时会自动写入 4 个内置场景（Android / Java / Python / Shell），请稍候刷新或返回聊天页重进。",
-                    fontSize = 13.sp,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = 20.dp)
-                )
+                item(key = "empty") {
+                    Text(
+                        "暂无插件。App 启动时会自动写入 4 个内置场景（Android / Java / Python / Shell），请稍候刷新或返回聊天页重进。",
+                        fontSize = 13.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 20.dp)
+                    )
+                }
             }
             else -> {
-                LazyColumn(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                    items(list!!, key = { (cfg, _) -> cfg.id }) { (cfg, enabled) ->
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            shape = RoundedCornerShape(20.dp),
-                            colors = CardDefaults.cardColors(
-                                containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)
-                            )
-                        ) {
-                            ListItem(
-                                headlineContent = {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            iconFor(cfg.id), null,
-                                            tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
-                                            modifier = Modifier.padding(end = 10.dp)
-                                        )
-                                        Text(cfg.name, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
-                                    }
-                                },
-                                supportingContent = {
-                                    Text(cfg.description, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
-                                },
-                                trailingContent = {
-                                    Switch(
-                                        checked = enabled,
-                                        onCheckedChange = { v ->
-                                            appScope.launch {
-                                                runCatching { pluginManager.toggle(cfg.id, v) }
-                                            }
-                                        }
+                items(list!!, key = { (cfg, _) -> cfg.id }) { (cfg, enabled) ->
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(20.dp),
+                        colors = CardDefaults.cardColors(
+                            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.82f)
+                        )
+                    ) {
+                        ListItem(
+                            headlineContent = {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Icon(
+                                        iconFor(cfg.id), null,
+                                        tint = if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(end = 10.dp)
                                     )
+                                    Text(cfg.name, fontWeight = FontWeight.SemiBold, fontSize = 15.sp)
                                 }
-                            )
-                        }
+                            },
+                            supportingContent = {
+                                Text(cfg.description, fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            },
+                            trailingContent = {
+                                Switch(
+                                    checked = enabled,
+                                    onCheckedChange = { v ->
+                                        appScope.launch {
+                                            runCatching { pluginManager.toggle(cfg.id, v) }
+                                        }
+                                    }
+                                )
+                            }
+                        )
                     }
                 }
             }

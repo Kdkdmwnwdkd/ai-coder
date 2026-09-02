@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
@@ -189,103 +191,115 @@ fun SettingsPage(
     fun ts() = diagTsFmt.format(Date())
     fun addLog(line: String) { diagLines.add("[${ts()}] $line") }
 
-    Column(
-        Modifier
+    // ⛔ v1.3.5 彻底删除外层 Column + verticalScroll：之前 SettingsPage 一直有
+    //    「超过屏幕高度被静默裁剪」vs「加 verticalScroll 后嵌套 LazyColumn 崩」的矛盾。
+    //    根治：直接把根布局改成 LazyColumn（自己会滚），每一组内容就是一个 item，
+    //    这样无论组再多（后续加更多诊断/偏好设置）也不会被屏幕截断，
+    //    同时绝不会出现 IllegalState 嵌套滚动崩。
+    LazyColumn(
+        modifier = Modifier
             .fillMaxSize()
-            // 🔴🔴 必加：整个页面内容超过屏幕高度时，允许手势上下滚查看。
-            //  上一版漏掉了 verticalScroll → ModelsCard 之后的「🔍 推理诊断」分组、
-            //  Build 版本信息，永远在屏幕外（静默 clip），并且根本滚不到，
-            //  用户就以为"没有诊断的按键"。这是 UI 层最大的一个遗漏。
-            .verticalScroll(rememberScrollState())
-            // 左右 14dp、顶 10dp、底 34dp：底部多留 24dp 避免最后一项紧贴 TabBar 上沿看不清
             .padding(
                 start = 14.dp,
                 end = 14.dp,
                 top = 10.dp,
                 bottom = 34.dp
-            )
+            ),
+        verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
-        // --------- 分组 1：外观与主题 ----------
-        SectionHeader(title = stringResource(R.string.settings_group_appearance))
-        AppearanceCard(
-            currentBg = currentBg,
-            alphaLocal = alphaLocal,
-            onPickBg = { pickBgLauncher.launch(arrayOf("image/*")) },
-            onClearBg = { setBg(null) },
-            onAlphaChanged = { alphaLocal = it },
-            onAlphaCommit = { setAlpha(alphaLocal) }
-        )
+        // ---- 分组 1：外观与主题 ----
+        item(key = "appearance-group") {
+            SectionHeader(title = stringResource(R.string.settings_group_appearance))
+        }
+        item(key = "appearance-card") {
+            AppearanceCard(
+                currentBg = currentBg,
+                alphaLocal = alphaLocal,
+                onPickBg = { pickBgLauncher.launch(arrayOf("image/*")) },
+                onClearBg = { setBg(null) },
+                onAlphaChanged = { alphaLocal = it },
+                onAlphaCommit = { setAlpha(alphaLocal) }
+            )
+        }
+        item(key = "spacer1") { Spacer(Modifier.height(18.dp)) }
 
-        Spacer(Modifier.height(18.dp))
-
-        // --------- 分组 2：本地模型管理 ----------
-        SectionHeader(title = stringResource(R.string.settings_group_models))
-        ModelsCard(
-            allModels = allModels,
-            selected = selectedModel,
-            engineSnapshot = engineSnapshot,
-            onPickModel = { pickModelLauncher.launch(arrayOf("*/*")) },
-            onSetActive = { m ->
-                scope.launch {
-                    val app = App.instance
-                    val holder = LlamaEngineHolder { app.llmEngine as? LlamaJniEngine }
-                    val (ok, tip) = app.modelManager.switchAndLoadModel(m.id, holder)
-                    Toast.makeText(
-                        ctx, tip,
-                        if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
-                    ).show()
+        // ---- 分组 2：本地模型管理 ----
+        item(key = "models-group") {
+            SectionHeader(title = stringResource(R.string.settings_group_models))
+        }
+        item(key = "models-card") {
+            ModelsCard(
+                allModels = allModels,
+                selected = selectedModel,
+                engineSnapshot = engineSnapshot,
+                onPickModel = { pickModelLauncher.launch(arrayOf("*/*")) },
+                onSetActive = { m ->
+                    scope.launch {
+                        val app = App.instance
+                        val holder = LlamaEngineHolder { app.llmEngine as? LlamaJniEngine }
+                        val (ok, tip) = app.modelManager.switchAndLoadModel(m.id, holder)
+                        Toast.makeText(
+                            ctx, tip,
+                            if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                        ).show()
+                    }
+                },
+                onDelete = { m ->
+                    scope.launch {
+                        App.instance.modelManager.deleteModel(m.id)
+                        Toast.makeText(ctx, "已删除：${m.displayName}", Toast.LENGTH_SHORT).show()
+                    }
                 }
-            },
-            onDelete = { m ->
-                scope.launch {
-                    App.instance.modelManager.deleteModel(m.id)
-                    Toast.makeText(ctx, "已删除：${m.displayName}", Toast.LENGTH_SHORT).show()
+            )
+        }
+        item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
+
+        // ---- 分组 3：推理诊断 ----
+        item(key = "diag-group") {
+            SectionHeader(title = "🔍 推理诊断（闪退 / 没输出时点这里）")
+        }
+        item(key = "diag-card") {
+            DiagnosticCard(
+                lines = diagLines,
+                running = diagRunning,
+                onStart = {
+                    diagLines.clear()
+                    diagRunning = true
+                    addLog("══════════════════ 开始诊断 ══════════════════")
+                    scope.launch {
+                        runDiagnosticImpl(
+                            addLog = ::addLog,
+                            selectedModel = selectedModel,
+                            engineSnapshot = engineSnapshot,
+                            engine = App.instance.llmEngine as? LlamaJniEngine,
+                            onModelNeedLoad = { m ->
+                                val app = App.instance
+                                val holder = LlamaEngineHolder { app.llmEngine as? LlamaJniEngine }
+                                app.modelManager.switchAndLoadModel(m.id, holder)
+                            }
+                        )
+                        diagRunning = false
+                        addLog("══════════════════ 诊断结束 ══════════════════")
+                    }
+                },
+                onCancel = {
+                    (App.instance.llmEngine as? LlamaJniEngine)?.cancel()
+                    addLog("用户请求取消当前推理")
                 }
-            }
-        )
+            )
+        }
 
-        Spacer(Modifier.height(18.dp))
-
-        // --------- 分组 3：推理诊断（用户反馈闪退/0 token 时跑这个截图给开发者） ----------
-        SectionHeader(title = "🔍 推理诊断（闪退 / 没输出时点这里）")
-        DiagnosticCard(
-            lines = diagLines,
-            running = diagRunning,
-            onStart = {
-                diagLines.clear()
-                diagRunning = true
-                addLog("══════════════════ 开始诊断 ══════════════════")
-                scope.launch {
-                    runDiagnosticImpl(
-                        addLog = ::addLog,
-                        selectedModel = selectedModel,
-                        engineSnapshot = engineSnapshot,
-                        engine = App.instance.llmEngine as? LlamaJniEngine,
-                        onModelNeedLoad = { m ->
-                            // 需要先把当前模型加载到内存
-                            val app = App.instance
-                            val holder = LlamaEngineHolder { app.llmEngine as? LlamaJniEngine }
-                            app.modelManager.switchAndLoadModel(m.id, holder)
-                        }
-                    )
-                    diagRunning = false
-                    addLog("══════════════════ 诊断结束 ══════════════════")
-                }
-            },
-            onCancel = {
-                (App.instance.llmEngine as? LlamaJniEngine)?.cancel()
-                addLog("用户请求取消当前推理")
-            }
-        )
-
-        Spacer(Modifier.height(14.dp))
-        Text(
-            "Build ${BuildConfig.BUILD_TYPE} · v${BuildConfig.VERSION_NAME} · " +
-                "support-abi=arm64-v8a",
-            fontSize = 11.sp,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            fontWeight = FontWeight.Medium
-        )
+        // ---- Build 信息 ----
+        item(key = "build-info") {
+            Spacer(Modifier.height(14.dp))
+            Text(
+                "Build ${BuildConfig.BUILD_TYPE} · v${BuildConfig.VERSION_NAME} · " +
+                    "support-abi=arm64-v8a",
+                fontSize = 11.sp,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontWeight = FontWeight.Medium
+            )
+        }
     }
 }
 

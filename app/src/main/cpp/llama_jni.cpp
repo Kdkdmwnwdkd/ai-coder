@@ -43,6 +43,52 @@
 #include <thread>
 #include <vector>
 
+#include <sys/mman.h>
+#include <unistd.h>
+
+// ======================================================================
+// 🔴 v1.3.5 新增：真实连续内存探测（替代 Kotlin 层按 availMem 猜阈值的伪代码）
+//   二分法精确探测当前设备最大可分配的连续匿名内存（单位：MB）。
+//   PROT_NONE 仅占用 VMA，不实际占用物理页 / swap / zram，
+//   所以能准确测出「进程虚拟地址空间里还能 mmap 多大一块连续区域」，
+//   这正是 llama_init_from_model 真正需要的硬指标。
+// ======================================================================
+static int32_t probe_max_continuous_mb() {
+    const size_t page_size = (size_t)sysconf(_SC_PAGESIZE);
+    (void)page_size;
+    const size_t FOUR_GB  = 4096ULL * 1024ULL * 1024ULL;
+    const size_t STEP     = 512ULL * 1024ULL * 1024ULL;   // 粗步 512MB
+    const size_t GRAN     =  16ULL * 1024ULL * 1024ULL;   // 精分 16MB
+    void * ptr = nullptr;
+
+    // —— 第一轮：粗步进找一个上界范围 ——
+    size_t last_success = 0;
+    for (size_t size = STEP; size <= FOUR_GB; size += STEP) {
+        ptr = mmap(nullptr, size, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (ptr == MAP_FAILED) break;
+        munmap(ptr, size);
+        last_success = size;
+    }
+    // 设备大于 4GB 的情况下（目前极少数），上界就定在 4GB。
+    if (last_success == FOUR_GB) return 4096;
+
+    // —— 第二轮：在 [last_success, last_success + STEP) 之间精细二分 ——
+    //   last_success - STEP 表示"之前成功的倒数第二个"（可能为 0）
+    size_t lo = (last_success > STEP) ? (last_success - STEP) : 0;
+    size_t hi = last_success + STEP;
+    while (lo + GRAN < hi) {
+        size_t mid = (lo / 2ULL) + (hi / 2ULL) + ((lo & 1ULL) & (hi & 1ULL)); // 防溢出
+        ptr = mmap(nullptr, mid, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (ptr != MAP_FAILED) {
+            munmap(ptr, mid);
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    return (int32_t)(lo / (1024ULL * 1024ULL));
+}
+
 #include "llama.h"
 
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "LlamaJNI", __VA_ARGS__)
@@ -247,7 +293,34 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     const char * path = env->GetStringUTFChars(jmodel_path, nullptr);
     if (!path) { LOGE("nativeInit: GetStringUTFChars fail"); return 0; }
 
-    LOGI("nativeInit: 开始加载 GGUF → %s (nCtx=%d, nThreads=%d, nGpuLayers=%d)", path, (int)nCtx, (int)nThreads, (int)nGpuLayers);
+    // =====================================================================
+    // 🔴 v1.3.5 真实连续内存探测 + 动态 n_ctx（替代 Kotlin 层猜阈值）
+    //   在任何大分配前（load model / init context）先做 mmap PROT_NONE 探测，
+    //   拿到"这个设备当前真能 mmap 多少连续字节"的硬数字。
+    //   1800MB 是 Qwen2.5-3B Q4_K_M 跑起来的绝对下限（模型≈2000MB，但 mmap
+    //   PROT_NONE 跟模型实际落页的内存不是同一种算法，所以 1.8GB 是经验安全线）。
+    // =====================================================================
+    int32_t real_avail_mb = probe_max_continuous_mb();
+    LOGI("nativeInit: Real continuous mmap memory: %d MB (probe before model load)", real_avail_mb);
+    if (real_avail_mb < 1800) {
+        LOGE("nativeInit: Device memory too low (%d MB < 1800 MB floor). Refusing to load. "
+             "Please close all background apps and reboot.", real_avail_mb);
+        env->ReleaseStringUTFChars(jmodel_path, path);
+        return 0L;
+    }
+    // 动态计算 n_ctx：留出 300MB 给 kv_cache + 系统，其余按 0.7 系数估算
+    //   （系数 0.7 是经验：3B Q4_K_M 在 4096 ctx 时，model+kv+激活≈2.95GB / 可用连续 mmap
+    //    所以 可用MB - 300MB ≈ 模型+激活的预算，除以 0.7 反推"如果真给 4096 ctx 需要多少"，
+    //    实际只取 min(4096, 这个值) 作为最终 n_ctx。）
+    int32_t dynamic_n_ctx_raw = (int32_t)(((int64_t)real_avail_mb - 300) / 0.7);
+    int32_t dynamic_n_ctx = dynamic_n_ctx_raw;
+    if (dynamic_n_ctx > 4096) dynamic_n_ctx = 4096;   // 封顶 4096
+    if (dynamic_n_ctx < 512)  dynamic_n_ctx = 512;    // 至少 512
+    LOGI("nativeInit: dynamic_n_ctx = %d (real_avail=%d MB raw=%d, Java-hint nCtx=%d -> clamp)",
+         dynamic_n_ctx, real_avail_mb, dynamic_n_ctx_raw, (int)nCtx);
+
+    LOGI("nativeInit: 开始加载 GGUF → %s (final nCtx=%d, nThreads=%d, nGpuLayers=%d)",
+         path, dynamic_n_ctx, (int)nThreads, (int)nGpuLayers);
 
     auto state = std::make_unique<LlamaState>();
 
@@ -269,13 +342,12 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
          (int)llama_model_n_ctx_train(state->model),
          (unsigned long long)(llama_model_size(state->model) / 1024ULL / 1024ULL));
 
-    // 3) create context
+    // 3) create context — n_ctx 全部用 dynamic_n_ctx，不再用 Java 传进来的 nCtx
     auto cparams = llama_context_default_params();
-    cparams.n_ctx        = (uint32_t)nCtx;
-    // 🔴 OOM 修复：n_batch 从 512 降到 256，牺牲一点速度换取更低的激活层内存峰值。
-    //    512 batch 的 decode 一次需要分配更多临时张量，容易在预填充后期 OOM SIGSEGV。
-    cparams.n_batch      = std::min<uint32_t>((uint32_t)nCtx, 256U);
-    cparams.n_ubatch     = std::min<uint32_t>((uint32_t)nCtx, 256U);
+    cparams.n_ctx        = (uint32_t)dynamic_n_ctx;
+    // 🔴 n_batch/n_ubatch 仍用 256（用户指令禁改，保留原值）
+    cparams.n_batch      = std::min<uint32_t>((uint32_t)dynamic_n_ctx, 256U);
+    cparams.n_ubatch     = std::min<uint32_t>((uint32_t)dynamic_n_ctx, 256U);
     cparams.logits_all   = false;
     // 线程数：直接在 cparams 里设置（llama.h 317-318 行：n_threads 生成单 token / n_threads_batch 批处理）
     int32_t n_threads_use = std::max(1, (int)nThreads);

@@ -24,8 +24,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 15
-        versionName = "1.3.4"
+        versionCode = 16
+        versionName = "1.3.5"
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

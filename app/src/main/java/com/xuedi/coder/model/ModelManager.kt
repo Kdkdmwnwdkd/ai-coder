@@ -31,8 +31,13 @@ class ModelManager(private val ctx: Context) {
     private val dao: ModelDao by lazy { ModelDatabase.get(ctx).dao() }
     private val modelsRoot: File by lazy { File(ctx.filesDir, "models").apply { mkdirs() } }
 
-    /** 真机低内存：2048 ctx 3B Q4_K_M（KV cache ~512MB）。需要更长上下文可以切到 4096。 */
-    var defaultNCtx: Int = 2048
+    /**
+     * 🔴 v1.3.8：defaultNCtx 2048 → 4096。
+     *   Java 层 nCtx 只是 hint，C++ nativeInit 内部会用 probe_max_continuous_mb() 探测
+     *   真实连续 mmap 内存并动态计算 dynamic_n_ctx 覆盖 cparams.n_ctx（512~4096）。
+     *   这里传 4096 让日志显示与 C++ 封顶一致；实际 n_ctx 仍由 C++ 探针决定。
+     */
+    var defaultNCtx: Int = 4096
 
     /** 最近已成功 load 到引擎的 GGUF 绝对路径。null = 没加载或已 release。 */
     private val lastLoadedPath = AtomicReference<String?>(null)

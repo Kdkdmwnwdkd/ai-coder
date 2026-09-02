@@ -7,12 +7,11 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Android
 import androidx.compose.material.icons.outlined.Code
@@ -31,6 +30,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -58,6 +58,8 @@ fun PluginsPage(appScope: CoroutineScope) {
     val list: List<Pair<PluginConfig, Boolean>>? by pluginManager.listFlow
         .collectAsStateWithLifecycle(initialValue = null)
     val refreshing by pluginManager.refreshing.collectAsStateWithLifecycle()
+    // 🔴 v1.3.8：截断 NavHost 过渡期 Infinity maxHeight，同 SettingsPage（见同目录 SettingsPage.kt 注释）
+    val screenMaxH = LocalConfiguration.current.screenHeightDp.takeIf { it > 0 }?.dp ?: 800.dp
 
     // ⛔ v1.3.5 脱壳：删掉外层 Column —— 列表内容本身用 LazyColumn(...) 实现，
     //    多包一层 Column 没有任何用处，反而将来有人手欠在 Column 上补 verticalScroll
@@ -66,6 +68,7 @@ fun PluginsPage(appScope: CoroutineScope) {
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
+            .heightIn(max = screenMaxH)
             .padding(
                 start = 14.dp,
                 end = 14.dp,

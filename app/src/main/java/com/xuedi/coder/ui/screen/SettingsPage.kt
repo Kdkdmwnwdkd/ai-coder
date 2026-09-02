@@ -65,6 +65,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -108,6 +109,13 @@ fun SettingsPage(
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
+    // 🔴 v1.3.8 魅族闪退根治：截断 NavHost 页面切换过渡期间传递的 Infinity maxHeight。
+    //   NavHost 内部 AnimatedContent + SizeModifier 在过渡期给子组件传 AtMost Infinity，
+    //   而 Modifier.fillMaxSize() 在 Infinity 下无法截断（hasBoundedHeight=false 时透传），
+    //   → 根 LazyColumn 收到 Infinity 抛 "Vertically scrollable component was measured
+    //   with an infinity maximum height constraints"。用屏幕高度作 max 上限兜底：
+    //   正常（有限高度）时 heightIn(max=屏幕高度) 不影响滚动；过渡期 Infinity 被截到屏幕高度。
+    val screenMaxH = LocalConfiguration.current.screenHeightDp.takeIf { it > 0 }?.dp ?: 800.dp
 
     // ---- Room 流：已导入模型 + 当前选中模型 ----
     // 🔴 v1.3.7 魅族修复：统一用 collectAsStateWithLifecycle（与 PluginsPage 保持一致），
@@ -217,6 +225,7 @@ fun SettingsPage(
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
+            .heightIn(max = screenMaxH)
             .padding(
                 start = 14.dp,
                 end = 14.dp,

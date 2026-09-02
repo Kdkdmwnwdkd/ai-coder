@@ -91,10 +91,13 @@ static int32_t probe_max_continuous_mb() {
 
 #include "llama.h"
 
-#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "LlamaJNI", __VA_ARGS__)
-#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  "LlamaJNI", __VA_ARGS__)
-#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "LlamaJNI", __VA_ARGS__)
-#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "LlamaJNI", __VA_ARGS__)
+// 🔴 v1.3.8 关键修复：tag 统一为 "LlamaJni"（与 SettingsPage 抓 logcat 的 -s LlamaJni:V 对齐）。
+//    之前 tag 是 "LlamaJNI"（大写 JNI），诊断包抓 LlamaJni:V 抓不到 nativeInit 的 probe 日志，
+//    误以为"探针没运行"。实际 probe 一直在跑，只是日志被过滤。现在统一为 LlamaJni。
+#define LOGI(...) __android_log_print(ANDROID_LOG_INFO,  "LlamaJni", __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN,  "LlamaJni", __VA_ARGS__)
+#define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, "LlamaJni", __VA_ARGS__)
+#define LOGD(...) __android_log_print(ANDROID_LOG_DEBUG, "LlamaJni", __VA_ARGS__)
 
 // 🔴 诊断计时工具（毫秒）
 #include <chrono>
@@ -293,6 +296,10 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     const char * path = env->GetStringUTFChars(jmodel_path, nullptr);
     if (!path) { LOGE("nativeInit: GetStringUTFChars fail"); return 0; }
 
+    // 🔴 v1.3.8 强力日志：nativeInit 入口标记（ERROR 级确保 logcat -d 必抓到）
+    LOGE("===== nativeInit ENTERED (path=%s, nCtx-hint=%d, nThreads=%d, nGpuLayers=%d) =====",
+         path, (int)nCtx, (int)nThreads, (int)nGpuLayers);
+
     // =====================================================================
     // 🔴 v1.3.5 真实连续内存探测 + 动态 n_ctx（替代 Kotlin 层猜阈值）
     //   在任何大分配前（load model / init context）先做 mmap PROT_NONE 探测，
@@ -301,11 +308,21 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     //   PROT_NONE 跟模型实际落页的内存不是同一种算法，所以 1.8GB 是经验安全线）。
     // =====================================================================
     int32_t real_avail_mb = probe_max_continuous_mb();
-    LOGI("nativeInit: Real continuous mmap memory: %d MB (probe before model load)", real_avail_mb);
+    // 🔴 v1.3.8：probe 结果用 ERROR 级打印（确保诊断包 logcat -d 必抓到）
+    LOGE("probe_max_continuous_mb returned: %d MB", real_avail_mb);
     if (real_avail_mb < 1800) {
-        LOGE("nativeInit: Device memory too low (%d MB < 1800 MB floor). Refusing to load. "
-             "Please close all background apps and reboot.", real_avail_mb);
+        // 🔴 v1.3.8 任务二 2.3：探针失败时 ThrowNew 抛 RuntimeException，
+        //    让 Java 层 LlamaJniEngine.loadModel 的 try-catch 捕获并把具体原因写入 lastLoadError，
+        //    SettingsPage 诊断卡可显示。光 return 0L 只给通用文案，用户不知道是内存不足。
+        std::string err = "Device memory too low (" + std::to_string(real_avail_mb) +
+            " MB < 1800 MB floor). Close all background apps and reboot.";
+        LOGE("nativeInit: %s", err.c_str());
         env->ReleaseStringUTFChars(jmodel_path, path);
+        jclass rtCls = env->FindClass("java/lang/RuntimeException");
+        if (rtCls != nullptr) {
+            env->ThrowNew(rtCls, err.c_str());
+            env->DeleteLocalRef(rtCls);
+        }
         return 0L;
     }
     // 动态计算 n_ctx：留出 300MB 给 kv_cache + 系统，其余按 0.7 系数估算
@@ -345,6 +362,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     // 3) create context — n_ctx 全部用 dynamic_n_ctx，不再用 Java 传进来的 nCtx
     auto cparams = llama_context_default_params();
     cparams.n_ctx        = (uint32_t)dynamic_n_ctx;
+    // 🔴 v1.3.8 任务二 2.2：n_ctx 最终值用 ERROR 级打印，诊断包必抓到
+    LOGE("cparams.n_ctx set to %d", cparams.n_ctx);
     // 🔴 n_batch/n_ubatch 仍用 256（用户指令禁改，保留原值）
     cparams.n_batch      = std::min<uint32_t>((uint32_t)dynamic_n_ctx, 256U);
     cparams.n_ubatch     = std::min<uint32_t>((uint32_t)dynamic_n_ctx, 256U);

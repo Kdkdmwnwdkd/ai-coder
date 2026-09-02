@@ -24,10 +24,12 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 18
-        versionName = "1.3.7"
-        // v1.3.7：P0 魅族设置页闪退（同向嵌套滚动/无生命周期 collectAsState）；
-        //        code 17→18
+        versionCode = 19
+        versionName = "1.3.8"
+        // v1.3.8：根治魅族设置页闪退（NavHost 过渡期 Infinity → 根 LazyColumn heightIn 截断）；
+        //        统一 C++ LOG tag LlamaJNI→LlamaJni（诊断包 logcat -d 抓得到 probe 日志）；
+        //        nativeInit 加 ERROR 级 probe/cparams.n_ctx 日志 + 内存不足 ThrowNew 回传 lastLoadError；
+        //        ModelManager defaultNCtx 2048→4096；code 18→19
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

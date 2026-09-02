@@ -397,9 +397,17 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     LOGE("cparams.n_batch=%d n_ubatch=%d (v1.3.9: 256→128 削峰)", cparams.n_batch, cparams.n_ubatch);
     cparams.logits_all   = false;
     // 线程数：直接在 cparams 里设置（llama.h 317-318 行：n_threads 生成单 token / n_threads_batch 批处理）
-    int32_t n_threads_use = std::max(1, (int)nThreads);
-    cparams.n_threads       = n_threads_use;
-    cparams.n_threads_batch = n_threads_use;
+    // 🔴 v1.3.13-beta 单线程测试版：强制 n_threads=1，验证 b5180 崩溃是否为多线程同步 bug。
+    //   核对结论：当前 -O2（NDK Release 默认）/ 无 SVE（CMakeLists L60 GGML_NATIVE=OFF，
+    //   不走 if(GGML_NATIVE) 的 -march=native 自动探测 SVE 分支）/ 无 NUMA（b5180 编译期
+    //   无此选项）已全部满足，用户列的编译参数前 3 项是 no-op；唯一剩的真变量是多线程。
+    //   ⚠️ 临时测试版：单线程 prefill 会慢（246 tokens 在 8Gen2 单核约 12-25s），
+    //      generate 约 200-500ms/token，只为验证不崩，不为性能。
+    //   若单线程能出字 → 锁定多线程同步 bug；若仍 SIGABRT → 排除线程，转引擎/模型层。
+    //   验证完下个版回退此行到 std::max(1, (int)nThreads)。
+    int32_t n_threads_use = 1;
+    cparams.n_threads       = 1;
+    cparams.n_threads_batch = 1;
     state->ctx = llama_init_from_model(state->model, cparams);
     if (!state->ctx) {
         LOGE("nativeInit: llama_init_from_model FAIL（内存不足？12G 机型留 3G）");

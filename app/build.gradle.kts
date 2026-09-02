@@ -24,13 +24,13 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 23
-        versionName = "1.3.12-beta"
-        // v1.3.12 方案B（治本）：llama.cpp 子模块 b4835 → b5180 升级。
-        //   b5180 已合入 2025 初社区修复的 arm64 多 batch 处理 bug（b4835 在 prefill 第2个
-        //   batch 切换时 SIGABRT，n_ctx/n_batch 调优均无效）。C API 与 b4835 源码级兼容
-        //   (llama_batch_get_one/llama_tokenize/llama_token_to_piece/llama_n_batch 签名全部
-        //   未变)，llama_jni.cpp 零改动，仅切换下载 TAG。code 22→23
+        versionCode = 24
+        versionName = "1.3.13-beta"
+        // v1.3.13 编译参数排查版（单线程测试）：核对 b5180 真实 CMake 后发现用户列的
+        //   编译参数前 3 项当前已全部满足（-O2=NDK Release 默认；无 SVE=CMakeLists L60
+        //   GGML_NATIVE=OFF；无 NUMA=b5180 编译期无此选项），单独打 -O2 版是 no-op。
+        //   唯一剩的真变量是多线程 → 本版强制 cparams.n_threads=1/n_threads_batch=1
+        //   （llama_jni.cpp L408-410），验证 b5180 崩溃是否多线程同步 bug。code 23→24
         // v1.2.9：修 v1.2.8 编译错 clip import 包名（foundation.clip→ui.draw.clip），3个Unresolved reference: clip；
         //        P0 collectLatest→collect + P1 TRAE气泡UI/TopBar新对话 + 闪退保险（v1.2.8内保留）；code 10→11
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"

@@ -24,9 +24,13 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 27
-        versionName = "1.3.16-beta"
-        // v1.3.16 关键修复: prefill 最后一个 token 必须 logits=1, generate 每个 token 必须 logits=1
+        versionCode = 31
+        versionName = "1.3.20"
+        // v1.3.20: 仓库 git reset --hard 8f90796(v1.3.16-beta) 后只升版本号。
+        //   v1.3.17/18/19 全部抛弃：v1.3.19 虽声称"回退"但仍闪退，
+        //   为排除构建缓存/残留风险，整仓库强制 reset 到用户亲测过的 8f90796。
+        //   代码与 v1.3.16-beta 逐字节一致。
+        // v1.3.16 (code=27): prefill 最后 token + generate 每 token logits=1 修复
         //   v1.3.15 把 logits[0] 写死 0 → prefill 全程不产生 logits → generate 第一次
         //   llama_sampler_sample(sampler, ctx, -1) 拿不到 logits → 访问空指针 → SIGSEGV @ addr=0x0。
         //   现象: v1.3.15 prefill 246/246 全部完成 (248ms 史无前例), 但 generate 第一个

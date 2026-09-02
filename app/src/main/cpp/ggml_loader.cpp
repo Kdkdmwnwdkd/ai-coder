@@ -62,9 +62,9 @@ static size_t ggml_type_size(int t) {
         case GGML_TYPE_Q2_K: return 256/16*2 + 256/4 + 2 + 2; // rough
         case GGML_TYPE_Q3_K: return 256/8 + 256/4 + 12 + 2 + 2;
         case GGML_TYPE_Q4_K:
-        case GGML_TYPE_Q4_K_M: return 2 + 2 + 128 + 256/2;  // K 系列: 2x2B dmin/d + 128 scales + 128B data
+        case GGML_TYPE_Q4_K_M: return 2 + 2 + 12 + 256/2;    // 144B: 2B d + 2B dmin + 12B scales + 128B data (K_SCALE_SIZE=12)
         case GGML_TYPE_Q5_K:
-        case GGML_TYPE_Q5_K_M: return 2 + 2 + 128 + 256/2 + 256/8;
+        case GGML_TYPE_Q5_K_M: return 2 + 2 + 12 + 256/2 + 256/8;
         case GGML_TYPE_Q6_K:   return 256/2 + 256/4 + 256/16 + 2 + 2 + 2;
         default: return 4;
     }

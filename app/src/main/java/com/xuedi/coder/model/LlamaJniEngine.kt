@@ -96,6 +96,45 @@ class LlamaJniEngine : LlmEngine {
     init { ensureLibLoaded() }
 
     // =================================================================
+    // 🔴 v1.3.25-stable 新增：
+    //   ①  CAS mutex genRunningFlag：防"用户连点两次发送 / 第一条还在推理 cancel + 第二条紧
+    //       跟着进来 → C++ 两个 nativeChat 在同一 ctx 上重叠 decode → 偶发 SIGSEGV"。
+    //       跟 ChatViewModel 的 inferenceMutex 做双层保险（VM 管 Job 生命周期；Engine 管 JNI 并
+    //       发入口，极端情况下用户直接手动调 chatFlow 也能兜底）。
+    //       false=空闲；true=正在 nativeChat 阻塞跑。
+    //   ②  ChatPlugin 链：纯 Kotlin，风险为 0，不碰任何 C++ 稳定性。
+    // =================================================================
+    private val genRunningFlag = java.util.concurrent.atomic.AtomicBoolean(false)
+
+    /**
+     * 【v1.3.25-stable】流式 Chat 插件链（看 [ChatPlugin] 文档）。
+     * 接入方式：
+     *   · LlamaJniEngine.plugins += myPlugin
+     *   · 后续：可与 PluginManager 的 enabled 插件联动（在 ViewModel 启动时批量注册）。
+     */
+    val plugins: MutableList<ChatPlugin> = java.util.concurrent.CopyOnWriteArrayList()
+
+    private fun runPreSend(input: String): String {
+        var out = input
+        for (p in plugins) {
+            out = runCatching { p.onPreSend(out) }
+                .onFailure { Log.w(TAG, "plugin[${p.javaClass.simpleName}].onPreSend 异常: ${it.message}") }
+                .getOrDefault(out)
+        }
+        return out
+    }
+
+    private fun runPostReceive(piece: String): String {
+        var out = piece
+        for (p in plugins) {
+            out = runCatching { p.onPostReceive(out) }
+                .onFailure { Log.w(TAG, "plugin[${p.javaClass.simpleName}].onPostReceive 异常: ${it.message}") }
+                .getOrDefault(out)
+        }
+        return out
+    }
+
+    // =================================================================
     // ⛔ Kotlin 层不再做任何"按 availMem 猜阈值"的内存预检（v1.3.5 删除）。
     //   之前 ActivityManager.MemoryInfo.availMem 不含 cached/zram 可回收部分，
     //   导致 12GB 的魅族和 8GB 的荣耀都被误杀。
@@ -276,6 +315,12 @@ class LlamaJniEngine : LlmEngine {
             return MockLlmEngine().chatFlow(system, user)
         }
 
+        // —— 🔴 v1.3.25-stable: 插件 onPreSend 链（纯 Kotlin，失败不影响主链路）——
+        val finalUser = runPreSend(user)
+        if (finalUser != user) {
+            Log.i(TAG, "chatFlow: onPreSend 插件链修改输入（${user.length}B → ${finalUser.length}B）")
+        }
+
         val libOk = ensureLibLoaded()
         val curCtx = ctx
 
@@ -311,6 +356,18 @@ class LlamaJniEngine : LlmEngine {
             return flowOf(ChatChunk.Error(RuntimeException(diag), msg))
         }
 
+        // ═══════════════════════════════════════════════════════════════
+        // 🔴 v1.3.25-stable: Engine 级 CAS mutex 兜底 ———
+        //   跟 ChatViewModel 的 inferenceMutex 双层保险：极端情况下别的地方直接发起 chatFlow
+        //   （而不是通过 sendMessage），仍能保证"同一时间只有一个 nativeChat 在阻塞跑"。
+        //   拿不到 CAS 说明正在跑上一次 → 直接返回 Error（"请稍候"提示），避免重叠并发。
+        // ═══════════════════════════════════════════════════════════════
+        if (!genRunningFlag.compareAndSet(false, true)) {
+            val msg = "上一轮推理仍在运行，请稍候再试或先按取消。\n\n（CAS mutex: genRunningFlag=true）"
+            Log.w(TAG, "chatFlow ⚠️ Engine 级 CAS 拿不到 → 返回 Error 拒绝并发：$msg")
+            return flowOf(ChatChunk.Error(RuntimeException("engine busy"), msg))
+        }
+
         // —— 真推理：callbackFlow 包 C++ 回调 ——
         return callbackFlow {
             // 累积所有 token 拼成 full text：Done(reason) 时需要 final 正文，
@@ -334,8 +391,10 @@ class LlamaJniEngine : LlmEngine {
                             return
                         }
                         firstTokenReceived.set(true)
-                        fullSb.append(piece)
-                        trySend(ChatChunk.Token(text=piece))
+                        // —— 🔴 v1.3.25-stable: 插件 onPostReceive 链（纯 Kotlin，失败不影响主链路，不抛异常）——
+                        val filtered = runPostReceive(piece)
+                        fullSb.append(filtered)
+                        trySend(ChatChunk.Token(text = filtered))
                     }
                     override fun onDone(reason: String) {
                         if (this@LlamaJniEngine.ctx != curCtx) {
@@ -343,7 +402,7 @@ class LlamaJniEngine : LlmEngine {
                             channel.close()
                             return
                         }
-                        trySend(ChatChunk.Done(full=fullSb.toString(), stopReason=reason))
+                        trySend(ChatChunk.Done(full = fullSb.toString(), stopReason = reason))
                         channel.close()
                     }
                     override fun onError(message: String) {
@@ -363,7 +422,7 @@ class LlamaJniEngine : LlmEngine {
                     }
                 }
                 val ok = runCatching {
-                    nativeChat(curCtx, system, user, cb)
+                    nativeChat(curCtx, system, finalUser, cb)
                 }
                 if (ok.isFailure) {
                     val t = ok.exceptionOrNull()
@@ -371,7 +430,7 @@ class LlamaJniEngine : LlmEngine {
                     // native 抛错（常见：native 方法签名对不上 UnsatisfiedLinkError）
                     // → 立即 fallback Mock，UI 不空白
                     channel.close()
-                    mkFallbackIfNeed().chatFlow(system, user).collect { send(it) }
+                    mkFallbackIfNeed().chatFlow(system, finalUser).collect { send(it) }
                 }
             }
             // 🔴 v1.3.25-fix16: 首 token 超时从 45s 提到 120s
@@ -391,6 +450,8 @@ class LlamaJniEngine : LlmEngine {
                 }
             }
             job.invokeOnCompletion { cause ->
+                // 🔴 v1.3.25-stable: Engine 级 CAS mutex 必还原
+                genRunningFlag.set(false)
                 // 取消（聊天页用户停/切后台）：C++ 端 decode while 循环判断 cancel flag
                 timeoutJob.cancel()  // 推理结束/取消时停掉首 token 超时定时器
                 runCatching { nativeChatCancel(curCtx) }
@@ -407,6 +468,8 @@ class LlamaJniEngine : LlmEngine {
                 // 流被外层 collect 取消：停超时定时器 + 通知 C++ 跳出 decode 循环
                 timeoutJob.cancel()
                 runCatching { nativeChatCancel(curCtx) }
+                // 外层 awaitClose 时 CAS 还原（万一上面的 invokeOnCompletion 没跑，兜底）
+                genRunningFlag.set(false)
             }
         }
     }

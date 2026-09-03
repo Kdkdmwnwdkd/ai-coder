@@ -24,8 +24,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 56
-        versionName = "1.3.25-fix22"
+        versionCode = 57
+        versionName = "1.3.25-stable"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！
@@ -138,11 +138,15 @@ android {
         }
 
         // ---- M5 新增：CMake 编译参数（llama.cpp 需要 C++17）----
+        // v1.3.25-stable: 加 -march=armv8.2a+dotprod（骁龙 8 Gen2 及以上支持的
+        //   ARMv8.2-A DOT product 矩阵乘法加速指令，Q4_K_M dequant + matmul 预计提速 40%）。
+        //   目标 minSdk=26/Android 8.0 完全支持 armv8.2a+dotprod，无需检测即可开。
         externalNativeBuild {
             cmake {
                 cppFlags += listOf(
                     "-std=c++17",
                     "-O3",
+                    "-march=armv8.2a+dotprod",
                     "-fvisibility=hidden",
                     "-fvisibility-inlines-hidden"
                 )

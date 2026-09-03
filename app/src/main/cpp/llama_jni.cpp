@@ -40,9 +40,10 @@
 // =============================================================================
 // 全局常量（b5180 魅族 20 踩过的坑，全部硬编码）
 // =============================================================================
-static constexpr int   SAFE_N_BATCH    = 1;    // 唯一不崩的 batch 大小（硬证据：fix10 n_batch=1 跑通 1024t）
-static constexpr int   DEFAULT_MAX_GEN = 800;  // gen 阶段最大 token 数（防止跑飞）
-static constexpr int   N_KV_MAX_SHIFT  = 0;    // 预留
+static constexpr int   SAFE_N_BATCH    = 1;     // 唯一不崩的 batch 大小（硬证据：fix10 n_batch=1 跑通 1024t）
+static constexpr int   DEFAULT_MAX_GEN = 2048;  // v1.3.25-stable: 800 → 2048，给更长对话留空间
+static constexpr int   EOS_GUARD_STEPS = 32;    // v1.3.25-stable: argmax 采样下"生成 7 token 就 EOS"的根治：前 32 步硬禁 EOS
+static constexpr int   N_KV_MAX_SHIFT  = 0;     // 预留
 
 // =============================================================================
 // TokenCallback Java methodIDs 缓存
@@ -101,12 +102,17 @@ static void throwJava(JNIEnv* env, const char* fmt, ...) {
 
 // =============================================================================
 // 小工具：手动 argmax（零 sampler_chain，官方示例最简采样）
+//   —— forbid_token: 不允许选择的 token id（典型：前 EOS_GUARD_STEPS 内把 EOS 置为 -inf）
+//                  = -1 表示禁用。
 // =============================================================================
-static llama_token argmax_sample(const float* logits, int n_vocab) {
+static llama_token argmax_sample(const float* logits, int n_vocab, llama_token forbid_token = -1) {
     int   best = 0;
     float mx   = logits[0];
+    if (best == forbid_token) mx = -1e30f;
     for (int i = 1; i < n_vocab; ++i) {
-        if (logits[i] > mx) { mx = logits[i]; best = i; }
+        float v = logits[i];
+        if (i == forbid_token) v = -1e30f;
+        if (v > mx) { mx = v; best = i; }
     }
     return (llama_token)best;
 }
@@ -455,7 +461,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             cb_onPrefill(tenv, gCb, i + 1, total_prefill);
         }
     }
-    LOGI("✅ prefill 完成。n_past=%d 开始生成（max=%d tokens）", n_past, DEFAULT_MAX_GEN);
+    LOGI("✅ prefill 完成。n_past=%d 开始生成（max=%d tokens，EOS_GUARD_STEPS=%d）",
+         n_past, DEFAULT_MAX_GEN, EOS_GUARD_STEPS);
 
     // ---- Step 6: GENERATION ----
     // （last_tok 已在 prefill 循环之前声明为 0，避免 goto 跨初始化报错）
@@ -465,7 +472,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             cb_onError(tenv, gCb, "generation: llama_get_logits_ith 返回空（prefill 最后一个 logits=0？）");
             goto cleanup;
         }
-        last_tok = argmax_sample(logits, st->n_vocab);
+        // Step 0 也属于"前 EOS_GUARD_STEPS 步"，统一禁 EOS（否则首步就 EOS，比如之前日志里的 step=7 EOS）
+        last_tok = argmax_sample(logits, st->n_vocab,
+                                 0 < EOS_GUARD_STEPS ? st->eos : (llama_token)-1);
     }
 
     for (int step = 0; step < DEFAULT_MAX_GEN; ++step) {
@@ -473,8 +482,13 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             cb_onDone(tenv, gCb, "cancel");
             goto cleanup;
         }
+        // ⚠️ v1.3.25-stable: "生成 7 个 token 就 EOS" 的根治：
+        //   argmax 采样 + ChatML 空 assistant 段，模型有时把正常回复当成"一句话就结束"，
+        //   我们在"前 EOS_GUARD_STEPS 步"里直接禁用 EOS（不是取消判断，是在采样阶段根本不允许抽到它）。
+        //   超过 guard 步数后恢复正常：如果 argmax 仍然返回 EOS，就正常接受。
         if (last_tok == st->eos) {
-            LOGI("generation: hit EOS at step=%d", step);
+            LOGI("generation: hit EOS at step=%d (EOS guard elapsed=%s)",
+                 step, step >= EOS_GUARD_STEPS ? "yes" : "no");
             cb_onDone(tenv, gCb, "eos");
             goto cleanup;
         }
@@ -512,12 +526,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         n_past++;
 
         // ---- argmax ----
+        // EOS guard: 前 EOS_GUARD_STEPS 步（包含 step=0）硬禁 EOS token
+        const bool under_eos_guard = (step + 1) < EOS_GUARD_STEPS; // +1 因为这里采样的是"下一步"token
         const float* logits = llama_get_logits_ith(st->ctx, 0);
         if (!logits) {
             cb_onError(tenv, gCb, "generation: logits_ith 返回空");
             goto cleanup;
         }
-        last_tok = argmax_sample(logits, st->n_vocab);
+        last_tok = argmax_sample(logits, st->n_vocab,
+                                 under_eos_guard ? st->eos : (llama_token)-1);
     }
 
     cb_onDone(tenv, gCb, "max_tokens");

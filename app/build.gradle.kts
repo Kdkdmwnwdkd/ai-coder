@@ -24,8 +24,14 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 38
-        versionName = "1.3.25-fix6"
+        versionCode = 39
+        versionName = "1.3.25-fix7"
+        // v1.3.25-fix7: 引擎开关切换后自动 reload 当前选中模型
+        //   · SettingsPage.kt: Switch onCheckedChange 新增 scope.launch，
+        //     切到 Qwen 时自动调 switchAndLoadQwenModel；切回 Llama 时自动调 switchAndLoadModel。
+        //     之前用户只切换开关、没点「🔄 重新加载到内存」→ 表面像"闪退/没反应"，
+        //     实际是模型根本没加载过（诊断包 modelLoaded=false 证实）。
+        //   · 没有选模型时 Toast 提示"请先导入并设为当前模型"。
         // v1.3.25-fix6: 定位 kv parse failed + 生成闪退
         //   · ggml_loader.cpp: 新增逐 KV 详细日志 (qwen-loader tag), 每个 KV 打印 key/type/位置
         //     新增 value_type=13(HAINT) 支持 + 所有错误带 kv 索引/key/偏移/剩余字节上下文

@@ -343,11 +343,40 @@ fun SettingsPage(
                         onCheckedChange = { newChecked ->
                             useQwenSwitch = newChecked
                             QwenInferEngine.useQwenEngine = newChecked
-                            val tip = if (newChecked)
+                            val baseTip = if (newChecked)
                                 "✅ 已切 Qwen 极简推理器（仅支持 Qwen2.5-1.5B Q4_K_M）"
                             else
                                 "已切回 Llama 引擎（稳定版路径）"
-                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
+                            Toast.makeText(ctx, baseTip, Toast.LENGTH_SHORT).show()
+
+                            // 🆕 v1.3.25-fix7: 引擎切换后自动加载当前选中的模型到内存。
+                            //   之前只改开关，但用户没点「🔄 重新加载到内存」→ 模型未加载
+                            //   → 聊天页会报错 "模型尚未加载（isModelLoaded=false）"，表面看像闪退，
+                            //   实际是模型根本没加载过。现在开关切换 = 替用户点一次 reload。
+                            scope.launch {
+                                val app = App.instance
+                                val cur = selectedModel
+                                if (cur == null) {
+                                    Toast.makeText(
+                                        ctx,
+                                        "⚠️ 当前还没选中任何模型，请先导入并设为当前模型",
+                                        Toast.LENGTH_LONG
+                                    ).show()
+                                    return@launch
+                                }
+                                val (ok, tip) = if (newChecked) {
+                                    app.modelManager.switchAndLoadQwenModel(
+                                        cur.id, app.qwenEngineRef()
+                                    )
+                                } else {
+                                    val holder = LlamaEngineHolder { app.llamaEngineRef() }
+                                    app.modelManager.switchAndLoadModel(cur.id, holder)
+                                }
+                                Toast.makeText(
+                                    ctx, tip,
+                                    if (ok) Toast.LENGTH_SHORT else Toast.LENGTH_LONG
+                                ).show()
+                            }
                         }
                     )
                 }

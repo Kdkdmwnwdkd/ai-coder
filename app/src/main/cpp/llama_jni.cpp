@@ -484,6 +484,14 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     }
     state->cancel.store(false);
     const int64_t t0 = now_ms();
+
+    // 🔴 v1.3.25-fix16: 清理 KV cache！
+    //   第一次对话后 KV cache 残留旧 token 的 K/V，第二次 prefill 从 pos=0 开始覆盖，
+    //   但旧 KV 条目（pos > n_prompt 的部分）还在，模型拿到混乱的上下文 → 吐不出字。
+    //   每次新对话开始前必须清空 KV cache。
+    llama_kv_cache_clear(state->ctx);
+    LOGI("nativeChat: 🧹 KV cache cleared");
+
     LOGI("nativeChat: ⭐ ENTER state=%p ctx=%p n_ctx=%d n_batch=%d cancel=%d",
          (void*)state, (void*)state->ctx, (int)state->n_ctx, (int)state->n_batch,
          (int)state->cancel.load());

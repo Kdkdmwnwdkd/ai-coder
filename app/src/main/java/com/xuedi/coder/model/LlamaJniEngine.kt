@@ -374,16 +374,17 @@ class LlamaJniEngine : LlmEngine {
                     mkFallbackIfNeed().chatFlow(system, user).collect { send(it) }
                 }
             }
-            // 🔴 首 token 45s 超时：等 45s 还没出第一个 token（prefill 卡住/内存爆），
-            //    就发 ChatChunk.Error + cancel nativeChat + close 流，避免用户以为"一直转卡死"
+            // 🔴 v1.3.25-fix16: 首 token 超时从 45s 提到 120s
+            //   n_batch 被 llama.cpp 内部覆盖为 64（即使我设 1），prefill 983 tokens
+            //   在手机 CPU 上可能需要 60-90s。45s 太短会杀掉正常推理。
             val timeoutJob = launch(Dispatchers.Default) {
-                delay(45_000L)
+                delay(120_000L)
                 if (!firstTokenReceived.get()) {
-                    Log.w(TAG, "chatFlow 首 token 超时(45s)，cancel nativeChat + 发 Error")
+                    Log.w(TAG, "chatFlow 首 token 超时(120s)，cancel nativeChat + 发 Error")
                     runCatching { nativeChatCancel(curCtx) }
                     trySend(ChatChunk.Error(
-                        RuntimeException("首 token 超时(45s)"),
-                        "首 token 超时(45s)：预填充太慢（可能场景插件太多或内存紧张）。" +
+                        RuntimeException("首 token 超时(120s)"),
+                        "首 token 超时(2分钟)：预填充太慢（可能场景插件太多或内存紧张）。" +
                             "建议：① 关掉不必要的场景 ② 重启手机释放内存 ③ 用更短的提问"
                     ))
                     channel.close()

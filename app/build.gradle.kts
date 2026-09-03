@@ -24,9 +24,15 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 47
-        versionName = "1.3.25-fix15"
-        // v1.3.25-fix15: 【Qwen 自写引擎根治！实现 Q4_K + Q5_K 反量化】
+        versionCode = 48
+        versionName = "1.3.25-fix16"
+        // v1.3.25-fix16: 【KV cache 清理 = 第二次消息不显示的根因！】
+        //   · 用户发现：不管哪个模式，第一次发消息成功，第二次就不显示了！
+        //   · 根因：nativeChat 开始时没清 KV cache！第一次对话后 KV cache 残留旧 token，
+        //     第二次 prefill 从 pos=0 覆盖，但旧 KV 条目还在 → 模型上下文混乱 → 吐不出字。
+        //   · 修复：nativeChat 开头加 llama_kv_cache_clear(ctx)
+        //   · Llama 超时从 45s 提到 120s（n_batch 被 llama.cpp 覆盖为 64，prefill 983 tokens 需要时间）
+        //   · Qwen 超时从 60s 提到 300s（naive matmul 就是慢，先给够时间）
         //   · 根因：dequant_tensor() 检查 type==13 (Q4_K_M)，但模型里根本没有 type 13！
         //     实际 tensor 是 type=12 (Q4_K) 和 type=14 (Q5_K)。
         //   · 旧代码所有量化 tensor 都走 F16 fallback → 把 Q4_K/Q5_K 二进制当 F16 读

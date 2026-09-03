@@ -252,15 +252,19 @@ class QwenInferEngine : LlmEngine {
                     channel.close()
                 }
             }
-            // 🔴 首 token 超时：60s（1.5B 单 token 推理较慢，比 Llama 留更多余量）
+            // 🔴 v1.3.25-fix16: 首 token 超时从 60s 提到 300s（5分钟）
+            //   自写推理器用 naive O(N³) matmul，983 prompt tokens × 28 层 × 多个 1536×8960 矩阵
+            //   = 大约 ~120亿次乘加，手机 CPU 上就是需要几分钟。
+            //   60s 根本不够，先给 5 分钟让它能跑完。后面加 NEON 优化再缩短。
             val timeoutJob = launch(Dispatchers.Default) {
-                delay(60_000L)
+                delay(300_000L)
                 if (!firstTokenReceived.get() && !cancelled.get()) {
-                    Log.w(TAG, "chatFlow 首 token 超时(60s) → 发 Error + 关流")
+                    Log.w(TAG, "chatFlow 首 token 超时(300s) → 发 Error + 关流")
                     cancelled.set(true)
                     trySend(ChatChunk.Error(
-                        RuntimeException("首 token 超时(60s)"),
-                        "首 token 超时(60s)：可能 KV cache 初始化太慢或内存不足。\n建议：关闭所有后台 App → 重启手机 → 重试；用更短的提问。"
+                        RuntimeException("首 token 超时(300s)"),
+                        "首 token 超时(5分钟)：自写推理器用 naive matmul 太慢。\n" +
+                            "建议：① 关掉 Qwen 用 Llama 引擎（快很多）② 用更短的提问 ③ 等后续 NEON 优化"
                     ))
                     channel.close()
                 }

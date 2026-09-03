@@ -113,14 +113,15 @@ static llama_token argmax_sample(const float* logits, int n_vocab) {
 
 // =============================================================================
 // llama_token_to_piece 包装：返回 std::string（处理中文多字节 UTF-8）
-// —— b5180 把 vocab 从 llama_model 剥离，统一用 llama_vocab_* 新命名。
+// —— b5180：函数名保持 llama_token_to_piece 不变，只是第一参数从 llama_model* 改成 const llama_vocab*
+//    开头的 bos/eos/n_tokens 才是 llama_vocab_* 新命名，不要搞混！
 // =============================================================================
 static std::string tok_to_piece(const llama_vocab* vocab, llama_token tok) {
     char buf[32];
-    int n = llama_vocab_token_to_piece(vocab, tok, buf, (int)sizeof(buf), 0, /*special*/false);
+    int n = llama_token_to_piece(vocab, tok, buf, (int)sizeof(buf), 0, /*special*/false);
     if (n < 0) {
         std::vector<char> big(-n + 2);
-        int n2 = llama_vocab_token_to_piece(vocab, tok, big.data(), (int)big.size(), 0, false);
+        int n2 = llama_token_to_piece(vocab, tok, big.data(), (int)big.size(), 0, false);
         if (n2 > 0) return std::string(big.data(), n2);
         return "";
     }
@@ -129,18 +130,18 @@ static std::string tok_to_piece(const llama_vocab* vocab, llama_token tok) {
 
 // =============================================================================
 // tokenize：add_spec=0（不让 tokenizer 自动加 BOS，我们手动插）
-// —— b5180：签名要 const struct llama_vocab* 做第一参数。
+// —— b5180：函数名保持 llama_tokenize 不变，只是第一参数从 llama_model* 改成 const llama_vocab*
 // =============================================================================
 static std::vector<llama_token> tokenize_prompt(const llama_vocab* vocab, const std::string& text, bool add_special = false) {
     int cap = (int)text.size() + 8;
     std::vector<llama_token> out(cap);
-    int n = llama_vocab_tokenize(vocab, text.data(), (int)text.size(),
-                                 out.data(), cap, add_special, /*parse_special=*/true);
+    int n = llama_tokenize(vocab, text.data(), (int)text.size(),
+                           out.data(), cap, add_special, /*parse_special=*/true);
     if (n < 0) {
         cap = -n + 2;
         out.resize(cap);
-        n = llama_vocab_tokenize(vocab, text.data(), (int)text.size(),
-                                 out.data(), cap, add_special, true);
+        n = llama_tokenize(vocab, text.data(), (int)text.size(),
+                           out.data(), cap, add_special, true);
     }
     if (n > 0) out.resize((size_t)n); else out.clear();
     return out;
@@ -403,12 +404,13 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     llama_kv_self_clear(st->ctx);
     LOGI("nativeChat: kv cache 已清。开始 prefill [%zu tokens]", tokens.size());
 
-    // ---- Step 5: batch init（固定 SAFE_N_BATCH=1，官方最简：n_tokens_max=1, n_seq_max=1, embd=0）----
-    // llama_batch_init(n_tokens_max, n_seq_max, embd)
-    // n_seq_max 必须 >= 1：因为后续 batch.seq_id[0][0] = 0，b5180 内部 GGML_ASSERT(seq_id < n_seq_max)
-    // embd=0: 正常 token 输入（不是 embedding 输入）
-    llama_batch batch = llama_batch_init(SAFE_N_BATCH, 1, 0);
-    LOGI("nativeChat: batch created (n_tokens_max=%d, n_seq_max=1, embd=0)。SAFE 路径：batch.n_tokens 永远 =1", SAFE_N_BATCH);
+    // ---- Step 5: batch init（固定 SAFE_N_BATCH=1，官方最简：n_tokens_max=1, embd=0, n_seq_max=1）----
+    // 🚨🚨 b5180 真实签名（grep llama.h:919）：llama_batch_init(n_tokens, embd, n_seq_max)
+    //   - 第 2 参数 embd=0：正常 token 输入（不是 embedding 输入）
+    //   - 第 3 参数 n_seq_max 必须 >= 1：因为后续 batch.n_seq_id[0]=1, batch.seq_id[0][0] = 0
+    //     b5180 内部 GGML_ASSERT(seq_id < n_seq_max)，传 0 直接 SIGABRT！
+    llama_batch batch = llama_batch_init(SAFE_N_BATCH, /*embd=*/0, /*n_seq_max=*/1);
+    LOGI("nativeChat: batch created (n_tokens_max=%d, embd=0, n_seq_max=1)。SAFE 路径：batch.n_tokens 永远 =1", SAFE_N_BATCH);
 
     int n_past = 0;
     const int total_prefill = (int)tokens.size();

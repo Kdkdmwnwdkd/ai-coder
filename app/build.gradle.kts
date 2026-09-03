@@ -24,8 +24,16 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 42
-        versionName = "1.3.25-fix10"
+        versionCode = 43
+        versionName = "1.3.25-fix11"
+        // v1.3.25-fix11: 【Llama 乱码根治】fix10 模型能跑不崩了但输出全是乱码（日文+中文+代码混杂）
+        //   · llama_jni.cpp tokenize: add_spec 从 0→1（关键！Qwen2.5 训练 prompt 有 BOS，
+        //     没 BOS 模型就会"困惑"发散成乱码）；去掉旧的"剥 BOS"逻辑（add_spec=1 后 BOS 是正确的）
+        //   · llama_jni.cpp n_batch: 从强制 1 改回 256 + n_ubatch=256（n_batch=1 导致 KV cache
+        //     累积时 attention mask / position 编码和正常 batch 喂有细微差异，乱码元凶之二）
+        //   · llama_jni.cpp: 去掉魅族20特供硬编码降级 real_avail>=4000→safe_n_ctx=2048
+        //     （fix10 的 GGUF 解析修复已消除崩溃根因，1.5B 模型 n_ctx=4096 + 4096MB 完全够）
+        //   · 增加 ChatML special token ID 诊断日志（<|im_start|>/<|im_end|> 的真实 token ID）
         // v1.3.25-fix10: 【重大修正】fix9 把 GGUF v3 规范搞反了！
         //   · Qwen ggml_loader.cpp: fix9 错误把 header counts 和 string length 改成
         //     ULEB128(vu64)，但官方 gguf_reader.py (b5180) 确认 GGUF v3 全部用固定

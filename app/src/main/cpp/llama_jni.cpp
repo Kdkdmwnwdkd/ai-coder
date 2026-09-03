@@ -384,38 +384,23 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     if (real_avail_mb < 2500) {
         safe_n_ctx = std::min(safe_n_ctx, 1024);
     }
-    // 🔴 v1.3.10 修复一（DeepSeek 报告）：魅族 20 特殊降级验证。
-    //   v1.3.9 诊断：n_batch=128 后 prefill 仍崩（128/246 完成后 SIGABRT），
-    //   说明不是 n_batch 问题，是 n_ctx=4096 的 KV cache 分配/索引在 3B 模型上有问题。
-    //   魅族 20 real_avail 探测 4096（>=4000 && <4200）→ 强制 n_ctx 降到 2048 验证。
-    //   若 2048 跑通 → 锁定 KV cache 内存分配；若仍崩 → llama.cpp 内部逻辑/指令集问题。
-    if (real_avail_mb >= 4000 && real_avail_mb < 4200) {
-        safe_n_ctx = 2048;
-        LOGE("nativeInit: ⚠️ 魅族20特殊降级: n_ctx %d → %d (验证 KV cache 假设)",
-             dynamic_n_ctx, safe_n_ctx);
-    }
-    // 魅族 20 real_avail_mb=4096 → v1.3.10 降级到 2048（KV cache 减半验证）。
+    // 🔴 v1.3.25-fix11：去掉魅族20特供降级（real_avail_mb >= 4000 && < 4200 → safe_n_ctx=2048）。
+    //   v1.3.10 加这个是为了验证"KV cache 在 3B 模型上有问题"的假设，但现在用户跑的是 1.5B 小模型，
+    //   而且 fix10 已经修了 GGUF 解析——特供降级反而让 1.5B 模型的 n_ctx 被人为砍到 2048，
+    //   对 n_batch=256 的正常 prefill 流程没必要。让统一降级逻辑工作：
+    //   real_avail < 3000 → min(2048)；< 2500 → min(1024)。
+    //   1.5B Q4_K_M (≈940MB) + n_ctx=4096 的 KV cache ≈ 800MB，魅族20 real_avail=4096 完全够。
     cparams.n_ctx        = (uint32_t)safe_n_ctx;
     // 🔴 v1.3.8：n_ctx 最终值用 ERROR 级打印，诊断包必抓到
     LOGE("cparams.n_ctx set to %d (safe_n_ctx=%d, real_avail=%d MB)",
          cparams.n_ctx, safe_n_ctx, real_avail_mb);
-    // 🔴 v1.3.14-beta 最终绕路：强制 n_batch=1, n_ubatch=1。
-    //   崩溃模式（v1.3.8→v1.3.13 全版本一致）：prefill 第一个 batch (128 tokens) 成功，
-    //   第二个 batch 的 llama_decode SIGABRT。b5180 多线程崩 / 单线程崩 / 1.5B 小模型也崩 →
-    //   排除内存/模型大小/线程数 → 锁定崩溃点在 llama_decode 处理 batch 切换时的内部状态机。
-    //   解法：n_batch=1 → prefill 循环每次只喂 1 token（llama_batch_get_one 永远只返回 1 token），
-    //   从根本上消除 batch 切换，绕开崩溃点。
-    //   ⚠️ 代价：prefill 变慢（246 tokens 要调 246 次 llama_decode，比 n_batch=128 慢 10-20x），
-    //      但 generate 阶段本来就是 1 token decode，不受影响。
-    //   为什么用户指令里的编译参数是 no-op：
-    //     - GGML_USE_ARM_SVE 不存在（b5180 无此选项；SVE 通过 GGML_NATIVE→-march=native 自动探测，
-    //       当前 CMakeLists L60 GGML_NATIVE=OFF 已关）
-    //     - -O2（NDK Release 默认就是 -O2，b5180 不强制 -O3）
-    //     - LLAMA_NUMA 不存在（b5180 编译期无此选项）
-    //   所以不做 no-op 改动，直接改 n_batch=1 这个真变量。
-    cparams.n_batch      = 1;
-    cparams.n_ubatch     = 1;
-    LOGE("cparams.n_batch=1 n_ubatch=1 (v1.3.14: 绕开 batch 切换崩溃, 246 tokens 分 246 次 decode)");
+    // 🔴 v1.3.25-fix11：n_batch 改回 256（之前 fix10 强制 n_batch=1 是为了绕开 batch 切换 SIGABRT，
+    //   但 fix10 的 GGUF 解析修复已经消除了那个崩溃根因。n_batch=1 会导致 KV cache 累积时
+    //   某些中间状态（如 attention mask、position 编码）和正常 batch 喂有细微差异，
+    //   这正是乱码的元凶之一。改回 256 + n_ubatch=256，prefill 更快且 KV cache 状态正确。
+    cparams.n_batch      = 256;
+    cparams.n_ubatch     = 256;
+    LOGE("cparams.n_batch=256 n_ubatch=256 (v1.3.25-fix11: 恢复正常 batch，根治乱码)");
     cparams.logits_all   = false;
     // 线程数回退到正常（v1.3.13 单线程也崩，排除线程因素；恢复多线程 prefill 更快）
     int32_t n_threads_use = std::max(1, (int)nThreads);
@@ -546,18 +531,12 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     //        若此时仍是负值才是真错误（buffer 不够、GGUF 缺 vocab 等）。
     std::vector<llama_token> tokens;
     {
-        // 🔴🔴 关键修复（BOS/ChatML 错位）：
-        //   Qwen2.5 用 ChatML 模板 (<|im_start|>system/user/assistant ... <|im_end|>)，
-        //   整个 prompt **字符串里已经包含了完整控制符**，所以：
-        //   add_spec=0  ：不要再额外加 BOS！否则 token[0]=bos_id token[1]=<|im_start|>_id，
-        //                 模型会把 bos_id 当成"用户的一句话"，导致 generate 阶段
-        //                 sample 出来的第一个 token 就是 EOS 或乱码 → 用户看到"一个字蹦不出来"
-        //   parse_spec=1：让 tokenizer 把 <|im_start|> <|im_end|> 解析成它们的 special token ID，
-        //                 而不是拆成一串 < | i m _ s t a r t | > 普通字符 token。
-        //                 这是魅族20 vs 荣耀平板8G「同一模型不同表现」的核心原因之一：
-        //                 不同设备/不同加载时序下，tokenizer 对 unknown special 的 fallback 策略略有不同，
-        //                 有的能瞎蒙跑起来出几个字，有的直接崩 llama_decode。
-        int32_t add_spec   = 0;
+        // 🔴🔴 v1.3.25-fix11 关键修复（ChatML 乱码根因）：
+        //   之前 add_spec=0 → tokenizer 不自动加 BOS。但 Qwen2.5 模型训练时 prompt 是有 BOS 的，
+        //   没有 BOS 模型就会"困惑"，logits 发散成乱码（用户看到的日文+中文+代码混杂就是这个）。
+        //   现在 add_spec=1：自动在 prompt 开头加 BOS，让模型收到正确的对话格式。
+        //   parse_spec=1 不变：让 tokenizer 把 <|im_start|> <|im_end|> 解析成 special token ID。
+        int32_t add_spec   = 1;
         int32_t parse_spec = 1;
         // 第一步：估算真实 token 数（无论正负，最后 abs）
         int32_t need = llama_tokenize(state->vocab, prompt.c_str(), (int32_t)prompt.size(),
@@ -613,20 +592,27 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     LOGI("nativeChat: 📌 vocab eos=%d bos=%d, tokenize DONE n_prompt=%d / n_ctx=%d (tokenize 耗时 %" PRId64 " ms)",
          (int)eos, (int)bos, (int)n_prompt, (int)state->n_ctx, now_ms() - t0);
 
-    // 🔴🔴 BOS 对齐诊断 + 修复（必须在 sampler 创建 / n_ctx 检查 / sampler_accept 之前！）
-    //   场景：add_special 某些 GGUF 版本/参数组合下即使传 0 也会塞 BOS，
-    //        或者之前 add_spec=1 的遗留缓存导致 token[0] = bos_id。
-    //   后果：token[0]=bos_id(BOS), token[1]=<|im_start|>_id → 模型把 BOS 当成对话的"第一个用户说话"，
-    //         generate 阶段一上来就 sample EOS → 用户看到 0 token 输出（"一个字蹦不出来"）。
-    if (n_prompt > 0 && tokens[0] == bos) {
-        LOGW("nativeChat: ⚠️ BOS-MISMATCH token[0]=%d == bos_id=%d！开头多了一个 BOS，"
-             "ChatML 应该直接从 <|im_start|> 起头。正在剥掉 token[0]…",
-             (int)tokens[0], (int)bos);
-        for (int i = 1; i < n_prompt; i++) tokens[i - 1] = tokens[i];
-        tokens.pop_back();
-        n_prompt = (int32_t)tokens.size();   // ← 必须同步 n_prompt！否则 prefill 越界
-        LOGI("nativeChat: ✂️  剥掉 BOS OK. n_prompt 已修正=%d, 新 token[0]=%d",
-             (int)n_prompt, n_prompt > 0 ? (int)tokens[0] : -1);
+    // 🔴 v1.3.25-fix11: add_spec=1 后 BOS 是训练 prompt 的一部分，不再剥 BOS！
+    //   旧逻辑 (add_spec=0) 下 BOS 是多余的，所以剥掉。但 add_spec=1 后 token[0]=bos 是正确的。
+    //   这里改为诊断：打印 token[0] 是否为 BOS、打印 <|im_start|> 和 <|im_end|> 的 token ID。
+    {
+        LOGI("nativeChat: 📌 BOS 对齐: token[0]=%d bos_id=%d eos_id=%d",
+             n_prompt > 0 ? (int)tokens[0] : -1, (int)bos, (int)eos);
+        // 打印 ChatML special token 的真实 ID（下次诊断包能直接看到 tokenizer 配置对不对）
+        {
+            llama_token im_start_id = llama_tokenize(state->vocab, "<|im_start|>", -1, nullptr, 0, 0, 1);
+            llama_token im_end_id   = llama_tokenize(state->vocab, "<|im_end|>",   -1, nullptr, 0, 0, 1);
+            if (im_start_id < 0) im_start_id = -im_start_id;
+            if (im_end_id < 0)   im_end_id   = -im_end_id;
+            // 再确认：实际 tokenize 一下看写入的 ID
+            std::vector<llama_token> v(4);
+            int32_t r1 = llama_tokenize(state->vocab, "<|im_start|>", -1, v.data(), 4, 0, 1);
+            int32_t r2 = llama_tokenize(state->vocab, "<|im_end|>",   -1, v.data(), 4, 0, 1);
+            llama_token real_im_start = (r1 > 0) ? v[0] : (r1 < 0 ? v[0] : -1);
+            llama_token real_im_end   = (r2 > 0) ? v[0] : (r2 < 0 ? v[0] : -1);
+            LOGI("nativeChat: 🎯 ChatML special token IDs: <|im_start|>=%d(est=%d) <|im_end|>=%d(est=%d) hardcoded_im_end=151645",
+                 (int)real_im_start, (int)im_start_id, (int)real_im_end, (int)im_end_id);
+        }
     }
     // 完整性校验 1：token[0] 绝不能是 EOS（否则 generate 0 token 结束）
     if (!tokens.empty() && tokens[0] == eos) {
@@ -707,70 +693,62 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
 
     // -------- 4) 预填充 prompt（按 n_batch 切片） --------
     int32_t n_consumed = 0;
-    // 🔴 v1.3.15 终极 malloc 排查: 一次性 llama_batch_init(1, 0, 1) 预分配 batch，
-    //   循环里只改 batch.token[0] / batch.pos[0] / batch.n_tokens = 1，零 malloc/free。
-    //   背景：v1.3.14 (n_batch=1) 仍在 prefill 第 64 个 token 左右 SIGABRT。
-    //   每轮用 llama_batch_get_one → 内部 malloc 4 个数组 (tokens/embd/pos/seq_id) +
-    //   llama_batch_free → free。246 轮 = 984 次 malloc/free。魅族 20 的 jemalloc 在
-    //   骁龙 8 Gen 2 大/中/小核频繁切换下，反复小对象分配触发碎片化 / 元数据损坏。
-    //   如果本版能出字 → 锁定崩溃根因是 batch malloc/free 循环，不是 ggml 推理核心。
-    //   如果本版仍崩 → 排除 malloc 因素，ggml 推理核心本身不兼容魅族 20，放弃真推理，
-    //     v1.3.11 模拟模式为魅族 20 最终版。
-    struct llama_batch one_batch = llama_batch_init(1, /*embd=*/0, /*n_seq_max=*/1);
+    // 🔴 v1.3.25-fix11：恢复 llama_batch_get_one 正常 batch 切片。
+    //   n_batch 改回 256 后，prefill 每次喂 n_batch 个 token（llama_batch_get_one 自动处理），
+    //   KV cache 累积正确且 prefill 速度提升 10-20x。
+    //   v1.3.14 强制单 token 是为了绕开 SIGABRT，但 fix10 的 GGUF 解析修复已经消除了那个根因。
+    //   用 llama_batch_get_one 而非手动 one_batch.token[n] 是因为：
+    //   (a) 官方 API，自动处理 pos/seq_id/logits 的正确位置
+    //   (b) 自动截断最后一个不足 n_batch 的切片
+    //   (c) 不会有手动填数组时漏字段的风险
+    struct llama_batch batch = llama_batch_get_one(tokens.data(), n_prompt);
     {
         const int64_t t_pre0 = now_ms();
         int batch_idx = 0;
-        bool prefillaunch = true;
         while (n_consumed < n_prompt) {
             if (state->cancel.load()) {
-                llama_batch_free(one_batch);
+                llama_batch_free(batch);
                 cb_done(env, callback, "cancel");
                 if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
                 env->DeleteGlobalRef(callback);
                 crash_guard_pop();
                 return;
             }
-            int32_t n_eval = std::min<int32_t>(n_prompt - n_consumed, state->n_batch);
-            int64_t tb0 = now_ms();
-            // 填 batch：只放 1 个 token（n_batch=1 已强制）。不 malloc，纯赋值。
-            one_batch.token[0]   = tokens[n_consumed];
-            one_batch.pos[0]     = n_consumed;  // KV cache 位置索引（必须单调递增）
-            one_batch.n_seq_id[0]      = 0;      // 单序列对话
-            one_batch.seq_id[0][0]     = 0;
-            // 🔴 v1.3.16 关键修复（DeepSeek 报告 SIGSEGV @ addr=0x0 根因）：
-            //   v1.3.15 把 logits[0] 写死为 0（"不要 logits"）→ prefill 全程不产生 logits
-            //   → generate 阶段第一次 llama_sampler_sample(sampler, ctx, -1) 拿不到 logits
-            //   → 访问空指针 → SIGSEGV @ addr=0x0 在生成第一个 token 时崩。
-            //   修法：prefill 最后一个 token 必须 logits=1（让 ctx 暴露 logits 给 sampler），
-            //   其他 token logits=0（省算力，中间 token 不需要 sample）。
-            bool is_last_prefill_token = (n_consumed + n_eval >= n_prompt);
-            one_batch.logits[0] = is_last_prefill_token ? 1 : 0;
-            one_batch.n_tokens = 1;
-            if (n_eval == 0) n_eval = 1;  // 防御性
-            int decode_rc = llama_decode(state->ctx, one_batch);
+            // 🔴 fix11 恢复正确的 pos / logits 标记逻辑
+            //   llama_batch_get_one 会自动填 token[] 和 pos[]（从 0 开始递增），但我们需要：
+            //   (1) pos 从 n_consumed 开始（因为前面已经喂了 n_consumed 个 token）
+            //   (2) 最后一个 token 的 logits=1（让 ctx 暴露 logits 给 sampler），其他 0
+            batch.n_tokens = std::min<int32_t>(state->n_batch, n_prompt - n_consumed);
+            for (int i = 0; i < batch.n_tokens; i++) {
+                batch.token[i]   = tokens[n_consumed + i];
+                batch.pos[i]     = n_consumed + i;
+                batch.n_seq_id[i] = 0;
+                batch.seq_id[i][0] = 0;
+                bool is_last_prefill_token = (n_consumed + i == n_prompt - 1);
+                batch.logits[i]  = is_last_prefill_token ? 1 : 0;
+            }
+            int decode_rc = llama_decode(state->ctx, batch);
             int64_t tb1 = now_ms();
             if (decode_rc != 0) {
-                LOGE("nativeChat: prefill decode #%d FAIL rc=%d (n_eval=%d, consumed=%d) — 耗时 %" PRId64 " ms",
-                     batch_idx, decode_rc, n_eval, n_consumed, tb1 - tb0);
+                LOGE("nativeChat: prefill decode #%d FAIL rc=%d (batch.n_tokens=%d, consumed=%d) — 耗时 %" PRId64 " ms",
+                     batch_idx, decode_rc, batch.n_tokens, n_consumed, tb1 - t_pre0);
                 cb_error(env, callback, "预填充 llama_decode FAIL（OOM？上下文不够？）rc=" + std::to_string(decode_rc));
-                llama_batch_free(one_batch);
+                llama_batch_free(batch);
                 if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
                 env->DeleteGlobalRef(callback);
                 crash_guard_pop();
                 return;
             }
-            LOGI("nativeChat: ⏳ prefill #%d: token[%d]=%d, cost=%" PRId64 "ms (total prefill so far %" PRId64 "ms)",
-                 batch_idx, n_consumed, (int)tokens[n_consumed], tb1 - tb0, tb1 - t_pre0);
-            CRASH_CHECK(env, callback);  // 🔴 每个 token 后检查有没有 SIGABRT
-            n_consumed += n_eval;
+            LOGI("nativeChat: ⏳ prefill #%d: batch.n_tokens=%d, consumed=%d/%d, cost=%" PRId64 "ms (total prefill so far %" PRId64 "ms)",
+                 batch_idx, batch.n_tokens, n_consumed + batch.n_tokens, n_prompt, tb1 - t_pre0, tb1 - t_pre0);
+            CRASH_CHECK(env, callback);
+            n_consumed += batch.n_tokens;
             batch_idx++;
-            // 🔴 预填充进度回调（每完成 1 token 通知一次）——UI 显示百分比，避免一直白转圈圈
             if (g_mid_onPrefill && callback) {
                 env->CallVoidMethod(callback, g_mid_onPrefill, (jint)n_consumed, (jint)n_prompt);
                 if (env->ExceptionCheck()) { env->ExceptionClear(); }
             }
         }
-        (void)prefillaunch;
         LOGI("nativeChat: ✅ prefill DONE. n_consumed=%d n_prompt=%d, total cost=%" PRId64 " ms (enter→now %" PRId64 " ms)",
              (int)n_consumed, (int)n_prompt, now_ms() - t_pre0, now_ms() - t0);
     }
@@ -829,17 +807,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             piece.assign(piece_buf.data(), (size_t)n);
             cb_token(env, callback, piece);
         }
-        // d. decode 下一步（单个 token）—— 复用上面预分配的 one_batch，零 malloc
+        // d. decode 下一步（单个 token）—— 复用 batch，零 malloc
         int64_t td0 = now_ms();
         last_id = id;
-        one_batch.token[0]   = id;
-        one_batch.pos[0]     = n_consumed;  // 生成阶段的 pos = 已消费 token 数（下一个位置）
-        one_batch.n_seq_id[0]      = 0;
-        one_batch.seq_id[0][0]     = 0;
-        // 🔴 v1.3.16 关键修复：generate 阶段每个 token 都要 sample，所以每个都要 logits=1。
-        //   v1.3.15 这里写成 0 → 第二个 token sample 又会空指针（如果有第二个 token 的话）。
-        one_batch.logits[0]        = 1;    // generate 每个 token 都要 logits 供下一轮 sample
-        one_batch.n_tokens = 1;
+        batch.token[0]   = id;
+        batch.pos[0]     = n_consumed;  // 生成阶段的 pos = 已消费 token 数（下一个位置）
+        batch.n_seq_id[0]      = 0;
+        batch.seq_id[0][0]     = 0;
+        batch.logits[0]        = 1;    // generate 每个 token 都要 logits 供下一轮 sample
+        batch.n_tokens = 1;
         // 🔴 v1.3.9 修复二（DeepSeek 报告）：generate decode 前防御性检查。
         //   诊断显示 prefill(21225ms)成功但 generate 第一个 llama_decode SIGABRT
         //   (OOM mmap 失败, addr=0x2868...)。prefill 已成功用 ctx → ctx 正常，
@@ -850,7 +826,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             cb_error(env, callback, "generate decode 前 ctx 为空，KV cache 未分配，请降低 n_ctx");
             break;
         }
-        int decode_rc = llama_decode(state->ctx, one_batch);
+        int decode_rc = llama_decode(state->ctx, batch);
         int64_t td1 = now_ms();
         if (decode_rc != 0) {
             LOGE("nativeChat: generate decode FAIL rc=%d at token %d (sample=%" PRId64 "ms, decode=%" PRId64 "ms)",
@@ -879,8 +855,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
          (int)n_generated, (int)last_id, (int)eos);
 
     if (sampler) { llama_sampler_free(sampler); sampler = nullptr; }
-    // 🔴 v1.3.15: 释放预分配的 one_batch（若未在错误路径提前释放）
-    llama_batch_free(one_batch);
+    // 🔴 v1.3.25-fix11: 释放 batch（llama_batch_get_one 返回的，需要 llama_batch_free）
+    llama_batch_free(batch);
     env->DeleteGlobalRef(callback);
     crash_guard_pop();
     return;

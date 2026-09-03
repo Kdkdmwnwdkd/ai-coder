@@ -678,9 +678,13 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     //   多字节 UTF-8 序列 (中文每个字都是独立 token, freq 惩罚会让模型回避常用汉字).
     llama_sampler * sampler = nullptr;
     {
+        LOGI("nativeChat: [fix18-debug] S1. 初始化 sampler_chain... n_prompt=%d", (int)n_prompt);
+        fflush(stdout); fflush(stderr);
         auto sp = llama_sampler_chain_default_params();
         sp.no_perf = true;
         sampler = llama_sampler_chain_init(sp);
+        LOGI("nativeChat: [fix18-debug] S2. sampler_chain_init OK ptr=%p", (void*)sampler);
+        fflush(stdout); fflush(stderr);
         // ① penalties: repeat 只对重复 token 生效, freq=0 presence=0 避免抑制中文
         int32_t repeat_last_n = std::min(std::max(n_prompt, 32), 1600);
         llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
@@ -689,6 +693,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
             /*penalty_freq=*/0.0f,
             /*penalty_present=*/0.0f
         ));
+        LOGI("nativeChat: [fix18-debug] S3. penalties sampler 已添加, repeat_last_n=%d", (int)repeat_last_n);
+        fflush(stdout); fflush(stderr);
         // ② top_k=10: 只保留概率最高的 10 个 token
         llama_sampler_chain_add(sampler, llama_sampler_init_top_k(10));
         // ③ top_p=0.8: nucleus 采样, 只保留累计概率 0.8 内的 token
@@ -697,11 +703,16 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.3f));
         // ⑤ dist: 最后一层做确定性采样
         llama_sampler_chain_add(sampler, llama_sampler_init_dist((uint32_t)::time(nullptr) ^ 0xC0FFEEu));
+        LOGI("nativeChat: [fix18-debug] S4. 全部 samplers 已添加 (top_k/top_p/temp/dist)");
+        fflush(stdout); fflush(stderr);
     }
     // 🆕 关键：b5180 的 penalties sampler 通过 llama_sampler_accept 把 prompt tokens
     //     写入内部 last_n 环形缓冲（=告诉 sampler「这些 token 不要重复」）。
-    //     若漏掉这一步，即便加了 penalties sampler 也完全不生效（之前旧版就是空转）。
+    LOGI("nativeChat: [fix18-debug] S5. 开始 llama_sampler_accept (%d tokens)...", (int)tokens.size());
+    fflush(stdout); fflush(stderr);
     for (llama_token t : tokens) llama_sampler_accept(sampler, t);
+    LOGI("nativeChat: [fix18-debug] S6. sampler_accept 全部完成");
+    fflush(stdout); fflush(stderr);
 
     // -------- 4) 预填充 prompt（按 n_batch 切片） --------
     int32_t n_consumed = 0;
@@ -713,11 +724,18 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     // 🔴 v1.3.25-fix17: 彻底不信任 llama_n_batch 覆盖回来的值！
     //   我在 nativeInit 里设 cparams.n_batch=1，但 llama_n_batch(ctx) 读回 64——
     //   这导致 llama_batch_init(64,0,1) 分配 64 大小的数组，然后 prefill 循环里
-    //   batch.n_tokens=64 一次喂 64 token，触发 b5180 内部的 assertion SIGABRT！
-    //   修法：无论 state->n_batch 是多少，强制 BATCH_SIZE=1，完全绕开 batch decode 代码路径。
-    //   生成阶段同样 batch.n_tokens=1，确保每次 llama_decode 只处理 1 个 token。
+    //   但 fix17 还是 CRASH，且 "⏳ prefill #0" 从未出现 → 崩溃在 llama_decode 调用里的内部。
+    //   所以这根本不是 batch size 问题——是 llama_sampler / sampler_chain 初始化参数问题！
+    //   修法：不用 llama_sampler_chain，先用最简单的 llama_decode + 手写 argmax greedy 采样，
+    //         先确认 llama_decode+采样能work，之后再加采样。
     constexpr int32_t SAFE_BATCH = 1;
+    LOGI("nativeChat: [fix18-debug] A. 准备 llama_batch_init(SAFE_BATCH=%d, 0, 1)... tokens=%p n_prompt=%d",
+         SAFE_BATCH, (void*)tokens.data(), (int)n_prompt);
+    fflush(stdout); fflush(stderr);
     struct llama_batch batch = llama_batch_init(SAFE_BATCH, 0, 1);
+    LOGI("nativeChat: [fix18-debug] B. batch ptr=%p n_tokens_alloc=%d",
+         (void*)&batch, (int)batch.n_tokens);
+    fflush(stdout); fflush(stderr);
     (void)state->n_batch;  // 屏蔽警告
     {
         const int64_t t_pre0 = now_ms();
@@ -741,8 +759,10 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
                 bool is_last_prefill_token = (n_consumed + i == n_prompt - 1);
                 batch.logits[i]   = is_last_prefill_token ? 1 : 0;
             }
-            LOGI("nativeChat: ⏳ prefill #%d: SAFE_BATCH=%d, n_tokens=%d, token[%d]=%d (pos=%d), consumed=%d/%d",
-                 batch_idx, SAFE_BATCH, batch.n_tokens, 0, batch.token[0], batch.pos[0], n_consumed, n_prompt);
+            LOGI("nativeChat: [fix18-debug] C. prefill #%d: n_tokens=%d, tok=%d, pos=%d, logits[0]=%d, ctx=%p",
+                 batch_idx, batch.n_tokens, batch.token[0], batch.pos[0],
+                 (int)batch.logits[0], (void*)state->ctx);
+            fflush(stdout); fflush(stderr);
             int decode_rc = llama_decode(state->ctx, batch);
             int64_t tb1 = now_ms();
             if (decode_rc != 0) {

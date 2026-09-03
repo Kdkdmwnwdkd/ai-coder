@@ -28,6 +28,9 @@ static inline int64_t qw_now_ms() {
 #include <ctime>
 
 // ---------- logging ----------
+// 🔴 v1.3.25-fix18: 读 qwen_jni.cpp 的 g_cancel flag（第二次发消息真取消）
+extern "C" bool qwen_should_cancel();
+#define QW_CANCELLED() (qwen_should_cancel())
 #define LOG(...) do { if (g_log_cb) { char _buf[256]; snprintf(_buf,sizeof(_buf),__VA_ARGS__); g_log_cb(g_log_ud,_buf); } } while(0)
 static qwen_cb_log g_log_cb = nullptr;
 static void * g_log_ud    = nullptr;
@@ -122,8 +125,11 @@ char * qwen_generate(
     int report_step = 10;  // 每 10 token 报告一次进度（太频繁影响性能）
     if (n_prompt > 100) report_step = std::max<int>(1, (int)n_prompt / 50);
     for (size_t i = 0; i < prompt_ids.size(); ++i) {
-        // sess.cancel 不存在（QwenSession 没有 cancel 字段），这里跳过取消检查
-        // 实际取消靠 Kotlin 层关闭 flow，native 会继续跑（如日志所言）
+        // 🔴 v1.3.25-fix18: 真取消。prefill 每个 token 检查一次 g_cancel flag。
+        if (QW_CANCELLED()) {
+            if (cb.done) cb.done(cb.ud, "cancel");
+            return nullptr;
+        }
         int32_t id = prompt_ids[i];
         if (!fwd_forward_step(&sess, model, id, pos, logits.data())) {
             return err("forward_step failed at prompt");

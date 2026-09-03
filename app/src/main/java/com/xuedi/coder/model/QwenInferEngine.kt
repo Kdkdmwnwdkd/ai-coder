@@ -290,8 +290,10 @@ class QwenInferEngine : LlmEngine {
     }
 
     override fun cancel() {
-        // 初版：C++ 侧 cancel 未实现，仅记录日志
-        Log.i(TAG, "cancel() 被调用（初版 C++ 暂不支持中途取消，推理会继续跑到停止条件，UI 流已关）")
+        // 🔴 v1.3.25-fix18: 真取消！调 nativeCancel 设置 g_cancel=true，
+        //   C++ prefill/generate 循环每个 token 检查后立刻跳出。
+        Log.i(TAG, "cancel() → nativeCancel (g_cancel=true)")
+        runCatching { nativeCancel() }
     }
 
     // =================================================================
@@ -322,4 +324,6 @@ class QwenInferEngine : LlmEngine {
         seed: Long,
         callback: QwenGenerateCallback
     )
+    /** 🔴 v1.3.25-fix18: 设置 g_cancel=true，让 C++ prefill/generate 循环跳出 */
+    private external fun nativeCancel()
 }

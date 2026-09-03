@@ -36,6 +36,17 @@ static std::mutex g_crash_mutex;
 static JavaVM    * g_vm    = nullptr;
 static std::mutex  g_mutex;
 static QwenModel * g_model = nullptr;  // 全局单例, 由 load / release 管理
+// 🔴 v1.3.25-fix18: 第二次消息不显示根因: 首 token 超时后旧 nativeGenerate 仍在跑
+//   (C++ 初版没实现 cancel), 第二次发送又启动 1 个并发 qwen_generate → 资源争抢/死锁
+//   → 加 g_gen_running 互斥标记 + g_cancel 全局取消 flag.
+static std::atomic<bool> g_gen_running {false};
+static std::atomic<bool> g_cancel      {false};
+extern "C" JNIEXPORT void JNICALL
+Java_com_xuedi_coder_model_QwenInferEngine_nativeCancel(JNIEnv*, jobject) {
+    g_cancel.store(true);
+}
+// 让 qwen_infer.cpp / qwen_forward.cpp 能检查取消.
+extern "C" bool qwen_should_cancel() { return g_cancel.load(); }
 
 static void write_crash_log(const char * line) {
     if (!line) return;
@@ -255,7 +266,29 @@ Java_com_xuedi_coder_model_QwenInferEngine_nativeGenerate(
         jstring jprompt, jint jmax, jfloat jtemp, jfloat jtopp, jint jtopk, jlong jseed,
         jobject jcb)
 {
+    // 🔴 v1.3.25-fix18: 重入保护。旧的 nativeGenerate 仍在跑（超时 cancel 没真的停 native）→
+    //   第二次会并发死锁。先清 cancel，再 CAS 拿 g_gen_running 锁。
+    g_cancel.store(false);
+    bool expected = false;
+    if (!g_gen_running.compare_exchange_strong(expected, true)) {
+        // 上一次还在跑 → 先发 cancel 等它自己检测到跳出（最多几 ms 到 1 token 时间）
+        //   但如果等很久也不行。这里直接把上一次视作僵尸，返回"正在重置，请再发一次"。
+        //   直接 return：让 Kotlin 端 cb_done "busy"。
+        LOGE("nativeGenerate: 上一次推理仍在运行（没实现真 cancel）→ 回 busy");
+        // 为了让 Java 拿到反馈，调 onDone("busy")
+        jclass cls = env->GetObjectClass(jcb);
+        jmethodID mDone = env->GetMethodID(cls, "onDone", "(Ljava/lang/String;)V");
+        if (mDone) {
+            jstring s = env->NewStringUTF("busy");
+            env->CallVoidMethod(jcb, mDone, s);
+            env->DeleteLocalRef(s);
+        }
+        env->DeleteLocalRef(cls);
+        return;
+    }
+
     if (!g_model) {
+        g_gen_running.store(false);
         LOGE("nativeGenerate: model not loaded");
         return;
     }
@@ -272,6 +305,7 @@ Java_com_xuedi_coder_model_QwenInferEngine_nativeGenerate(
     br->callback = env->NewGlobalRef(jcb);
     env->DeleteLocalRef(cls);
     if (!br->onToken || !br->onDone || !br->callback) {
+        g_gen_running.store(false);
         LOGE("nativeGenerate: callback method lookup failed");
         return;
     }
@@ -281,9 +315,6 @@ Java_com_xuedi_coder_model_QwenInferEngine_nativeGenerate(
     cb.log   = cb_log_wrap;
     cb.ud    = br.get();
 
-    // 后台线程跑, 释放 JNI 线程以免阻塞 UI.
-    // 这里为了简单用 detach 生成线程 (QwenCallbacks 已经会 AttachCurrentThread).
-    // 但 2-3h 初版, 直接同步跑也行, 用户本来就是异步启动. 我们同步跑, 简单.
     char * err = qwen_generate(g_model, prompt, (int32_t)jmax, (float)jtemp,
                                (float)jtopp, (int32_t)jtopk, (uint32_t)jseed, cb);
     if (err) {
@@ -291,5 +322,6 @@ Java_com_xuedi_coder_model_QwenInferEngine_nativeGenerate(
         cb_done_wrap(br.get(), "error");
         ::free(err);
     }
+    g_gen_running.store(false);
     // br 自动析构
 }

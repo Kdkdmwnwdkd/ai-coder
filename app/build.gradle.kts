@@ -24,9 +24,23 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 40
-        versionName = "1.3.25-fix8"
-        // v1.3.25-fix8: Llama 🔄 按钮"点了加载失败"根治（自动降级 + 精确错误回传）
+        versionCode = 41
+        versionName = "1.3.25-fix9"
+        // v1.3.25-fix9: 根治今日两大症状：Llama 输出乱码 + Qwen kv[0] value_type=1952671092 ("tnia")
+        //   · Llama (llama_jni.cpp nativeChat): 新增 llama_sampler_init_penalties
+        //     (repeat_last_n=min(n_prompt,1600), repeat=1.05, freq=0.05, present=0.05)，
+        //     采样缩到 top_k=30 / top_p=0.9 / temp=0.6，并通过 llama_sampler_accept
+        //     把 prompt tokens 填入 penalties 内部 last_n 环形缓冲（之前空转无效）。
+        //     目标：修复截图里的 "庇/庄/耳边/CAST/spectacle…" 语义漂移乱码。
+        //   · Qwen ggml_loader.cpp 根因修复：fix5 错误把 header n_tensors_count /
+        //     metadata_kv_count 改成"固定 uint64 LE 16 字节"，但 GGUF v3 规范仍是
+        //     LEB128 变长（llama.cpp = gguf_get_varint(aligned=false)）。对于 Qwen2.5-1.5B
+        //     (n_tensors=144 用 1B LEB, n_kv≈38 用 1B LEB)，旧代码多读 14B 冲进
+        //     "general.architecture" 字符串中段 → kv[0] key_len=0 key=''，
+        //     value_type 从 't','i','n','t' 读出=0x746E6974=1952671092（和诊断包完全吻合）。
+        //     现改回 r.vu64() 读两个 count，并保留固定 U64 fallback + 16B raw hex
+        //     dump 打到 err msg（下次再错位就不用再让用户抓 logcat，Toast 自带定位）。
+        // v1.3.25-fix8: Llama 🔄 加载失败根治：4 级自动降级
         //   · LlamaJniEngine.kt: 新增 loadModelRobust()，4 级自动降级
         //     L1(4096/4线程) → L2(2048/2) → L3(1280/2) → L4(768/1)，命中即成功。
         //     4 级全挂时把 4 次失败原因合并写进 lastLoadError，Toast 直接定位"哪一级、什么原因"。

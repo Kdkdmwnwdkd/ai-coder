@@ -669,16 +669,32 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         return;
     }
 
-    // -------- 3) sampling chain（top_k/top_p/temp/dist） + sampler_accept 修正后的 tokens --------
+    // -------- 3) sampling chain：top_k → top_p → penalties(重复/频率/存在) → temp → dist --------
+    // 🆕 v1.3.25-fix9 乱码根治 1/2: 新增 penalties 链（之前完全没有 repeat_penalty 导致生成容易在多字节中英片段上漂移发散，
+    //   截图里的 "庇/庄/耳边/CAST/plement..." 就是典型"重复惩罚缺失 + 采样过宽"）。
+    //   参数保守可落地（llama.cpp b5180 稳定档）：
+    //     repeat_last_n = min(n_prompt, 1600)   ·  repeat_penalty=1.05  freq=0.05  presence=0.05
+    //     top_k=30  top_p=0.9  temp=0.6 （之前 40/0.95/0.7 太宽 → 魅族 20 上输出漂移）
     llama_sampler * sampler = nullptr;
     {
         auto sp = llama_sampler_chain_default_params();
+        sp.no_perf = true;
         sampler = llama_sampler_chain_init(sp);
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(40));
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95f, /*min_keep=*/1));
-        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.7f));
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(30));
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9f, /*min_keep=*/1));
+        int32_t repeat_last_n = std::min(std::max(n_prompt, 32), 1600);
+        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
+            /*penalty_last_n=*/repeat_last_n,
+            /*penalty_repeat=*/1.05f,
+            /*penalty_freq=*/0.05f,
+            /*penalty_present=*/0.05f
+        ));
+        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.6f));
         llama_sampler_chain_add(sampler, llama_sampler_init_dist((uint32_t)::time(nullptr) ^ 0xC0FFEEu));
     }
+    // 🆕 关键：b5180 的 penalties sampler 通过 llama_sampler_accept 把 prompt tokens
+    //     写入内部 last_n 环形缓冲（=告诉 sampler「这些 token 不要重复」）。
+    //     若漏掉这一步，即便加了 penalties sampler 也完全不生效（之前旧版就是空转）。
     for (llama_token t : tokens) llama_sampler_accept(sampler, t);
 
     // -------- 4) 预填充 prompt（按 n_batch 切片） --------

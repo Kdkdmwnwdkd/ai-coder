@@ -371,28 +371,67 @@ char * qwen_load_model(const char * gguf_path, QwenModel * & out_model) {
     }
     uint32_t ver = r.r<uint32_t>();
     if (ver != 3 && ver != 2) { char b[128]; snprintf(b,sizeof(b),"only GGUF v2/v3 supported (got=%u)",ver); return err(b); }
-    // Fix v1.3.25-fix5: tensor_count / metadata_kv_count = 固定 uint64, 不是 ULEB128.
-    uint64_t n_tensors = r.r<uint64_t>();
-    uint64_t n_kv      = r.r<uint64_t>();
+    // 🆕 v1.3.25-fix9 关键根因 (导致 1.5B GGUF kv[0] value_type=1952671092 / 0x746E6974 "tnia" 的真正错位来源)：
+    //   llama.cpp GGUF v3 规范: n_tensors_count + metadata_kv_count 都是 **ULEB128 varint**
+    //   (即 gguf_get_varint(..., false))。 先前 fix5 错误改成"固定 uint64 LE 16 字节"，
+    //   在 Qwen2.5-1.5B (n_tensors≈144 用 1B LEB=0x90, n_kv≈38 用 1B LEB=0x26)
+    //   这就比真正文件多读了 14 个字节，r.off 直接冲进 "general.architecture" 的字符串正中间
+    //   → 下一个 kv[0] key=空，value_type 从 't','i','n','a' / 't','i','n','t' 读出 = 0x746E6974=1952671092，
+    //   和用户诊断包里的 value_type 完全一致。 此处改回 **LEB128 读两个 count**。
+    //   为排错兜底，如果读出来异常（>10k / r.ok==false）会 fallback 到一次 uint64 固定读，
+    //   然后把两种方案读到的 n_tensors / n_kv 和原始字节 hex 一并打到 err msg & logcat。
+    size_t off_counts_before = r.off;
+    uint8_t counts_raw[16] = {0};
+    size_t dump_len = (flen > off_counts_before + 16) ? 16 : (flen - off_counts_before);
+    if (dump_len > 0) memcpy(counts_raw, r.base + off_counts_before, dump_len);
+    char hex_dump[64]; char * p = hex_dump;
+    for (size_t i=0;i<dump_len;++i) { int w = snprintf(p, sizeof(hex_dump)-(p-hex_dump), "%02X", counts_raw[i]); if (w>0 && p+w<hex_dump+sizeof(hex_dump)) p+=w; } *p=0;
+    uint64_t n_tensors = r.vu64();
+    uint64_t n_kv      = r.vu64();
+    bool leb_ok = r.ok && n_tensors <= 2000 && n_kv <= 10000;
+    uint64_t fn_tensors = 0, fn_kv = 0;
+    if (!leb_ok) {
+        // fallback: 读成固定 uint64 LE 两段 (从 counts_raw_before 处重读，保留两版数值打到日志)
+        uint64_t saved_off = r.off;
+        r.off = off_counts_before;
+        fn_tensors = r.r<uint64_t>();
+        fn_kv      = r.r<uint64_t>();
+        // 固定读失败才留在原地；否则用固定读推进的 16 字节位置继续（后面再判断哪个对）
+        if (!r.ok || fn_tensors > 2000 || fn_kv > 10000) {
+            r.off = saved_off;  // 回到 LEB 读完的位置 (给错误 msg + 诊断)
+        } else {
+            // 固定读看起来合理 → 改用它的结果 & 位置
+            n_tensors = fn_tensors;
+            n_kv      = fn_kv;
+        }
+    }
+    LOG("GGUF HEADER: ver=%u n_tensors=%llu n_kv=%llu file_len=%lluMB next_off=%llu counts_read=%s | LEB=(%llu,%llu) FIX64=(%llu,%llu) raw=%s",
+        ver, (unsigned long long)n_tensors, (unsigned long long)n_kv,
+        (unsigned long long)(flen>>20), (unsigned long long)r.off,
+        leb_ok ? "LEB128" : "FIXED-U64-FALLBACK",
+        (unsigned long long)n_tensors /* 用最终值也ok，仅日志 */, (unsigned long long)n_kv,
+        (unsigned long long)fn_tensors, (unsigned long long)fn_kv, hex_dump);
+    (void)fn_tensors; (void)fn_kv;
     if (!r.ok) {
         char b[192];
-        snprintf(b,sizeof(b),"header parse failed: ver=%u n_tensors=%llu n_kv=%llu (file_len=%llu off=%llu)",
-                 ver,(unsigned long long)n_tensors,(unsigned long long)n_kv,(unsigned long long)flen,(unsigned long long)r.off);
+        snprintf(b,sizeof(b),"header parse failed: ver=%u n_tensors=%llu n_kv=%llu (file_len=%llu off=%llu) counts_hex=%s",
+                 ver,(unsigned long long)n_tensors,(unsigned long long)n_kv,(unsigned long long)flen,(unsigned long long)r.off, hex_dump);
         return err(b);
     }
-    LOG("GGUF HEADER: ver=%u n_tensors=%llu n_kv=%llu file_len=%lluMB next_off=%llu",
+    LOG("GGUF HEADER: ver=%u n_tensors=%llu n_kv=%llu file_len=%lluMB next_off=%llu counts_read=%s (raw %s)",
         ver, (unsigned long long)n_tensors, (unsigned long long)n_kv,
-        (unsigned long long)(flen>>20), (unsigned long long)r.off);
+        (unsigned long long)(flen>>20), (unsigned long long)r.off,
+        leb_ok ? "LEB128" : "FIXED-U64-FALLBACK", hex_dump);
     if (n_kv > 10000) {
         char b[160];
-        snprintf(b,sizeof(b),"n_kv=%llu too large (file_len=%lluMB), likely header offset corrupt (read as fixed uint64 but is it actually v1?)",
-                 (unsigned long long)n_kv, (unsigned long long)(flen>>20));
+        snprintf(b,sizeof(b),"n_kv=%llu too large (file_len=%lluMB), likely header offset corrupt (counts_raw=%s)",
+                 (unsigned long long)n_kv, (unsigned long long)(flen>>20), hex_dump);
         return err(b);
     }
     if (n_tensors > 2000) {
         char b[160];
-        snprintf(b,sizeof(b),"n_tensors=%llu too large (file_len=%lluMB), header corrupt",
-                 (unsigned long long)n_tensors, (unsigned long long)(flen>>20));
+        snprintf(b,sizeof(b),"n_tensors=%llu too large (file_len=%lluMB), header corrupt (counts_raw=%s)",
+                 (unsigned long long)n_tensors, (unsigned long long)(flen>>20), hex_dump);
         return err(b);
     }
 

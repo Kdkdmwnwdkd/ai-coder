@@ -394,13 +394,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     // 🔴 v1.3.8：n_ctx 最终值用 ERROR 级打印，诊断包必抓到
     LOGE("cparams.n_ctx set to %d (safe_n_ctx=%d, real_avail=%d MB)",
          cparams.n_ctx, safe_n_ctx, real_avail_mb);
-    // 🔴 v1.3.25-fix11：n_batch 改回 256（之前 fix10 强制 n_batch=1 是为了绕开 batch 切换 SIGABRT，
-    //   但 fix10 的 GGUF 解析修复已经消除了那个崩溃根因。n_batch=1 会导致 KV cache 累积时
-    //   某些中间状态（如 attention mask、position 编码）和正常 batch 喂有细微差异，
-    //   这正是乱码的元凶之一。改回 256 + n_ubatch=256，prefill 更快且 KV cache 状态正确。
-    cparams.n_batch      = 256;
-    cparams.n_ubatch     = 256;
-    LOGE("cparams.n_batch=256 n_ubatch=256 (v1.3.25-fix11: 恢复正常 batch，根治乱码)");
+    // 🔴 v1.3.25-fix12：n_batch=8 n_ubatch=1。
+    //   fix11 把 n_batch 改回 256 后第一次 llama_decode 就 SIGABRT——
+    //   证实魅族20 上 llama.cpp b5180 的 batch decode 有 bug（一次喂 >1 token 就炸）。
+    //   fix10 用 n_batch=1 能跑通 1024 tokens 不崩，这是硬证据。
+    //   n_batch=8 是折中：比 1 快 8x，又远小于 256 不会触发 batch 边界 bug。
+    //   n_ubatch=1 禁用 flash attention（flash attn 在 ARM64 b5180 上也可能有边界问题）。
+    cparams.n_batch      = 8;
+    cparams.n_ubatch     = 1;
+    LOGE("cparams.n_batch=8 n_ubatch=1 (v1.3.25-fix12: 折中 batch 大小，绕开 b5180 ARM64 batch decode SIGABRT)");
     cparams.logits_all   = false;
     // 线程数回退到正常（v1.3.13 单线程也崩，排除线程因素；恢复多线程 prefill 更快）
     int32_t n_threads_use = std::max(1, (int)nThreads);
@@ -531,13 +533,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     //        若此时仍是负值才是真错误（buffer 不够、GGUF 缺 vocab 等）。
     std::vector<llama_token> tokens;
     {
-        // 🔴🔴 v1.3.25-fix11 关键修复（ChatML 乱码根因）：
-        //   之前 add_spec=0 → tokenizer 不自动加 BOS。但 Qwen2.5 模型训练时 prompt 是有 BOS 的，
-        //   没有 BOS 模型就会"困惑"，logits 发散成乱码（用户看到的日文+中文+代码混杂就是这个）。
-        //   现在 add_spec=1：自动在 prompt 开头加 BOS，让模型收到正确的对话格式。
-        //   parse_spec=1 不变：让 tokenizer 把 <|im_start|> <|im_end|> 解析成 special token ID。
-        int32_t add_spec   = 1;
-        int32_t parse_spec = 1;
+        // 🔴🔴 v1.3.25-fix12 关键修复（BOS 缺失 = 乱码根因）：
+        //   fix11 用 add_spec=1 但 token[0]=151644(<|im_start|>) ≠ bos_id=151643！
+        //   原因：prompt 开头是 <|im_start|>（已是 special token），tokenizer 跳过了 BOS
+        //   （避免两个 special token 挨着）。但 Qwen2.5 训练时 prompt 有 BOS，
+        //   没 BOS 模型就会"困惑"发散成乱码。
+        //   修法：add_spec=0 让 tokenizer 完全不自动加任何 special token，
+        //         然后手动在 token 序列开头插 bos_id——确保 BOS 一定在最前面！
+        int32_t add_spec   = 0;   // 不自动加 BOS
+        int32_t parse_spec = 1;   // 但要解析 <|im_start|>/<|im_end|> 为 special token
         // 第一步：估算真实 token 数（无论正负，最后 abs）
         int32_t need = llama_tokenize(state->vocab, prompt.c_str(), (int32_t)prompt.size(),
                                       nullptr, 0, add_spec, parse_spec);
@@ -592,27 +596,27 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     LOGI("nativeChat: 📌 vocab eos=%d bos=%d, tokenize DONE n_prompt=%d / n_ctx=%d (tokenize 耗时 %" PRId64 " ms)",
          (int)eos, (int)bos, (int)n_prompt, (int)state->n_ctx, now_ms() - t0);
 
-    // 🔴 v1.3.25-fix11: add_spec=1 后 BOS 是训练 prompt 的一部分，不再剥 BOS！
-    //   旧逻辑 (add_spec=0) 下 BOS 是多余的，所以剥掉。但 add_spec=1 后 token[0]=bos 是正确的。
-    //   这里改为诊断：打印 token[0] 是否为 BOS、打印 <|im_start|> 和 <|im_end|> 的 token ID。
+    // 🔴 v1.3.25-fix12: 手动在 token 序列开头插 BOS token！
+    //   根因：add_spec=0（不自动加 BOS），因为 add_spec=1 时 tokenizer 会因为 prompt
+    //   开头是 <|im_start|>(special token) 而跳过 BOS，导致 token[0]=151644≠bos_id=151643。
+    //   模型没收到 BOS 就困惑发散成乱码。手动插 BOS 是唯一可靠方案。
+    if (bos != 0 && bos != -1) {
+        tokens.insert(tokens.begin(), bos);
+        n_prompt = (int32_t)tokens.size();
+        LOGI("nativeChat: ✂️ 手动插 BOS: bos_id=%d, 新 n_prompt=%d, token[0]=%d",
+             (int)bos, (int)n_prompt, (int)tokens[0]);
+    } else {
+        LOGW("nativeChat: ⚠️ bos_id=%d 无效，跳过手动插 BOS", (int)bos);
+    }
+    // 诊断：打印 ChatML special token 的真实 ID
     {
-        LOGI("nativeChat: 📌 BOS 对齐: token[0]=%d bos_id=%d eos_id=%d",
-             n_prompt > 0 ? (int)tokens[0] : -1, (int)bos, (int)eos);
-        // 打印 ChatML special token 的真实 ID（下次诊断包能直接看到 tokenizer 配置对不对）
-        {
-            llama_token im_start_id = llama_tokenize(state->vocab, "<|im_start|>", -1, nullptr, 0, 0, 1);
-            llama_token im_end_id   = llama_tokenize(state->vocab, "<|im_end|>",   -1, nullptr, 0, 0, 1);
-            if (im_start_id < 0) im_start_id = -im_start_id;
-            if (im_end_id < 0)   im_end_id   = -im_end_id;
-            // 再确认：实际 tokenize 一下看写入的 ID
-            std::vector<llama_token> v(4);
-            int32_t r1 = llama_tokenize(state->vocab, "<|im_start|>", -1, v.data(), 4, 0, 1);
-            int32_t r2 = llama_tokenize(state->vocab, "<|im_end|>",   -1, v.data(), 4, 0, 1);
-            llama_token real_im_start = (r1 > 0) ? v[0] : (r1 < 0 ? v[0] : -1);
-            llama_token real_im_end   = (r2 > 0) ? v[0] : (r2 < 0 ? v[0] : -1);
-            LOGI("nativeChat: 🎯 ChatML special token IDs: <|im_start|>=%d(est=%d) <|im_end|>=%d(est=%d) hardcoded_im_end=151645",
-                 (int)real_im_start, (int)im_start_id, (int)real_im_end, (int)im_end_id);
-        }
+        std::vector<llama_token> v(4);
+        int32_t r1 = llama_tokenize(state->vocab, "<|im_start|>", -1, v.data(), 4, 0, 1);
+        int32_t r2 = llama_tokenize(state->vocab, "<|im_end|>",   -1, v.data(), 4, 0, 1);
+        llama_token real_im_start = (r1 > 0) ? v[0] : (r1 < 0 ? v[0] : -1);
+        llama_token real_im_end   = (r2 > 0) ? v[0] : (r2 < 0 ? v[0] : -1);
+        LOGI("nativeChat: 🎯 ChatML special token IDs: <|im_start|>=%d <|im_end|>=%d bos=%d eos=%d hardcoded_im_end=151645",
+             (int)real_im_start, (int)real_im_end, (int)bos, (int)eos);
     }
     // 完整性校验 1：token[0] 绝不能是 EOS（否则 generate 0 token 结束）
     if (!tokens.empty() && tokens[0] == eos) {

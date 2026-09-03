@@ -24,8 +24,15 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 43
-        versionName = "1.3.25-fix11"
+        versionCode = 44
+        versionName = "1.3.25-fix12"
+        // v1.3.25-fix12: 【双管齐下】fix11 暴露的两个硬问题同时修
+        //   · BOS 缺失 = 乱码根因！add_spec=1 时 tokenizer 因 prompt 开头已是 <|im_start|>(special)
+        //     而跳过 BOS(151643)，导致 token[0]=151644≠bos_id。模型没 BOS 就困惑发散成乱码。
+        //     修法：add_spec=0（完全不靠 tokenizer 自动加），然后 tokens.insert(begin(), bos) 手动插。
+        //   · n_batch=256 直接 SIGABRT！魅族20 上 llama.cpp b5180 的 batch decode 有 bug，
+        //     一次喂 >1 token 就炸。fix10 用 n_batch=1 能跑通 1024 tokens 不崩，这是硬证据。
+        //     修法：n_batch=8 n_ubatch=1（折中 batch 大小 + 禁用 flash attention）。
         // v1.3.25-fix11: 【Llama 乱码根治】fix10 模型能跑不崩了但输出全是乱码（日文+中文+代码混杂）
         //   · llama_jni.cpp tokenize: add_spec 从 0→1（关键！Qwen2.5 训练 prompt 有 BOS，
         //     没 BOS 模型就会"困惑"发散成乱码）；去掉旧的"剥 BOS"逻辑（add_spec=1 后 BOS 是正确的）

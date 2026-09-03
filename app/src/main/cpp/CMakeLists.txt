@@ -69,10 +69,19 @@ set(GGML_CPU_ARM_MALI     OFF CACHE BOOL "" FORCE)
 #            GitHub Actions ubuntu-latest 默认 gcc+glslc 齐全，无坑。
 #   · 给 JNI 传编译宏 XUEDI_LLAMA_VULKAN=1/0，llama_jni.cpp 里据此决定
 #     n_gpu_layers 实际允许值（CPU-only 编译即使 Kotlin 传 -1 也会夹到 0，避免零收益）。
+#
+# 🔥 2026-09-03 v1.3.26-gpu1-hotfix1：临时强令 XUEDI_HAS_VULKAN=OFF 再跑一次 Actions。
+#    原因：刚 push 的 tag run(#220) / main run(#219) 35 分钟还 In progress，
+#          正常 build 5min，慢 7× 说明 Vulkan 分支 + glslang shader 生成
+#          在 Actions runner 上第一次拉源码编译时拖到 20+min。
+#    为让方案 C 设置页开关 + App 层预热逻辑先装包验证（这两个不依赖 Vulkan，
+#    且 JNI 里 XUEDI_LLAMA_VULKAN=0 时 n_gpu_layers 100% 被钳到 0，行为 = perf2-thread4），
+#    先出一个 CPU 底包 APK 让用户测 UI。
+#    🔓 以后想启用 Vulkan A/B，把下面一行注释掉，恢复 find_package(Vulkan) 即可。
 # =====================================================
-set(XUEDI_HAS_VULKAN OFF)
-find_package(Vulkan)
-if (Vulkan_FOUND)
+set(XUEDI_HAS_VULKAN OFF CACHE BOOL "" FORCE)
+# find_package(Vulkan)
+if (0) # if (Vulkan_FOUND)
     message(STATUS "[xuedi-llama] Vulkan FOUND (include=${Vulkan_INCLUDE_DIRS} libs=${Vulkan_LIBRARIES} glslc=${Vulkan_GLSLC_EXECUTABLE}) → 启用 ggml-vulkan")
     set(GGML_VULKAN                       ON  CACHE BOOL "" FORCE)
     set(GGML_VULKAN_DEBUG                 OFF CACHE BOOL "" FORCE)
@@ -84,7 +93,7 @@ if (Vulkan_FOUND)
     set(GGML_VULKAN_RUN_TESTS             OFF CACHE BOOL "" FORCE)
     set(XUEDI_HAS_VULKAN ON)
 else ()
-    message(STATUS "[xuedi-llama] Vulkan NOT FOUND → 保持 CPU-only 构建（= perf2-thread4 底包）")
+    message(STATUS "[xuedi-llama] Vulkan TEMPORARILY DISABLED by v1.3.26-gpu1-hotfix1 → 保持 CPU-only 构建（= perf2-thread4 底包）")
     set(GGML_VULKAN                       OFF CACHE BOOL "" FORCE)
 endif ()
 

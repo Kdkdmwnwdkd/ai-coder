@@ -443,11 +443,17 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     llama_token last_tok = 0;  // ✅ 提前声明：避免 prefill 阶段 "goto cleanup" 跨过变量初始化（C++ 编译硬错）
 
     // ---- 5.0 PREFILL-BATCH 尝试（v1.3.25-perf1）----
+    // 🔴 v1.3.25-perf1-stable (code 59) 结论：
+    //   魅族 20 + Qwen2.5-3B + b5180 上，N=247 一次性 llama_decode 直接 SIGSEGV → ggml_abort，
+    //   llama_decode 内部 assertion 没有走 ret 返回，fallback 逻辑完全来不及执行（实锤证据见诊断包 v1.3.25-perf1 crash 日志）。
+    //   根因：llama_build_attn_rope 在 b5180 批量模式下对 pos 数组 / RoPE 频率基存在硬编码假设，
+    //         与 Qwen2 的 GGUF metadata 不匹配。perf1 阶段永久关批量，
+    //         将来升级到 llama.cpp b5800+ 后，把下面 'false &&' 去掉即可一键重开（=零代码回归）。
     {
         bool batch_ok = false;
         const int N = (int)tokens.size();
-        // 防护：token 数 <=1 没必要批量；> 1024 也不试（batch 对象过大占栈/堆风险）
-        if (N > 1 && N <= 1024) {
+        // 🔴 PERM DISABLED: 原条件 (N > 1 && N <= 1024)。保留结构，后续开只要改 false &&。
+        if (false && N > 1 && N <= 1024) {
             LOGI("🔬 PREFILL-BATCH: 尝试一次性 prefill（N=%d tokens）。若 ret!=0 立即 fallback 逐 token", N);
             // 单独构造临时 batch_all（不影响下面的 SAFE batch 生命周期变量，避免 cleanup 双 free）
             llama_batch batch_all = llama_batch_init(N, /*embd=*/0, /*n_seq_max=*/1);

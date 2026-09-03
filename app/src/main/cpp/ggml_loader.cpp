@@ -384,8 +384,13 @@ char * qwen_load_model(const char * gguf_path, QwenModel * & out_model) {
     uint8_t counts_raw[16] = {0};
     size_t dump_len = (flen > off_counts_before + 16) ? 16 : (flen - off_counts_before);
     if (dump_len > 0) memcpy(counts_raw, r.base + off_counts_before, dump_len);
-    char hex_dump[64]; char * p = hex_dump;
-    for (size_t i=0;i<dump_len;++i) { int w = snprintf(p, sizeof(hex_dump)-(p-hex_dump), "%02X", counts_raw[i]); if (w>0 && p+w<hex_dump+sizeof(hex_dump)) p+=w; } *p=0;
+    char hex_dump[64]; char * hxp = hex_dump; hex_dump[0] = 0;
+    for (size_t i=0;i<dump_len;++i) {
+        int w = snprintf(hxp, sizeof(hex_dump)-(size_t)(hxp-hex_dump), "%02X", counts_raw[i]);
+        if (w > 0) hxp += w;
+        if ((size_t)(hxp - hex_dump) + 3 >= sizeof(hex_dump)) break;
+    }
+    *hxp = 0;
     uint64_t n_tensors = r.vu64();
     uint64_t n_kv      = r.vu64();
     bool leb_ok = r.ok && n_tensors <= 2000 && n_kv <= 10000;

@@ -71,6 +71,7 @@ struct LlamaState {
     const llama_vocab* vocab;  // b5180 新增：从 llama_model_get_vocab() 取，生命周期和 model 绑定
     int           n_ctx;
     int           n_threads;
+    int           n_gpu_layers;   // v1.3.26-gpu1：真实卸载层数（0=CPU，>0=Vulkan，Qwen2.5-3B 最多36层，传-1/99都会被model层上限夹）
     llama_token   bos;
     llama_token   eos;
     int           n_vocab;
@@ -79,7 +80,7 @@ struct LlamaState {
     std::atomic<bool> cancel;
 
     LlamaState() : model(nullptr), ctx(nullptr), vocab(nullptr), n_ctx(0), n_threads(4),
-                   bos(0), eos(0), n_vocab(0), cancel(false) {}
+                   n_gpu_layers(0), bos(0), eos(0), n_vocab(0), cancel(false) {}
 };
 
 // =============================================================================
@@ -255,13 +256,30 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
         JNIEnv* env, jobject /*thiz*/,
-        jstring jpath, jint jnCtx, jint jnThreads, jint /*jGpuLayers*/) {
+        jstring jpath, jint jnCtx, jint jnThreads, jint jGpuLayers) {
 
     std::string path = jstring2std(env, jpath);
     int n_ctx    = jnCtx    > 64 ? (int)jnCtx    : 512;
     int n_threads= jnThreads> 0  ? (int)jnThreads: 4;
+    // ---- v1.3.26-gpu1 n_gpu_layers 裁剪（严格编译期双保险）----
+    //   Kotlin 约定：<0 = 全卸载；我们夹到 99（任何模型都不可能超过 99 层）。
+    //   llama_model_load_from_file 内部再根据"模型实际层数"做上限夹，我们这里只做粗略合法值。
+    //   关键：编译期没开 Vulkan(XUEDI_LLAMA_VULKAN=0) 时，强制 0 —— 即使 Kotlin 传 -1，
+    //        也不会让 b5180 走任何 GPU 路径，绝对不影响 CPU 底包稳定性。
+    int n_gpu_layers = (int)jGpuLayers;
+#if XUEDI_LLAMA_VULKAN
+    if (n_gpu_layers < 0) n_gpu_layers = 99;  // -1 / 任何负值 = “全 offload”
+    if (n_gpu_layers > 128) n_gpu_layers = 128;
+#else
+    if (n_gpu_layers != 0) {
+        LOGI("nativeInit: 编译未启用 Vulkan (XUEDI_LLAMA_VULKAN=0)，"
+             "jGpuLayers=%d → 强制 0（保持纯 CPU 底包不变）", n_gpu_layers);
+        n_gpu_layers = 0;
+    }
+#endif
 
-    LOGI("nativeInit: path=%s n_ctx=%d n_threads=%d", path.c_str(), n_ctx, n_threads);
+    LOGI("nativeInit: path=%s n_ctx=%d n_threads=%d n_gpu_layers=%d (XUEDI_LLAMA_VULKAN=%d)",
+         path.c_str(), n_ctx, n_threads, n_gpu_layers, (int)XUEDI_LLAMA_VULKAN);
 
     if (path.empty() || access(path.c_str(), R_OK) != 0) {
         throwJava(env, "模型文件不可读：%s (access R_OK 失败)", path.c_str());
@@ -270,10 +288,10 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
 
     // ---- 1. llama_model_load_from_file（只传 mparams 基础参数，RoPE 让官方自动识别）----
     llama_model_params mparams = llama_model_default_params();
-    // n_gpu_layers 不走（ggml-vulkan OFF），传 0；其余全默认 = 官方自动读 GGUF metadata
-    mparams.n_gpu_layers = 0;
-
-    LOGI("nativeInit → llama_model_load_from_file (%s)", path.c_str());
+    // v1.3.26-gpu1: 真正启用 n_gpu_layers（由上面的编译期/运行时双 clamp 保证安全）
+    mparams.n_gpu_layers = (int32_t)n_gpu_layers;
+    LOGI("nativeInit → llama_model_load_from_file (%s) (n_gpu_layers=%d)",
+         path.c_str(), (int)mparams.n_gpu_layers);
     // —— b5180 新命名：llama_model_load_from_file / llama_model_free
     llama_model* model = llama_model_load_from_file(path.c_str(), mparams);
     if (!model) {
@@ -295,10 +313,13 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     cparams.n_threads_batch = (uint32_t)n_threads;
     // ⚠️ b5180 里 llama_context_params 已经没有 seed 字段：采样无随机性（argmax），不需要
     cparams.flash_attn  = false;         // 魅族 20 不兼容 flash attn，关
-    cparams.offload_kqv = false;         // CPU-only，避免 GPU loader 路径
+    // v1.3.26-gpu1：只有当 n_gpu_layers>0（已经经过 XUEDI_LLAMA_VULKAN 钳制）时才 offload KQV，
+    //               避免 CPU-only 构建里把 KV 往不存在的后端推（避免潜在初始化路径）。
+    cparams.offload_kqv = (n_gpu_layers > 0);
 
-    LOGI("nativeInit → llama_init_from_model (n_ctx=%u n_batch=%u n_threads=%u flash_attn=0)",
-         cparams.n_ctx, cparams.n_batch, cparams.n_threads);
+    LOGI("nativeInit → llama_init_from_model (n_ctx=%u n_batch=%u n_threads=%u n_gpu_layers=%d offload_kqv=%d flash_attn=0)",
+         cparams.n_ctx, cparams.n_batch, cparams.n_threads,
+         n_gpu_layers, (int)cparams.offload_kqv);
     llama_context* ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
         llama_model_free(model);
@@ -316,13 +337,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     st->vocab    = vocab;
     st->n_ctx    = (int)llama_n_ctx(ctx);
     st->n_threads= n_threads;
+    st->n_gpu_layers = n_gpu_layers;
     st->bos      = llama_vocab_bos(vocab);
     st->eos      = llama_vocab_eos(vocab);
     st->n_vocab  = llama_vocab_n_tokens(vocab);
     st->cancel.store(false, std::memory_order_relaxed);
 
-    LOGI("nativeInit 完成：bos=%d eos=%d n_vocab=%d n_ctx=%d vocab=%p",
-         st->bos, st->eos, st->n_vocab, st->n_ctx, (const void*)st->vocab);
+    LOGI("nativeInit 完成：bos=%d eos=%d n_vocab=%d n_ctx=%d n_gpu_layers=%d (XUEDI_LLAMA_VULKAN=%d) vocab=%p",
+         st->bos, st->eos, st->n_vocab, st->n_ctx,
+         st->n_gpu_layers, (int)XUEDI_LLAMA_VULKAN, (const void*)st->vocab);
     return (jlong)st;
 }
 
@@ -388,6 +411,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     std::string system = jstring2std(env, jSystem);
     std::string user   = jstring2std(env, jUser);
     if (system.empty()) system = "你是一个聪明、简洁、专业的AI编程助手，用中文回答用户的问题。";
+    LOGI("nativeChat runtime: n_threads=%d n_gpu_layers=%d (XUEDI_LLAMA_VULKAN=%d)",
+         st->n_threads, st->n_gpu_layers, (int)XUEDI_LLAMA_VULKAN);
 
     // ---- Step 1: ChatML 拼接 ----
     char prompt_buf[1 << 15];   // 32KB，983 token × 30byte ≈ 30KB 够

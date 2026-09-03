@@ -82,10 +82,13 @@ import com.xuedi.coder.data.ModelEntity
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
+import com.xuedi.coder.model.ModelPrefsStore
 import com.xuedi.coder.theme.ThemeMode
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.res.stringResource
@@ -142,6 +145,7 @@ fun SettingsPage(
             lastLoadedPath = app.modelManager.lastLoadedPath(),
             lastThreads = eng.lastUsedThreads,
             lastNCtx = eng.lastUsedNCtx,
+            lastGpuLayers = eng.lastUsedGpuLayers,
             prefMode = eng.lastPrefMode
         )
     }.getOrDefault(
@@ -153,6 +157,7 @@ fun SettingsPage(
             lastLoadedPath = null,
             lastThreads = null,
             lastNCtx = null,
+            lastGpuLayers = null,
             prefMode = null
         )
     )
@@ -326,6 +331,118 @@ fun SettingsPage(
                             mockMode = newChecked
                             LlamaJniEngine.forceMockMode = newChecked
                             val tip = if (newChecked) "已切换到模拟模式" else "已切换到真实推理模式"
+                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
+            }
+        }
+
+        // ---- 分组 2.5：推理偏好开关（方案A/C 用户级回退）----
+        item(key = "perf-prefs-group") {
+            SectionHeader(title = "🧠 推理偏好（默认模型·GPU加速）")
+        }
+        item(key = "pref-vulkan") {
+            val app = App.instance
+            // 读一次当前值做 Compose state；异步写回 ModelPrefs DataStore
+            val (useVulkan, setUseVulkan) = remember {
+                mutableStateOf(
+                    runBlocking(Dispatchers.IO) {
+                        runCatching { app.modelPrefs.getUseVulkanAccel() }
+                            .getOrDefault(ModelPrefsStore.DEFAULT_USE_VULKAN)
+                    }
+                )
+            }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 56.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "允许 Vulkan GPU 加速",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "ON=尝试把模型层卸载到 Adreno GPU（OFF=强制CPU，最稳定回退）。加载失败时会自动降回CPU。",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = useVulkan,
+                        onCheckedChange = { checked ->
+                            setUseVulkan(checked)
+                            (app as? CoroutineScope)?.launch(Dispatchers.IO) {
+                                runCatching { app.modelPrefs.setUseVulkanAccel(checked) }
+                            }
+                            val tip = if (checked)
+                                "✅ 已开启 Vulkan（重新加载模型生效，失败自动CPU兜底）"
+                            else
+                                "🛡️ 已切换到纯 CPU（下一次加载模型生效）"
+                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
+            }
+        }
+        item(key = "pref-fast-15b") {
+            val app = App.instance
+            val (useFast, setUseFast) = remember {
+                mutableStateOf(
+                    runBlocking(Dispatchers.IO) {
+                        runCatching { app.modelPrefs.getUseFast1_5B() }
+                            .getOrDefault(ModelPrefsStore.DEFAULT_USE_FAST_1_5B)
+                    }
+                )
+            }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 56.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "默认使用 1.5B 快模式",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "仅在「还没手动选过模型」时生效。ON=默认加载 Qwen2.5-1.5B（Prefill ~11s），OFF=默认 3B（质量更高）。",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = useFast,
+                        onCheckedChange = { checked ->
+                            setUseFast(checked)
+                            (app as? CoroutineScope)?.launch(Dispatchers.IO) {
+                                runCatching { app.modelPrefs.setUseFast1_5B(checked) }
+                            }
+                            val tip = if (checked)
+                                "⚡ 以后未选模型时默认优先 1.5B（下次冷启动生效）"
+                            else
+                                "📚 默认模型改回 3B（下次冷启动生效）"
                             Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
                         }
                     )
@@ -1073,6 +1190,9 @@ private data class LoadDiagSnapshot(
     // null = 模型尚未成功加载过。
     val lastThreads: Int?,
     val lastNCtx: Int?,
+    // 🆕 v1.3.26-gpu1: 最近一次 loadModel 请求的 gpuLayers（-1=全 offload，0=CPU，
+    // 真实值由 C++ 端 clamp 后写进日志 nativeInit n_gpu_layers=…）。
+    val lastGpuLayers: Int?,
     // 🆕 v1.3.25-perf1: 最近一次推理回合的 prefill 模式。
     // BATCH_OK = 批量提交成功；BATCH_FB = 批量失败回退逐 token；STEPx1 = 直接走逐 token。
     // null = 尚未跑过推理。
@@ -1361,7 +1481,15 @@ private suspend fun runDiagnosticImpl(
     }
     addLog("③ 引擎状态: $ctxStr  lastLoadErr=${engineSnapshot.lastLoadError?:"(无)"}")
     // 🆕 v1.3.25-perf1: 运行参数透明化，测 4/6/8 线程 & batch prefill 时一眼看到"这次到底用了啥参数"
-    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}")
+    // v1.3.26-gpu1: 新增 gpuLayers 显示（-1=请求全 offload，0=CPU；真机实际卸载层数看 LlamaJni 日志行 nativeInit n_gpu_layers=…）
+    val gpuLayersDisplay = engineSnapshot.lastGpuLayers?.let {
+        when (it) {
+            -1 -> "请求全卸载(-1)（C++端根据编译/Vulkan驱动clamp，真数见LlamaJni日志）"
+            0  -> "CPU-only(0)"
+            else -> "${it}层"
+        }
+    } ?: "(未加载)"
+    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  gpuLayers=$gpuLayersDisplay  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}")
 
     // ---- 2. 模型存在性 ----
     if (selectedModel == null) {

@@ -58,7 +58,35 @@ set(GGML_AVX512           OFF CACHE BOOL "" FORCE)
 set(GGML_OPENMP           ON  CACHE BOOL "" FORCE)
 set(GGML_CPU_ARM          ON  CACHE BOOL "" FORCE)
 set(GGML_CPU_ARM_MALI     OFF CACHE BOOL "" FORCE)
-set(GGML_VULKAN           OFF CACHE BOOL "" FORCE)
+
+# =====================================================
+# 方案A v1.3.26-gpu1：Vulkan GPU 加速（魅族 20 = 骁龙 8 Gen 2 = Adreno 740，Android 13 Vulkan 1.3 必带）
+# 安全策略（与方案A用户要求一致：无 Vulkan 不阻塞 CPU 构建）：
+#   · find_package(Vulkan) 失败 → GGML_VULKAN=OFF，CPU-only 构建（perf2-thread4 底包不变）
+#   · 成功 → GGML_VULKAN=ON，ggml-vulkan 目标通过 add_subdirectory 自动参与编译；
+#            ggml-vulkan 内的 shader 生成在 CMAKE_CROSSCOMPILING 时会走
+#            ExternalProject vulkan-shaders-gen（自动探测 host gcc/clang），
+#            GitHub Actions ubuntu-latest 默认 gcc+glslc 齐全，无坑。
+#   · 给 JNI 传编译宏 XUEDI_LLAMA_VULKAN=1/0，llama_jni.cpp 里据此决定
+#     n_gpu_layers 实际允许值（CPU-only 编译即使 Kotlin 传 -1 也会夹到 0，避免零收益）。
+# =====================================================
+set(XUEDI_HAS_VULKAN OFF)
+find_package(Vulkan)
+if (Vulkan_FOUND)
+    message(STATUS "[xuedi-llama] Vulkan FOUND (include=${Vulkan_INCLUDE_DIRS} libs=${Vulkan_LIBRARIES} glslc=${Vulkan_GLSLC_EXECUTABLE}) → 启用 ggml-vulkan")
+    set(GGML_VULKAN                       ON  CACHE BOOL "" FORCE)
+    set(GGML_VULKAN_DEBUG                 OFF CACHE BOOL "" FORCE)
+    set(GGML_VULKAN_CHECK_RESULTS         OFF CACHE BOOL "" FORCE)
+    set(GGML_VULKAN_MEMORY_DEBUG          OFF CACHE BOOL "" FORCE)
+    set(GGML_VULKAN_SHADER_DEBUG_INFO     OFF CACHE BOOL "" FORCE)
+    set(GGML_VULKAN_PERF                  OFF CACHE BOOL "" FORCE)
+    set(GGML_VULKAN_VALIDATE              OFF CACHE BOOL "" FORCE)
+    set(GGML_VULKAN_RUN_TESTS             OFF CACHE BOOL "" FORCE)
+    set(XUEDI_HAS_VULKAN ON)
+else ()
+    message(STATUS "[xuedi-llama] Vulkan NOT FOUND → 保持 CPU-only 构建（= perf2-thread4 底包）")
+    set(GGML_VULKAN                       OFF CACHE BOOL "" FORCE)
+endif ()
 
 set(LLAMA_ARM_NEON        ON  CACHE BOOL "" FORCE)
 set(GGML_CPU_ARM_NEON     ON  CACHE BOOL "" FORCE)
@@ -86,12 +114,21 @@ target_include_directories(xuedi-llama PRIVATE
     ${LLAMA_DIR}/common
 )
 
+# 把“编译期有无 ggml-vulkan”传给 llama_jni.cpp，避免 CPU-only 编译下把 n_gpu_layers>0 的 hint 浪费。
+target_compile_definitions(xuedi-llama PRIVATE
+    XUEDI_LLAMA_VULKAN=$<IF:$<BOOL:${XUEDI_HAS_VULKAN}>,1,0>
+)
+
 # 严禁写 common — b5180 + LLAMA_BUILD_EXAMPLES=OFF 时该 target 不存在
+# Vulkan 回退：GGML_VULKAN=ON 时 llama.cpp 会自动把 ggml-vulkan link 到 ggml（它自己做 backend 注册），
+#              我们这里只显式加一份以防静态合并时 target 依赖被剪；
+#              Vulkan::Vulkan 由 ggml-vulkan target 自己 PRIVATE link，jni 这边不用再重链。
 target_link_libraries(xuedi-llama PRIVATE
     llama
     ggml
     ggml-cpu
     ggml-base
+    $<$<BOOL:${XUEDI_HAS_VULKAN}>:ggml-vulkan>
     log
     z
 )

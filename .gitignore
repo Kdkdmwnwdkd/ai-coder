@@ -28,3 +28,5 @@ signing/*.jks
 signing/*.p12
 signing/*.b64
 !signing/README.md
+app/src/main/cpp/llama.cpp/
+app/schemas/

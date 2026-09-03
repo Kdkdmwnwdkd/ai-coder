@@ -28,4 +28,7 @@ interface ModelDao {
 
     @Query("SELECT * FROM model_info WHERE id = :id LIMIT 1")
     suspend fun getById(id: String): ModelEntity?
+
+    @Query("SELECT * FROM model_info ORDER BY addedAtMs DESC")
+    suspend fun getAll(): List<ModelEntity>
 }

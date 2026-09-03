@@ -24,9 +24,17 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 46
-        versionName = "1.3.25-fix14"
-        // v1.3.25-fix14: 【Llama 闪退根治！回到 n_batch=1 + 重写 prefill】
+        versionCode = 47
+        versionName = "1.3.25-fix15"
+        // v1.3.25-fix15: 【Qwen 自写引擎根治！实现 Q4_K + Q5_K 反量化】
+        //   · 根因：dequant_tensor() 检查 type==13 (Q4_K_M)，但模型里根本没有 type 13！
+        //     实际 tensor 是 type=12 (Q4_K) 和 type=14 (Q5_K)。
+        //   · 旧代码所有量化 tensor 都走 F16 fallback → 把 Q4_K/Q5_K 二进制当 F16 读
+        //     → 垃圾值 → 推理结果完全错误 → 首token超时/无输出
+        //   · 修复：type=12 走 dequant_q4km_tensor (已有，只是 type 判断错了)
+        //          type=14 走新实现的 dequant_q5k_tensor (176B/block, 多 1 位高位)
+        //   · Q5_K block: d(2) + dmin(2) + scales(12) + qh(32) + qs(128) = 176B
+        //   · 保留 fix13/14 的所有改动（复制诊断包、Qwen警告、n_batch=1、BOS插入）
         //   · 用户确认：Llama 一发消息就闪退！n_batch=8 没用，n_batch=256 也没用。
         //   · fix10 用 n_batch=1 完整跑通不崩——这是唯一的安全值。
         //   · 彻底重写 prefill：不用 llama_batch_get_one（它会创建 n_prompt 大小的 batch，

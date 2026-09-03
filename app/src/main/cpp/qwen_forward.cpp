@@ -114,7 +114,7 @@ static void dequant_q4km_block(float * out, const uint8_t * blk) {
     }
 }
 
-// 反量化整个 Q4_K_M 张量到 F32 buffer
+// 反量化整个 Q4_K 张量到 F32 buffer (type=12)
 // QK_K=256 元素一组, 每 block 144 字节
 // nb1 来自 GGUF (ggml_loader 已正确读取)
 static void dequant_q4km_tensor(float * out, const uint8_t * data,
@@ -131,6 +131,73 @@ static void dequant_q4km_tensor(float * out, const uint8_t * data,
             int n_elem = (int)std::min<int64_t>(BLOCK_NELEM, ne0 - b * BLOCK_NELEM);
             float tmp[BLOCK_NELEM];
             dequant_q4km_block(tmp, blk);
+            for (int i = 0; i < n_elem; ++i) dst[i] = tmp[i];
+        }
+    }
+}
+
+// =====================================================
+// 1b. Q5_K 反量化 (照搬 llama.cpp dequantize_row_q5_K)
+//
+// block_q5_K 结构 (256 元素 = 176 字节):
+//   off 0:  ggml_half d       (2B, super-block scale)
+//   off 2:  ggml_half dmin    (2B, super-block min scale)
+//   off 4:  uint8 scales[12]  (12B, 6-bit 量化的 scale/min, 同 Q4_K)
+//   off 16: uint8 qh[32]      (32B, 每元素 1 个高位, 8 elements/byte)
+//   off 48: uint8 qs[128]     (128B, 4bit 数据, 高低 nibble, 同 Q4_K)
+//   总计: 176 bytes
+//
+// 与 Q4_K 的区别: 多了 qh[32] 提供第 5 位, 值域 0..31 (Q4_K 是 0..15)
+// 反量化公式同 Q4_K, 只是 q 值从 4bit 变成 5bit
+// =====================================================
+static void dequant_q5k_block(float * out, const uint8_t * blk) {
+    uint16_t d_raw, dmin_raw;
+    memcpy(&d_raw,   blk + 0, 2);
+    memcpy(&dmin_raw, blk + 2, 2);
+    const float d   = fp16_to_fp32_raw(d_raw);
+    const float min = fp16_to_fp32_raw(dmin_raw);
+    const uint8_t * scales = blk + 4;
+    const uint8_t * qh = blk + 16;   // qh 在 scales 之后
+    const uint8_t * q  = blk + 48;   // qs 在 qh 之后
+
+    int is = 0;
+    uint8_t sc, m;
+    for (int j = 0; j < 256; j += 64) {
+        get_scale_min_k4(is + 0, scales, &sc, &m);
+        const float d1 = d * sc; const float m1 = min * m;
+        get_scale_min_k4(is + 1, scales, &sc, &m);
+        const float d2 = d * sc; const float m2 = min * m;
+        // 前 32 元素: qs 低 nibble + qh 高位
+        for (int l = 0; l < 32; ++l) {
+            int idx = j + l;
+            uint8_t qh_bit = (qh[idx / 8] >> (idx % 8)) & 1;
+            *out++ = d1 * ((q[l] & 0xF) + (qh_bit << 4)) - m1;
+        }
+        // 后 32 元素: qs 高 nibble + qh 高位
+        for (int l = 0; l < 32; ++l) {
+            int idx = j + l + 32;
+            uint8_t qh_bit = (qh[idx / 8] >> (idx % 8)) & 1;
+            *out++ = d2 * ((q[l] >> 4) + (qh_bit << 4)) - m2;
+        }
+        q += 32; is += 2;
+    }
+}
+
+// 反量化整个 Q5_K 张量到 F32 buffer (type=14)
+static void dequant_q5k_tensor(float * out, const uint8_t * data,
+                               int64_t ne0, int64_t ne1, size_t nb1) {
+    static const int BLOCK_SIZE_BYTES = 176;  // sizeof(block_q5_K) = 2+2+12+32+128
+    static const int BLOCK_NELEM     = 256;  // QK_K
+
+    int64_t nb0_blocks = (ne0 + BLOCK_NELEM - 1) / BLOCK_NELEM;
+    for (int64_t r = 0; r < ne1; ++r) {
+        const uint8_t * row = data + r * nb1;
+        for (int64_t b = 0; b < nb0_blocks; ++b) {
+            const uint8_t * blk = row + b * BLOCK_SIZE_BYTES;
+            float * dst = out + r * ne0 + b * BLOCK_NELEM;
+            int n_elem = (int)std::min<int64_t>(BLOCK_NELEM, ne0 - b * BLOCK_NELEM);
+            float tmp[BLOCK_NELEM];
+            dequant_q5k_block(tmp, blk);
             for (int i = 0; i < n_elem; ++i) dst[i] = tmp[i];
         }
     }
@@ -166,8 +233,19 @@ static float * dequant_tensor(const QwenTensor * t, size_t & out_ne0, size_t & o
     float * buf = (float *)malloc(total * sizeof(float));
     if (!buf) return nullptr;
 
-    if (t->type == 13 /*GGML_TYPE_Q4_K_M*/) {
+    // 🔴 v1.3.25-fix14: 修复类型判断！
+    //   之前检查 type==13 (Q4_K_M)，但模型里根本没有 type 13 的 tensor！
+    //   实际 tensor 类型：
+    //     type=12 (Q4_K): attn_q/k/v/output, ffn_gate/up 等大部分权重
+    //     type=14 (Q5_K): token_embd, ffn_down 等大权重
+    //     type=0  (F32):  norm, bias
+    //     type=1  (F16):  部分 tensor
+    //   旧代码所有 Q4_K/Q5_K 都走 F16 fallback → 把量化二进制当 F16 读 → 垃圾值 → 无法生成
+    if (t->type == 12 /*GGML_TYPE_Q4_K*/ ||
+        t->type == 13 /*GGML_TYPE_Q4_K_M — 兼容, 同样的 block 格式*/) {
         dequant_q4km_tensor(buf, (const uint8_t *)t->data, (int64_t)out_ne0, (int64_t)out_ne1, t->nb[1]);
+    } else if (t->type == 14 /*GGML_TYPE_Q5_K*/) {
+        dequant_q5k_tensor(buf, (const uint8_t *)t->data, (int64_t)out_ne0, (int64_t)out_ne1, t->nb[1]);
     } else if (t->type == 1 /*GGML_TYPE_F16*/) {
         copy_f16_to_f32(buf, (const uint16_t *)t->data, (int64_t)out_ne0, (int64_t)out_ne1, t->nb[1]);
     } else if (t->type == 0 /*GGML_TYPE_F32*/) {

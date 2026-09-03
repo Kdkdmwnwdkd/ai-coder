@@ -60,6 +60,7 @@ static jmethodID          g_midOnPrefill = nullptr;
 struct LlamaState {
     llama_model*  model;
     llama_context* ctx;
+    const llama_vocab* vocab;  // b5180 新增：从 llama_model_get_vocab() 取，生命周期和 model 绑定
     int           n_ctx;
     int           n_threads;
     llama_token   bos;
@@ -69,7 +70,7 @@ struct LlamaState {
     // cancel flag 按 ctx 粒度（不搞全局，避免并发 loadModel 互相杀）
     std::atomic<bool> cancel;
 
-    LlamaState() : model(nullptr), ctx(nullptr), n_ctx(0), n_threads(4),
+    LlamaState() : model(nullptr), ctx(nullptr), vocab(nullptr), n_ctx(0), n_threads(4),
                    bos(0), eos(0), n_vocab(0), cancel(false) {}
 };
 
@@ -112,15 +113,14 @@ static llama_token argmax_sample(const float* logits, int n_vocab) {
 
 // =============================================================================
 // llama_token_to_piece 包装：返回 std::string（处理中文多字节 UTF-8）
+// —— b5180 把 vocab 从 llama_model 剥离，统一用 llama_vocab_* 新命名。
 // =============================================================================
-static std::string token_to_piece(const llama_model* model, llama_token tok) {
-    // 官方 llama_token_to_piece 把结果写进用户 buffer（需要 -1 的空间给 null）
+static std::string tok_to_piece(const llama_vocab* vocab, llama_token tok) {
     char buf[32];
-    int n = llama_token_to_piece(model, tok, buf, (int)sizeof(buf), 0, /*special*/false);
+    int n = llama_vocab_token_to_piece(vocab, tok, buf, (int)sizeof(buf), 0, /*special*/false);
     if (n < 0) {
-        // buffer 不够，再试大的
         std::vector<char> big(-n + 2);
-        int n2 = llama_token_to_piece(model, tok, big.data(), (int)big.size(), 0, false);
+        int n2 = llama_vocab_token_to_piece(vocab, tok, big.data(), (int)big.size(), 0, false);
         if (n2 > 0) return std::string(big.data(), n2);
         return "";
     }
@@ -129,19 +129,18 @@ static std::string token_to_piece(const llama_model* model, llama_token tok) {
 
 // =============================================================================
 // tokenize：add_spec=0（不让 tokenizer 自动加 BOS，我们手动插）
+// —— b5180：签名要 const struct llama_vocab* 做第一参数。
 // =============================================================================
-static std::vector<llama_token> tokenize_prompt(llama_model* model, const std::string& text, bool add_special = false) {
-    // 官方 llama_tokenize 需要 buffer 大小预估
-    int cap = (int)text.size() + 8;  // +8 给 UTF-8 多字节余量
+static std::vector<llama_token> tokenize_prompt(const llama_vocab* vocab, const std::string& text, bool add_special = false) {
+    int cap = (int)text.size() + 8;
     std::vector<llama_token> out(cap);
-    int n = llama_tokenize(model, text.data(), (int)text.size(),
-                           out.data(), cap, add_special, /*parse_special=*/true);
+    int n = llama_vocab_tokenize(vocab, text.data(), (int)text.size(),
+                                 out.data(), cap, add_special, /*parse_special=*/true);
     if (n < 0) {
-        // -ret = 需要的大小
         cap = -n + 2;
         out.resize(cap);
-        n = llama_tokenize(model, text.data(), (int)text.size(),
-                           out.data(), cap, add_special, true);
+        n = llama_vocab_tokenize(vocab, text.data(), (int)text.size(),
+                                 out.data(), cap, add_special, true);
     }
     if (n > 0) out.resize((size_t)n); else out.clear();
     return out;
@@ -249,14 +248,17 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     mparams.n_gpu_layers = 0;
 
     LOGI("nativeInit → llama_model_load_from_file (%s)", path.c_str());
-    llama_model* model = llama_load_model_from_file(path.c_str(), mparams);
+    // —— b5180 新命名：llama_model_load_from_file / llama_model_free
+    llama_model* model = llama_model_load_from_file(path.c_str(), mparams);
     if (!model) {
-        throwJava(env, "llama_load_model_from_file FAILED：GGUF 损坏 / 格式不兼容 / 内部 mmap 失败。\n"
+        throwJava(env, "llama_model_load_from_file FAILED：GGUF 损坏 / 格式不兼容 / 内部 mmap 失败。\n"
                        "建议：在设置里删模型 → 重新下载 Qwen2.5-1.5B-Instruct-Q4_K_M.gguf");
         return 0L;
     }
-    LOGI("nativeInit ✅ model loaded。n_vocab=%d n_embd=%d",
-         llama_n_vocab(model), llama_n_embd(model));
+    // b5180 必须显式取 vocab 指针（vocab 已经从 model 独立出来）
+    const llama_vocab* vocab = llama_model_get_vocab(model);
+    LOGI("nativeInit ✅ model loaded。n_vocab=%d n_embd=%d vocab=%p",
+         llama_vocab_n_tokens(vocab), llama_model_n_embd(model), (const void*)vocab);
 
     // ---- 2. llama_init_from_model（cparams.n_batch 强制 SAFE_N_BATCH=1）----
     llama_context_params cparams = llama_context_default_params();
@@ -265,7 +267,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     cparams.n_ubatch    = (uint32_t)SAFE_N_BATCH;
     cparams.n_threads   = (uint32_t)n_threads;
     cparams.n_threads_batch = (uint32_t)n_threads;
-    cparams.seed        = 0x12345678u;   // 固定种子（argmax 采样无随机性，但设了没坏处）
+    // ⚠️ b5180 里 llama_context_params 已经没有 seed 字段：采样无随机性（argmax），不需要
     cparams.flash_attn  = false;         // 魅族 20 不兼容 flash attn，关
     cparams.offload_kqv = false;         // CPU-only，避免 GPU loader 路径
 
@@ -273,7 +275,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
          cparams.n_ctx, cparams.n_batch, cparams.n_threads);
     llama_context* ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
-        llama_free_model(model);
+        llama_model_free(model);
         throwJava(env, "llama_init_from_model FAILED：KV cache 分配 OOM。\n"
                        "请关后台 App / 重启手机，或改 loadModelRobust L3/L4 档位（n_ctx=1280/768）");
         return 0L;
@@ -281,19 +283,20 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     LOGI("nativeInit ✅ ctx created。真实 n_ctx=%u 真实 n_batch=%u",
          llama_n_ctx(ctx), llama_n_batch(ctx));
 
-    // ---- 3. 填 state ----
+    // ---- 3. 填 state（b5180：bos/eos/n_vocab 统一走 llama_vocab_*，vocab 指针存一份给 chat 用）----
     LlamaState* st = new LlamaState();
     st->model    = model;
     st->ctx      = ctx;
+    st->vocab    = vocab;
     st->n_ctx    = (int)llama_n_ctx(ctx);
     st->n_threads= n_threads;
-    st->bos      = llama_token_bos(model);
-    st->eos      = llama_token_eos(model);
-    st->n_vocab  = llama_n_vocab(model);
+    st->bos      = llama_vocab_bos(vocab);
+    st->eos      = llama_vocab_eos(vocab);
+    st->n_vocab  = llama_vocab_n_tokens(vocab);
     st->cancel.store(false, std::memory_order_relaxed);
 
-    LOGI("nativeInit 完成：bos=%d eos=%d n_vocab=%d n_ctx=%d",
-         st->bos, st->eos, st->n_vocab, st->n_ctx);
+    LOGI("nativeInit 完成：bos=%d eos=%d n_vocab=%d n_ctx=%d vocab=%p",
+         st->bos, st->eos, st->n_vocab, st->n_ctx, (const void*)st->vocab);
     return (jlong)st;
 }
 
@@ -307,8 +310,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeRelease(
     if (!st) return;
     LOGI("nativeRelease: ctx=%p model=%p", st->ctx, st->model);
     st->cancel.store(true, std::memory_order_relaxed);
-    if (st->ctx)  { llama_free(st->ctx);      st->ctx  = nullptr; }
-    if (st->model){ llama_free_model(st->model); st->model = nullptr; }
+    if (st->ctx)  { llama_free(st->ctx);              st->ctx   = nullptr; }
+    // vocab 随 model 一起释放，不需要单独 free；顺序：先 ctx 后 model
+    if (st->model){ llama_model_free(st->model);      st->model = nullptr; st->vocab = nullptr; }
     delete st;
     LOGI("nativeRelease ✅ done");
 }
@@ -368,7 +372,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     LOGI("nativeChat prompt[%zu B] 系统=%zu 用户=%zu", prompt.size(), system.size(), user.size());
 
     // ---- Step 2: tokenize（add_special=false，parse_special=true 识别 <|im_start|> 为单个 token）----
-    std::vector<llama_token> tokens = tokenize_prompt(st->model, prompt, /*add_special=*/false);
+    // b5180：第一参数必须是 vocab（从 model 拆出来的独立对象）
+    std::vector<llama_token> tokens = tokenize_prompt(st->vocab, prompt, /*add_special=*/false);
     if (tokens.empty()) {
         cb_onError(tenv, gCb, "tokenize 返回空：prompt 可能含不支持的特殊字节");
         tenv->DeleteGlobalRef(gCb);
@@ -393,8 +398,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         if (tokens[0] != st->bos) tokens.insert(tokens.begin(), st->bos);
     }
 
-    // ---- Step 4: 清 KV cache（修"二次对话不吐字"bug）----
-    llama_kv_cache_clear(st->ctx);
+    // ---- Step 4: 清 KV cache（修"二次对话不吐字"bug）
+    // b5180 新命名：llama_kv_self_clear（旧 llama_kv_cache_clear 仍 deprecated，这里用新命名避免 warning）
+    llama_kv_self_clear(st->ctx);
     LOGI("nativeChat: kv cache 已清。开始 prefill [%zu tokens]", tokens.size());
 
     // ---- Step 5: batch init（固定 SAFE_N_BATCH=1，官方最简：n_tokens_max=1, n_seq_max=1, embd=0）----
@@ -407,6 +413,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     int n_past = 0;
     const int total_prefill = (int)tokens.size();
     std::string fullOut;
+    llama_token last_tok = 0;  // ✅ 提前声明：避免 prefill 阶段 "goto cleanup" 跨过变量初始化（C++ 编译硬错）
 
     // ---- 5.1 PREFILL：每个 token 单独走 llama_decode ----
     for (int i = 0; i < (int)tokens.size(); ++i) {
@@ -449,7 +456,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     LOGI("✅ prefill 完成。n_past=%d 开始生成（max=%d tokens）", n_past, DEFAULT_MAX_GEN);
 
     // ---- Step 6: GENERATION ----
-    llama_token last_tok = 0;
+    // （last_tok 已在 prefill 循环之前声明为 0，避免 goto 跨初始化报错）
     {   // 取 prefill 后最后一个 token 的 logits → argmax → 首个 gen token
         const float* logits = llama_get_logits_ith(st->ctx, 0);
         if (!logits) {
@@ -476,7 +483,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         }
 
         // ---- piece 回传 ----
-        std::string piece = token_to_piece(st->model, last_tok);
+        // b5180：tok_to_piece 统一走 vocab（不再需要 model 指针）
+        std::string piece = tok_to_piece(st->vocab, last_tok);
         if (!piece.empty()) {
             fullOut += piece;
             cb_onToken(tenv, gCb, piece);

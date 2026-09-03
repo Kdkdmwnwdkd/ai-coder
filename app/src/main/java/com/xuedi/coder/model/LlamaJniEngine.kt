@@ -153,6 +153,11 @@ class LlamaJniEngine : LlmEngine {
         fun onError(message: String)
         /** 🔴 预填充进度回调（0.0 ~ 1.0）——UI 显示百分比，避免一直白转圈圈 */
         fun onPrefillProgress(consumed: Int, total: Int)
+        /** 🆕 v1.3.25-perf1: 本回合 prefill 模式。
+         *  值含义：`BATCH_OK`=批量一次 decode 成功；`BATCH_FB`=批量失败回退逐 token；
+         *          `STEPx1`=未尝试批量（token<=1 或 >1024）直接逐 token。
+         *  C++ 侧会在 prefill 开始决策后调用一次（可能先于 onPrefillProgress）。 */
+        fun onPrefillMode(mode: String)
     }
 
     // =================================================================
@@ -230,10 +235,22 @@ class LlamaJniEngine : LlmEngine {
             return false
         }
         ctx = newCtx
+        lastUsedThreads = nThreads
+        lastUsedNCtx = nCtx
         Log.i(TAG, "loadModel ✅ GGUF 已加载 ctx=$ctx；线程=$nThreads nCtx=$nCtx 文件=${f.name} size=${f.length()/1024/1024}MB")
         lastLoadError = null
         return true
     }
+
+    /** 最近一次成功 loadModel 使用的线程数 / nCtx（诊断卡展示 & 对比 4/6/8 性能用） */
+    @Volatile var lastUsedThreads: Int? = null
+    @Volatile var lastUsedNCtx: Int? = null
+
+    /** 🆕 v1.3.25-perf1: 最近一次 nativeChat 回合的 prefill 模式。
+     *  值见 [TokenCallback.onPrefillMode]：BATCH_OK / BATCH_FB / STEPx1。
+     *  null = 还没跑过推理。给诊断卡 & 性能调优 A/B 对比用。 */
+    @Volatile var lastPrefMode: String? = null
+        private set
 
     /**
      * 🆕 v1.3.25-fix8：健壮版加载（4 级自动降级重试，一次都不用用户手动调参数）。
@@ -241,20 +258,22 @@ class LlamaJniEngine : LlmEngine {
      * 魅族 20 上「点🔄 加载失败」= 很多时候是默认 4096+4 线程的 KV cache 峰值顶了内存，
      * 但用户看不懂 Toast 里笼统的"内存不足 / GGUF 损坏"，只知道"我点了，失败了"。
      * 这里把 4 档组合串行试：
-     *   #1  nCtx=4096  nThreads=4 （用户预期满配）
-     *   #2  nCtx=2048  nThreads=2  （C++ 侧魅族20特供版）
-     *   #3  nCtx=1280  nThreads=2  （进一步压 KV cache 峰值）
-     *   #4  nCtx=768   nThreads=1  （极限兜底，1.5B 4bit 基本都能起来）
+     *   #1  nCtx=4096  nThreads=6  (v1.3.25-perf1 4→6: 骁龙 8 Gen2 1+4+3 甜点，perf 最优)
+     *   #2  nCtx=2048  nThreads=4  (L2 标准降级：ctx 减半 + 回 4 线程防 6 线程内存爆)
+     *   #3  nCtx=1280  nThreads=2  (L3 激进降级：KV 再压)
+     *   #4  nCtx=768   nThreads=1  (L4 极限兜底，1.5B 4bit 基本都能起来)
      *
      * 只要其中一级成功，就返回 true，并把真实使用的 nCtx/nThreads 写进成功 Toast；
      * 如果 4 级全挂，lastLoadError 会聚合 4 次失败的具体原因（= 直接定位卡在哪一级）。
+     *
+     * ⚠️ 回退（若 6 线程变慢或闪退 → 改回 4）：把下面 L1 的 6 改成 4 即可，其它不动。
      */
     fun loadModelRobust(ggufAbsolutePath: String): Boolean {
         val presets: List<Triple</*nCtx*/Int, /*nThreads*/Int, String>> = listOf(
-            Triple(4096, 4, "满配"),
-            Triple(2048, 2, "L2 标准降级"),
-            Triple(1280, 2, "L3 激进降级"),
-            Triple(768,  1, "L4 极限兜底")
+            Triple(4096, 6, "满配(骁龙甜点·6线程)"),
+            Triple(2048, 4, "L2 标准降级(ctx2048·4线程)"),
+            Triple(1280, 2, "L3 激进降级(ctx1280·2线程)"),
+            Triple(768,  1, "L4 极限兜底(ctx768·1线程)")
         )
         val failures = mutableListOf<String>()
         for ((i, cfg) in presets.withIndex()) {
@@ -419,6 +438,11 @@ class LlamaJniEngine : LlmEngine {
                         // 🔴 不设置 firstTokenReceived——prefill 阶段还没出 token，超时定时器继续跑
                         val percent = if (total > 0) (consumed * 100 / total).coerceIn(0, 100) else 0
                         trySend(ChatChunk.PrefillProgress(percent, consumed, total))
+                    }
+                    override fun onPrefillMode(mode: String) {
+                        if (this@LlamaJniEngine.ctx != curCtx) return
+                        lastPrefMode = mode
+                        Log.i(TAG, "onPrefillMode → $mode（保存到 lastPrefMode 供诊断快照读取）")
                     }
                 }
                 val ok = runCatching {

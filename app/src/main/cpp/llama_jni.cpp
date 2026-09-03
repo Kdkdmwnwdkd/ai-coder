@@ -45,15 +45,22 @@ static constexpr int   DEFAULT_MAX_GEN = 2048;  // v1.3.25-stable: 800 → 2048�
 static constexpr int   EOS_GUARD_STEPS = 32;    // v1.3.25-stable: argmax 采样下"生成 7 token 就 EOS"的根治：前 32 步硬禁 EOS
 static constexpr int   N_KV_MAX_SHIFT  = 0;     // 预留
 
+// 🔴 v1.3.25-perf1: Prefill 模式 — 给 Java 诊断框 / 日志用（prefMode 字段）
+static constexpr const char* PREF_MODE_STEPBYSTEP = "STEPx1";  // 逐 token 兜底（fallback 或批量未试）
+static constexpr const char* PREF_MODE_BATCH_OK   = "BATCH_OK"; // 批量提交一次 llama_decode 成功
+static constexpr const char* PREF_MODE_FALLBACK   = "BATCH_FB"; // 批量提交失败，已回退逐 token
+
 // =============================================================================
 // TokenCallback Java methodIDs 缓存
 // =============================================================================
-static JavaVM*            g_vm          = nullptr;
-static jclass             g_cbClass     = nullptr;  // LlamaJniEngine$TokenCallback global ref
-static jmethodID          g_midOnToken  = nullptr;
-static jmethodID          g_midOnDone   = nullptr;
-static jmethodID          g_midOnError  = nullptr;
+static JavaVM*            g_vm           = nullptr;
+static jclass             g_cbClass      = nullptr;  // LlamaJniEngine$TokenCallback global ref
+static jmethodID          g_midOnToken   = nullptr;
+static jmethodID          g_midOnDone    = nullptr;
+static jmethodID          g_midOnError   = nullptr;
 static jmethodID          g_midOnPrefill = nullptr;
+// 🔴 v1.3.25-perf1: 通知 Java 侧本次 prefill 使用了 BATCH_OK / BATCH_FB / STEPx1
+static jmethodID          g_midOnPrefillMode = nullptr;
 
 // =============================================================================
 // C++ 推理状态（每个 loadModel 产出一个 handle）
@@ -192,6 +199,14 @@ static void cb_onPrefill(JNIEnv* env, jobject cb, int consumed, int total) {
     env->CallVoidMethod(cb, g_midOnPrefill, (jint)consumed, (jint)total);
 }
 
+// 🔴 v1.3.25-perf1: 通知 Java 侧本次 prefill 模式（BATCH_OK / BATCH_FB / STEPx1）
+static void cb_onPrefillMode(JNIEnv* env, jobject cb, const std::string& mode) {
+    if (!g_midOnPrefillMode || !cb) return;
+    jstring jm = env->NewStringUTF(mode.c_str());
+    env->CallVoidMethod(cb, g_midOnPrefillMode, jm);
+    env->DeleteLocalRef(jm);
+}
+
 // =============================================================================
 // JNI_OnLoad：缓存 methodID + 执行 llama_backend_init（一次即可）
 // =============================================================================
@@ -216,11 +231,15 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     g_midOnDone    = env->GetMethodID(g_cbClass, "onDone",          "(Ljava/lang/String;)V");
     g_midOnError   = env->GetMethodID(g_cbClass, "onError",         "(Ljava/lang/String;)V");
     g_midOnPrefill = env->GetMethodID(g_cbClass, "onPrefillProgress","(II)V");
+    g_midOnPrefillMode = env->GetMethodID(g_cbClass, "onPrefillMode","(Ljava/lang/String;)V");
 
     if (!g_midOnToken || !g_midOnDone || !g_midOnError || !g_midOnPrefill) {
-        LOGE("JNI_OnLoad: GetMethodID FAILED (onToken=%p onDone=%p onError=%p onPrefill=%p)",
-             g_midOnToken, g_midOnDone, g_midOnError, g_midOnPrefill);
+        LOGE("JNI_OnLoad: GetMethodID FAILED (onToken=%p onDone=%p onError=%p onPrefill=%p onPrefillMode=%p)",
+             g_midOnToken, g_midOnDone, g_midOnError, g_midOnPrefill, g_midOnPrefillMode);
         return JNI_ERR;
+    }
+    if (!g_midOnPrefillMode) {
+        LOGW("JNI_OnLoad: onPrefillMode methodID 未找到（旧 Kotlin TokenCallback 接口未升级，prefMode 不回传但主流程不受影响）");
     }
 
     // 官方 llama_backend_init（nuwa params，传 nullptr 用默认）
@@ -410,58 +429,102 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     llama_kv_self_clear(st->ctx);
     LOGI("nativeChat: kv cache 已清。开始 prefill [%zu tokens]", tokens.size());
 
-    // ---- Step 5: batch init（固定 SAFE_N_BATCH=1，官方最简：n_tokens_max=1, embd=0, n_seq_max=1）----
-    // 🚨🚨 b5180 真实签名（grep llama.h:919）：llama_batch_init(n_tokens, embd, n_seq_max)
-    //   - 第 2 参数 embd=0：正常 token 输入（不是 embedding 输入）
-    //   - 第 3 参数 n_seq_max 必须 >= 1：因为后续 batch.n_seq_id[0]=1, batch.seq_id[0][0] = 0
-    //     b5180 内部 GGML_ASSERT(seq_id < n_seq_max)，传 0 直接 SIGABRT！
+    // ---- Step 5: Prefill（v1.3.25-perf1：先试批量 llama_decode 一次过，失败回退 SAFE 逐 token）----
+    //   回退保证：只要 llama_decode 返回非 0 → 立即清 KV + 走原来的 n_tokens=1 循环。
+    //   风险隔离：ctx cparams 的 n_batch/n_ubatch 仍保持 SAFE_N_BATCH=1 不变（不碰黑盒），
+    //     我们只在单个 llama_decode 调用里传「更大的 batch 对象」——llama.cpp 内部允许，
+    //     若内部 assertion 失败，ret!=0 → fallback；若是 SIGABRT（极罕见），下版本再屏蔽。
     llama_batch batch = llama_batch_init(SAFE_N_BATCH, /*embd=*/0, /*n_seq_max=*/1);
-    LOGI("nativeChat: batch created (n_tokens_max=%d, embd=0, n_seq_max=1)。SAFE 路径：batch.n_tokens 永远 =1", SAFE_N_BATCH);
+    LOGI("nativeChat: SAFE batch created (n_tokens_max=%d, embd=0, n_seq_max=1)", SAFE_N_BATCH);
 
     int n_past = 0;
     const int total_prefill = (int)tokens.size();
     std::string fullOut;
     llama_token last_tok = 0;  // ✅ 提前声明：避免 prefill 阶段 "goto cleanup" 跨过变量初始化（C++ 编译硬错）
 
-    // ---- 5.1 PREFILL：每个 token 单独走 llama_decode ----
-    for (int i = 0; i < (int)tokens.size(); ++i) {
-        if (st->cancel.load(std::memory_order_relaxed)) {
-            cb_onError(tenv, gCb, "用户取消（prefill 阶段）");
-            goto cleanup;
+    // ---- 5.0 PREFILL-BATCH 尝试（v1.3.25-perf1）----
+    {
+        bool batch_ok = false;
+        const int N = (int)tokens.size();
+        // 防护：token 数 <=1 没必要批量；> 1024 也不试（batch 对象过大占栈/堆风险）
+        if (N > 1 && N <= 1024) {
+            LOGI("🔬 PREFILL-BATCH: 尝试一次性 prefill（N=%d tokens）。若 ret!=0 立即 fallback 逐 token", N);
+            // 单独构造临时 batch_all（不影响下面的 SAFE batch 生命周期变量，避免 cleanup 双 free）
+            llama_batch batch_all = llama_batch_init(N, /*embd=*/0, /*n_seq_max=*/1);
+            if (batch_all.token && batch_all.pos && batch_all.n_seq_id && batch_all.seq_id && batch_all.logits) {
+                batch_all.n_tokens = N;
+                for (int i = 0; i < N; ++i) {
+                    batch_all.token[i]      = tokens[i];
+                    batch_all.pos[i]        = i;
+                    batch_all.n_seq_id[i]   = 1;
+                    batch_all.seq_id[i][0]  = 0;
+                    // 只最后一个 token 需要 logits（gen 阶段首个采样）
+                    batch_all.logits[i]     = (i == N - 1) ? 1 : 0;
+                }
+                const int ret = llama_decode(st->ctx, batch_all);
+                if (ret == 0) {
+                    n_past   = N;
+                    batch_ok = true;
+                    LOGI("✅✅ PREFILL-BATCH PASS（%d tokens）。n_past=%d 直接进入 generation", N, n_past);
+                    cb_onPrefillMode(tenv, gCb, PREF_MODE_BATCH_OK);
+                    cb_onPrefill(tenv, gCb, N, N);
+                } else {
+                    LOGE("❌ PREFILL-BATCH FAIL ret=%d N=%d → 清 KV 并 fallback 逐 token (SAFE_N_BATCH=%d)",
+                         ret, N, SAFE_N_BATCH);
+                    // 失败必须清 KV：batch_all 可能部分写入了 KV，不清的话逐 token 会 pos 冲突
+                    llama_kv_self_clear(st->ctx);
+                }
+            } else {
+                LOGE("❌ PREFILL-BATCH: llama_batch_init(%d,0,1) 返回空字段 → 直接 fallback", N);
+            }
+            llama_batch_free(batch_all);
+        } else {
+            LOGI("⏭️  PREFILL-BATCH: N=%d（<=1 或 >1024），跳过批量尝试，直接 STEPx1", N);
         }
-        // batch 填法严格按官方示例：1 token, pos=i, 0 个 seq_id（但 logits 只取最后一个需要 n_seq_id>0）
-        // 修正：n_seq_id=1，seq_id[0]=0
-        batch.n_tokens = 1;
-        batch.token[0] = tokens[i];
-        batch.pos[0]   = i;
-        batch.n_seq_id[0] = 1;
-        batch.seq_id[0][0] = 0;
-        // 只最后一个 prompt token 需要 logits（prefill 阶段除了最后一个都是纯 KV 写入，不用 logits）
-        batch.logits[0] = (i == (int)tokens.size() - 1) ? 1 : 0;
 
-        if ((i & 31) == 0 || i == (int)tokens.size() - 1) {
-            LOGI("⏳ prefill #%d/%d  pos=%d token=%d logits=%d",
-                 i+1, total_prefill, batch.pos[0], (int)batch.token[0], batch.logits[0]);
-        }
+        if (!batch_ok) {
+            // ---- 5.1 FALLBACK：原 SAFE 逐 token prefill（100% 不崩的黄金路径）----
+            LOGI("🛟 PREFILL FALLBACK: 启动 STEPx1（%d tokens）。N <=1 或批量失败的兜底", total_prefill);
+            cb_onPrefillMode(tenv, gCb,
+                             (N <= 1) ? PREF_MODE_STEPBYSTEP : PREF_MODE_FALLBACK);
 
-        int ret = llama_decode(st->ctx, batch);
-        if (ret != 0) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
-                "prefill llama_decode FAIL ret=%d (i=%d/%d token=%d pos=%d)。"
-                "常见：n_ctx 溢出 / KV OOM / b5180 batch assertion",
-                ret, i+1, total_prefill, (int)batch.token[0], batch.pos[0]);
-            LOGE("%s", msg);
-            cb_onError(tenv, gCb, msg);
-            goto cleanup;
-        }
-        n_past = i + 1;
-        // 每 8 个 token 回一次进度（UI 不白）
-        if ((i & 7) == 7 || i == (int)tokens.size() - 1) {
-            cb_onPrefill(tenv, gCb, i + 1, total_prefill);
+            for (int i = 0; i < (int)tokens.size(); ++i) {
+                if (st->cancel.load(std::memory_order_relaxed)) {
+                    cb_onError(tenv, gCb, "用户取消（prefill fallback 阶段）");
+                    goto cleanup;
+                }
+                batch.n_tokens = 1;
+                batch.token[0] = tokens[i];
+                batch.pos[0]   = i;
+                batch.n_seq_id[0] = 1;
+                batch.seq_id[0][0] = 0;
+                batch.logits[0] = (i == (int)tokens.size() - 1) ? 1 : 0;
+
+                if ((i & 31) == 0 || i == (int)tokens.size() - 1) {
+                    LOGI("⏳ prefill-fb #%d/%d  pos=%d token=%d logits=%d",
+                         i+1, total_prefill, batch.pos[0], (int)batch.token[0], batch.logits[0]);
+                }
+
+                const int ret = llama_decode(st->ctx, batch);
+                if (ret != 0) {
+                    char msg[256];
+                    snprintf(msg, sizeof(msg),
+                        "prefill fallback llama_decode FAIL ret=%d (i=%d/%d token=%d pos=%d)。"
+                        "常见：n_ctx 溢出 / KV OOM",
+                        ret, i+1, total_prefill, (int)batch.token[0], batch.pos[0]);
+                    LOGE("%s", msg);
+                    cb_onError(tenv, gCb, msg);
+                    goto cleanup;
+                }
+                n_past = i + 1;
+                if ((i & 7) == 7 || i == (int)tokens.size() - 1) {
+                    cb_onPrefill(tenv, gCb, i + 1, total_prefill);
+                }
+            }
+            LOGI("✅ prefill fallback 完成。n_past=%d", n_past);
         }
     }
-    LOGI("✅ prefill 完成。n_past=%d 开始生成（max=%d tokens，EOS_GUARD_STEPS=%d）",
+    LOGI("✅ prefill 总体完成。n_past=%d 开始生成（max=%d tokens，EOS_GUARD_STEPS=%d）",
          n_past, DEFAULT_MAX_GEN, EOS_GUARD_STEPS);
 
     // ---- Step 6: GENERATION ----

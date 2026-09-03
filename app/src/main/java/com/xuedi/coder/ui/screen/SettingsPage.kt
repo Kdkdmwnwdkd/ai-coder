@@ -139,7 +139,10 @@ fun SettingsPage(
             libLoadError = libSt.second,
             currentCtx = eng.currentCtx(),
             lastLoadError = eng.lastLoadError(),
-            lastLoadedPath = app.modelManager.lastLoadedPath()
+            lastLoadedPath = app.modelManager.lastLoadedPath(),
+            lastThreads = eng.lastUsedThreads,
+            lastNCtx = eng.lastUsedNCtx,
+            prefMode = eng.lastPrefMode
         )
     }.getOrDefault(
         LoadDiagSnapshot(
@@ -147,7 +150,10 @@ fun SettingsPage(
             libLoadError = "UI层读取快照失败",
             currentCtx = 0L,
             lastLoadError = null,
-            lastLoadedPath = null
+            lastLoadedPath = null,
+            lastThreads = null,
+            lastNCtx = null,
+            prefMode = null
         )
     )
 
@@ -1061,7 +1067,16 @@ private data class LoadDiagSnapshot(
     val libLoadError: String?,
     val currentCtx: Long,
     val lastLoadError: String?,
-    val lastLoadedPath: String?
+    val lastLoadedPath: String?,
+    // v1.3.25-perf1: 记录最近一次成功 loadModel 使用的线程数 / nCtx，
+    // 方便测 4/6/8 线程对比时，诊断包里直接看到"这次到底用了多少线程"。
+    // null = 模型尚未成功加载过。
+    val lastThreads: Int?,
+    val lastNCtx: Int?,
+    // 🆕 v1.3.25-perf1: 最近一次推理回合的 prefill 模式。
+    // BATCH_OK = 批量提交成功；BATCH_FB = 批量失败回退逐 token；STEPx1 = 直接走逐 token。
+    // null = 尚未跑过推理。
+    val prefMode: String?
 )
 
 // ===================================================================
@@ -1345,6 +1360,8 @@ private suspend fun runDiagnosticImpl(
         else -> "0x${java.lang.Long.toHexString(engineSnapshot.currentCtx)}"
     }
     addLog("③ 引擎状态: $ctxStr  lastLoadErr=${engineSnapshot.lastLoadError?:"(无)"}")
+    // 🆕 v1.3.25-perf1: 运行参数透明化，测 4/6/8 线程 & batch prefill 时一眼看到"这次到底用了啥参数"
+    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}")
 
     // ---- 2. 模型存在性 ----
     if (selectedModel == null) {

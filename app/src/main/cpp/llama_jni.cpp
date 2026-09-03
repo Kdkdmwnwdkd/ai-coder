@@ -394,15 +394,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     // 🔴 v1.3.8：n_ctx 最终值用 ERROR 级打印，诊断包必抓到
     LOGE("cparams.n_ctx set to %d (safe_n_ctx=%d, real_avail=%d MB)",
          cparams.n_ctx, safe_n_ctx, real_avail_mb);
-    // 🔴 v1.3.25-fix12：n_batch=8 n_ubatch=1。
-    //   fix11 把 n_batch 改回 256 后第一次 llama_decode 就 SIGABRT——
-    //   证实魅族20 上 llama.cpp b5180 的 batch decode 有 bug（一次喂 >1 token 就炸）。
-    //   fix10 用 n_batch=1 能跑通 1024 tokens 不崩，这是硬证据。
-    //   n_batch=8 是折中：比 1 快 8x，又远小于 256 不会触发 batch 边界 bug。
-    //   n_ubatch=1 禁用 flash attention（flash attn 在 ARM64 b5180 上也可能有边界问题）。
-    cparams.n_batch      = 8;
+    // 🔴 v1.3.25-fix14：n_batch=1 n_ubatch=1。
+    //   fix12 用 n_batch=8 还是崩！用户确认 Llama 一发消息就闪退。
+    //   fix10 用 n_batch=1 完整跑通 1024 tokens 不崩——这是唯一的硬证据。
+    //   n_batch=8 仍然触发 llama.cpp b5180 的 batch decode assertion（SIGABRT）。
+    //   结论：魅族20 上 b5180 只能 n_batch=1，没有折中空间。
+    //   速度慢但能用 > 快但崩。配合手动 BOS 插入，应该既不崩也不乱码。
+    cparams.n_batch      = 1;
     cparams.n_ubatch     = 1;
-    LOGE("cparams.n_batch=8 n_ubatch=1 (v1.3.25-fix12: 折中 batch 大小，绕开 b5180 ARM64 batch decode SIGABRT)");
+    LOGE("cparams.n_batch=1 n_ubatch=1 (v1.3.25-fix14: n_batch=8 仍崩，回到 fix10 的 n_batch=1)");
     cparams.logits_all   = false;
     // 线程数回退到正常（v1.3.13 单线程也崩，排除线程因素；恢复多线程 prefill 更快）
     int32_t n_threads_use = std::max(1, (int)nThreads);
@@ -697,15 +697,12 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
 
     // -------- 4) 预填充 prompt（按 n_batch 切片） --------
     int32_t n_consumed = 0;
-    // 🔴 v1.3.25-fix11：恢复 llama_batch_get_one 正常 batch 切片。
-    //   n_batch 改回 256 后，prefill 每次喂 n_batch 个 token（llama_batch_get_one 自动处理），
-    //   KV cache 累积正确且 prefill 速度提升 10-20x。
-    //   v1.3.14 强制单 token 是为了绕开 SIGABRT，但 fix10 的 GGUF 解析修复已经消除了那个根因。
-    //   用 llama_batch_get_one 而非手动 one_batch.token[n] 是因为：
-    //   (a) 官方 API，自动处理 pos/seq_id/logits 的正确位置
-    //   (b) 自动截断最后一个不足 n_batch 的切片
-    //   (c) 不会有手动填数组时漏字段的风险
-    struct llama_batch batch = llama_batch_get_one(tokens.data(), n_prompt);
+    // 🔴 v1.3.25-fix14：彻底重写 prefill——不用 llama_batch_get_one！
+    //   旧代码 llama_batch_get_one(tokens.data(), n_prompt) 创建 n_prompt 大小的 batch，
+    //   然后 batch.token[i] = tokens[n_consumed + i] 会覆盖 tokens 数组开头（因为 token 指针
+    //   直接指向 tokens.data()）。虽然不影响 prefill 结果，但在 b5180 上可能触发内部 assertion。
+    //   新方案：用 llama_batch_init(n_batch, 0) 创建最小 batch，只填 1 个 token，安全干净。
+    struct llama_batch batch = llama_batch_init(state->n_batch, 0, 1);
     {
         const int64_t t_pre0 = now_ms();
         int batch_idx = 0;
@@ -718,19 +715,18 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
                 crash_guard_pop();
                 return;
             }
-            // 🔴 fix11 恢复正确的 pos / logits 标记逻辑
-            //   llama_batch_get_one 会自动填 token[] 和 pos[]（从 0 开始递增），但我们需要：
-            //   (1) pos 从 n_consumed 开始（因为前面已经喂了 n_consumed 个 token）
-            //   (2) 最后一个 token 的 logits=1（让 ctx 暴露 logits 给 sampler），其他 0
+            // n_batch=1 时每次只喂 1 个 token
             batch.n_tokens = std::min<int32_t>(state->n_batch, n_prompt - n_consumed);
             for (int i = 0; i < batch.n_tokens; i++) {
-                batch.token[i]   = tokens[n_consumed + i];
-                batch.pos[i]     = n_consumed + i;
-                batch.n_seq_id[i] = 0;
+                batch.token[i]    = tokens[n_consumed + i];
+                batch.pos[i]      = n_consumed + i;
+                batch.n_seq_id[i] = 1;
                 batch.seq_id[i][0] = 0;
                 bool is_last_prefill_token = (n_consumed + i == n_prompt - 1);
-                batch.logits[i]  = is_last_prefill_token ? 1 : 0;
+                batch.logits[i]   = is_last_prefill_token ? 1 : 0;
             }
+            LOGI("nativeChat: ⏳ prefill #%d: n_tokens=%d, token[%d]=%d, consumed=%d/%d",
+                 batch_idx, batch.n_tokens, 0, batch.token[0], n_consumed, n_prompt);
             int decode_rc = llama_decode(state->ctx, batch);
             int64_t tb1 = now_ms();
             if (decode_rc != 0) {
@@ -743,8 +739,6 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
                 crash_guard_pop();
                 return;
             }
-            LOGI("nativeChat: ⏳ prefill #%d: batch.n_tokens=%d, consumed=%d/%d, cost=%" PRId64 "ms (total prefill so far %" PRId64 "ms)",
-                 batch_idx, batch.n_tokens, n_consumed + batch.n_tokens, n_prompt, tb1 - t_pre0, tb1 - t_pre0);
             CRASH_CHECK(env, callback);
             n_consumed += batch.n_tokens;
             batch_idx++;
@@ -816,7 +810,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         last_id = id;
         batch.token[0]   = id;
         batch.pos[0]     = n_consumed;  // 生成阶段的 pos = 已消费 token 数（下一个位置）
-        batch.n_seq_id[0]      = 0;
+        batch.n_seq_id[0]      = 1;
         batch.seq_id[0][0]     = 0;
         batch.logits[0]        = 1;    // generate 每个 token 都要 logits 供下一轮 sample
         batch.n_tokens = 1;

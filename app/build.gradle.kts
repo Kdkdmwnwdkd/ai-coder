@@ -24,8 +24,16 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 45
-        versionName = "1.3.25-fix13"
+        versionCode = 46
+        versionName = "1.3.25-fix14"
+        // v1.3.25-fix14: 【Llama 闪退根治！回到 n_batch=1 + 重写 prefill】
+        //   · 用户确认：Llama 一发消息就闪退！n_batch=8 没用，n_batch=256 也没用。
+        //   · fix10 用 n_batch=1 完整跑通不崩——这是唯一的安全值。
+        //   · 彻底重写 prefill：不用 llama_batch_get_one（它会创建 n_prompt 大小的 batch，
+        //     然后缩小到 n_batch，在 b5180 上触发 assertion SIGABRT）。
+        //     改用 llama_batch_init(n_batch, 0, 1) 创建最小 batch，干净安全。
+        //   · 保留 fix12 的手动 BOS 插入（根治乱码）。
+        //   · 保留 fix13 的复制完整诊断包按钮 + Qwen 引擎警告。
         // v1.3.25-fix13: 【救命！用户一直在用 Qwen 引擎！】
         //   · fix12 的 Llama 引擎改动根本没生效——用户手动打开了 Qwen 极简推理器开关，
         //     自写推理器还没实现 Q4_K_M dequant，type=12/14 tensors 全走 F16 fallback，

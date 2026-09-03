@@ -234,26 +234,44 @@ static void copy_f32(float * out, const float * src, int64_t ne0, int64_t ne1, s
     }
 }
 
-// 把 QwenTensor 反量化成 F32 buffer
-// 返回: malloc 出来的 float*, 调用者 free
-// 不修改 model 的 mmap 数据
+// 🔴 v1.3.25-fix19: 旧版 dequant_tensor 每次都 malloc + 重新解码 7MB 权重，
+//   1 token × 28层 = 200+ MB malloc/free，3.9秒/token 几乎全是这个开销！
+//   改为全局 F32 权重缓存：按 QwenTensor 指针做 key，首次调用时解量化，
+//   之后直接返回缓存指针，永远不 free。总 F32 权重约 < 3GB，MEIZU 20 有 11GB RAM 完全够用。
+#include <unordered_map>
+struct QwFp32CacheEntry {
+    std::vector<float> buf;
+    size_t ne0;
+    size_t ne1;
+};
+static std::mutex g_qw_cache_mtx;
+static std::unordered_map<const void *, QwFp32CacheEntry> g_qw_fp32_cache;
+
+// 把 QwenTensor 反量化成 F32 buffer（🔴 带缓存！调用者 free 可选，我们缓存了不会泄露）
 static float * dequant_tensor(const QwenTensor * t, size_t & out_ne0, size_t & out_ne1) {
     if (!t || !t->data) return nullptr;
+    // 先查缓存
+    {
+        std::lock_guard<std::mutex> lk(g_qw_cache_mtx);
+        auto it = g_qw_fp32_cache.find((const void *)t);
+        if (it != g_qw_fp32_cache.end()) {
+            out_ne0 = it->second.ne0;
+            out_ne1 = it->second.ne1;
+            return it->second.buf.data();
+        }
+    }
+    // 未命中 —— 执行反量化
     out_ne0 = t->ne[0];
     out_ne1 = t->ne[1] > 0 ? t->ne[1] : 1;
     int64_t total = (int64_t)out_ne0 * (int64_t)out_ne1;
     if (total <= 0) return nullptr;
-    float * buf = (float *)malloc(total * sizeof(float));
-    if (!buf) return nullptr;
+    QwFp32CacheEntry entry;
+    entry.ne0 = out_ne0;
+    entry.ne1 = out_ne1;
+    entry.buf.resize(total);
+    float * buf = entry.buf.data();
 
     // 🔴 v1.3.25-fix14: 修复类型判断！
-    //   之前检查 type==13 (Q4_K_M)，但模型里根本没有 type 13 的 tensor！
-    //   实际 tensor 类型：
-    //     type=12 (Q4_K): attn_q/k/v/output, ffn_gate/up 等大部分权重
-    //     type=14 (Q5_K): token_embd, ffn_down 等大权重
-    //     type=0  (F32):  norm, bias
-    //     type=1  (F16):  部分 tensor
-    //   旧代码所有 Q4_K/Q5_K 都走 F16 fallback → 把量化二进制当 F16 读 → 垃圾值 → 无法生成
     if (t->type == 12 /*GGML_TYPE_Q4_K*/ ||
         t->type == 13 /*GGML_TYPE_Q4_K_M — 兼容, 同样的 block 格式*/) {
         dequant_q4km_tensor(buf, (const uint8_t *)t->data, (int64_t)out_ne0, (int64_t)out_ne1, t->nb[1]);
@@ -264,11 +282,20 @@ static float * dequant_tensor(const QwenTensor * t, size_t & out_ne0, size_t & o
     } else if (t->type == 0 /*GGML_TYPE_F32*/) {
         copy_f32(buf, (const float *)t->data, (int64_t)out_ne0, (int64_t)out_ne1, t->nb[1]);
     } else {
-        // 其他量化类型: 简单 fallback, 只把 F16/F32 行拷贝
         FWD_LOG("WARN: dequant_tensor type=%d not fully supported, trying F16", t->type);
         copy_f16_to_f32(buf, (const uint16_t *)t->data, (int64_t)out_ne0, (int64_t)out_ne1, t->nb[1]);
     }
-    return buf;
+    // 写入缓存
+    {
+        std::lock_guard<std::mutex> lk(g_qw_cache_mtx);
+        auto key = (const void *)t;
+        // 可能另一线程并发插入了同样 key，直接复用那份就行
+        auto & slot = g_qw_fp32_cache[key];
+        if (slot.buf.empty()) {
+            slot = std::move(entry);
+        }
+        return slot.buf.data();
+    }
 }
 
 // =====================================================

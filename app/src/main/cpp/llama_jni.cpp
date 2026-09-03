@@ -404,8 +404,10 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     cparams.n_ubatch     = 1;
     LOGE("cparams.n_batch=1 n_ubatch=1 (v1.3.25-fix14: n_batch=8 仍崩，回到 fix10 的 n_batch=1)");
     cparams.logits_all   = false;
-    // 线程数回退到正常（v1.3.13 单线程也崩，排除线程因素；恢复多线程 prefill 更快）
-    int32_t n_threads_use = std::max(1, (int)nThreads);
+    // 🔴 v1.3.25-fix19: 魅族20 SIGABRT 根因未知 —— 强制单线程先彻底排除线程 race。
+    //   之前 n_threads=4 也崩，但 b5180 llama_decode 在 arm64 vulkan/pipeline 内部
+    //   可能有跨线程 assertion。改成 1 线程彻底安全，速度慢 3-4x 但至少能跑。
+    int32_t n_threads_use = 1;  // std::max(1, (int)nThreads);
     cparams.n_threads       = n_threads_use;
     cparams.n_threads_batch = n_threads_use;
     state->ctx = llama_init_from_model(state->model, cparams);

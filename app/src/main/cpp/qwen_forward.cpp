@@ -644,7 +644,8 @@ static void transformer_layer(
 
     if (!Wq || !Wk || !Wv || !Wo || !Wgn || !Wun || !Wdn) {
         FWD_LOG("ERROR: dequant failed layer %d", layer_idx);
-        free(Wq); free(Wk); free(Wv); free(Wo); free(Wgn); free(Wun); free(Wdn);
+        // 🔴 v1.3.25-fix21: 现在 dequant_tensor 返回全局复用 scratch buffer，绝对不要 free！
+        //   旧代码 free() 会直接 abort 非堆指针 → 0.01 秒闪退！
         return;
     }
 
@@ -688,7 +689,7 @@ static void transformer_layer(
     float * Wfn = dequant_tensor(w_ffn_norm, q_ne0, q_ne1);
     if (Wfn) {
         rms_norm(norm_x2.data(), x, Wfn, n_embd, c.rms_norm_eps);
-        free(Wfn);
+        // 🔴 v1.3.25-fix21: 不要 free scratch buffer
     } else {
         // fallback: F16
         rms_norm(norm_x2.data(), x, (const float *)w_ffn_norm->data, n_embd, c.rms_norm_eps);
@@ -698,10 +699,7 @@ static void transformer_layer(
     swiglu(ffn_out.data(), norm_x2.data(), Wgn, Wun, Wdn, n_embd, n_ff);
 
     for (int i = 0; i < n_embd; ++i) x[i] += ffn_out[i];
-
-    // --- 释放 ---
-    free(Wq); free(Wk); free(Wv); free(Wo);
-    free(Wgn); free(Wun); free(Wdn);
+    // 🔴 v1.3.25-fix21: 不要 free scratch buffer (返回的是内部 vector 数据，不是 malloc)
 }
 
 // =====================================================
@@ -748,7 +746,7 @@ bool fwd_forward_step(QwenSession * sess, QwenModel * model,
     float * Wfn = dequant_tensor(w_out_norm, q_ne0, q_ne1);
     if (Wfn) {
         rms_norm(final_norm.data(), x, Wfn, c.n_embd, c.rms_norm_eps);
-        free(Wfn);
+        // 🔴 v1.3.25-fix21: 不要 free scratch buffer
     } else {
         rms_norm(final_norm.data(), x, (const float *)w_out_norm->data, c.n_embd, c.rms_norm_eps);
     }

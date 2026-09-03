@@ -24,8 +24,16 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 44
-        versionName = "1.3.25-fix12"
+        versionCode = 45
+        versionName = "1.3.25-fix13"
+        // v1.3.25-fix13: 【救命！用户一直在用 Qwen 引擎！】
+        //   · fix12 的 Llama 引擎改动根本没生效——用户手动打开了 Qwen 极简推理器开关，
+        //     自写推理器还没实现 Q4_K_M dequant，type=12/14 tensors 全走 F16 fallback，
+        //     首 token 60s 超时，所以 "还是和上一次一样没变化"。
+        //   · 诊断卡加橙色警告条：如果 useQwenEngine=true，醒目提示关掉换 Llama。
+        //   · 诊断卡加 "📋 复制完整诊断包" 按钮（一键复制完整 content 到剪贴板，
+        //     不用再分享出去再复制，省 N 多时间）。
+        //   · 重构：把完整诊断包生成逻辑抽成 buildDiagReport() lambda，分享/复制复用。
         // v1.3.25-fix12: 【双管齐下】fix11 暴露的两个硬问题同时修
         //   · BOS 缺失 = 乱码根因！add_spec=1 时 tokenizer 因 prompt 开头已是 <|im_start|>(special)
         //     而跳过 BOS(151643)，导致 token[0]=151644≠bos_id。模型没 BOS 就困惑发散成乱码。

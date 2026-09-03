@@ -434,10 +434,63 @@ fun SettingsPage(
         item(key = "diag-group") {
             SectionHeader(title = "🔍 推理诊断（闪退 / 没输出时点这里）")
         }
+        // 🔴 v1.3.25-fix13: 把完整诊断包生成逻辑抽成 lambda，分享和复制都复用
+        val buildDiagReport: () -> String = {
+            val ctx = App.instance
+            val app = App.instance
+            val header = buildString {
+                appendLine("AI编程助手诊断包 — v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
+                appendLine("生成时间：${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.CHINA).format(java.util.Date())}")
+                appendLine("设备：${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (${android.os.Build.DEVICE})")
+                appendLine("ABI：${android.os.Build.SUPPORTED_ABIS.joinToString("/")}")
+                appendLine("总内存：${runCatching { val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager; val mi = android.app.ActivityManager.MemoryInfo().also { am?.getMemoryInfo(it) }; "${mi.totalMem / 1024 / 1024}MB (avail=${mi.availMem / 1024 / 1024}MB, lowMemory=${mi.lowMemory})" }.getOrDefault("n/a")}")
+                appendLine("CPU_ABI2：${android.os.Build.CPU_ABI2}（arm64-v8a 必为空）")
+                appendLine()
+                appendLine("═══════════════════════════════════════════")
+                appendLine("当前激活引擎：${if (QwenInferEngine.useQwenEngine) "QwenInferEngine(极简自写beta)" else "LlamaJniEngine(b5180)"}；模拟模式=${LlamaJniEngine.forceMockMode}")
+                appendLine("当前模型：${app.modelManager.lastLoadedPath() ?: "<未加载>"}")
+                appendLine("—— Llama 引擎 ——")
+                val llamaSt = LlamaJniEngine.libStatus()
+                appendLine("  libLoaded=${llamaSt.first}  libErr=${llamaSt.second ?: "无"}")
+                val llama = app.llamaEngineRef()
+                appendLine("  ctx=0x${llama.currentCtx().toString(16)}  lastLoadErr=${llama.lastLoadError() ?: "<无>"}")
+                appendLine("—— Qwen 引擎（v1.3.24 beta）——")
+                val qwenSt = QwenInferEngine.libStatus()
+                appendLine("  libLoaded=${qwenSt.first}  libErr=${qwenSt.second ?: "无"}")
+                val qwen = app.qwenEngineRef()
+                appendLine("  modelLoaded=${qwen.isModelLoaded()}  lastLoadErr=${qwen.lastLoadError() ?: "<无>"}")
+                appendLine("═══════════════════════════════════════════")
+                appendLine()
+            }
+            val fullLogcat = lastGrabLogcatFull.joinToString("\n")
+            val diagBox = diagLines.joinToString("\n")
+            buildString {
+                append(header)
+                appendLine("==== 诊断框（页面黑底日志框）内容 ====")
+                appendLine(diagBox)
+                appendLine()
+                if (fullLogcat.isNotBlank()) {
+                    appendLine("==== 抓设备日志 logcat -d 全部（${lastGrabLogcatFull.size} 行，含 LlamaJni/qwen-core） ====")
+                    appendLine(fullLogcat)
+                } else {
+                    appendLine("==== 抓设备日志 logcat -d （未抓，可在诊断卡先点「📥 抓设备日志」） ====")
+                }
+                appendLine()
+                appendLine("==== crash_log.txt ====")
+                runCatching {
+                    val dir: File? = ctx.getExternalFilesDir(null)
+                    val crashF = File(dir, "crash_log.txt")
+                    if (crashF.exists()) crashF.readText() else "（不存在 / 本次还没崩过）"
+                }.onSuccess { append(it) }
+                    .onFailure { append("读取失败：${it.message}") }
+            }
+        }
+
         item(key = "diag-card") {
             DiagnosticCard(
                 lines = diagLines,
                 running = diagRunning,
+                useQwenEngine = useQwenSwitch,  // 🔴 fix13: 传引擎状态给警告
                 onStart = {
                     diagLines.clear()
                     diagRunning = true
@@ -496,53 +549,7 @@ fun SettingsPage(
                 },
                 onShareAll = {
                     val ctx = App.instance
-                    val app = App.instance
-                    val header = buildString {
-                        appendLine("AI编程助手诊断包 — v${BuildConfig.VERSION_NAME} (code ${BuildConfig.VERSION_CODE})")
-                        appendLine("生成时间：${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.CHINA).format(java.util.Date())}")
-                        appendLine("设备：${android.os.Build.MANUFACTURER} ${android.os.Build.MODEL} (${android.os.Build.DEVICE})")
-                        appendLine("ABI：${android.os.Build.SUPPORTED_ABIS.joinToString("/")}")
-                        appendLine("总内存：${runCatching { val am = ctx.getSystemService(android.content.Context.ACTIVITY_SERVICE) as? android.app.ActivityManager; val mi = android.app.ActivityManager.MemoryInfo().also { am?.getMemoryInfo(it) }; "${mi.totalMem / 1024 / 1024}MB (avail=${mi.availMem / 1024 / 1024}MB, lowMemory=${mi.lowMemory})" }.getOrDefault("n/a")}")
-                        appendLine("CPU_ABI2：${android.os.Build.CPU_ABI2}（arm64-v8a 必为空）")
-                        appendLine()
-                        appendLine("═══════════════════════════════════════════")
-                        appendLine("当前激活引擎：${if (QwenInferEngine.useQwenEngine) "QwenInferEngine(极简自写beta)" else "LlamaJniEngine(b5180)"}；模拟模式=${LlamaJniEngine.forceMockMode}")
-                        appendLine("当前模型：${app.modelManager.lastLoadedPath() ?: "<未加载>"}")
-                        appendLine("—— Llama 引擎 ——")
-                        val llamaSt = LlamaJniEngine.libStatus()
-                        appendLine("  libLoaded=${llamaSt.first}  libErr=${llamaSt.second ?: "无"}")
-                        val llama = app.llamaEngineRef()
-                        appendLine("  ctx=0x${llama.currentCtx().toString(16)}  lastLoadErr=${llama.lastLoadError() ?: "<无>"}")
-                        appendLine("—— Qwen 引擎（v1.3.24 beta）——")
-                        val qwenSt = QwenInferEngine.libStatus()
-                        appendLine("  libLoaded=${qwenSt.first}  libErr=${qwenSt.second ?: "无"}")
-                        val qwen = app.qwenEngineRef()
-                        appendLine("  modelLoaded=${qwen.isModelLoaded()}  lastLoadErr=${qwen.lastLoadError() ?: "<无>"}")
-                        appendLine("═══════════════════════════════════════════")
-                        appendLine()
-                    }
-                    val fullLogcat = lastGrabLogcatFull.joinToString("\n")
-                    val diagBox = diagLines.joinToString("\n")
-                    val content = buildString {
-                        append(header)
-                        appendLine("==== 诊断框（页面黑底日志框）内容 ====")
-                        appendLine(diagBox)
-                        appendLine()
-                        if (fullLogcat.isNotBlank()) {
-                            appendLine("==== 抓设备日志 logcat -d 全部（${lastGrabLogcatFull.size} 行，含 LlamaJni/qwen-core） ====")
-                            appendLine(fullLogcat)
-                        } else {
-                            appendLine("==== 抓设备日志 logcat -d （未抓，可在诊断卡先点「📥 抓设备日志」） ====")
-                        }
-                        appendLine()
-                        appendLine("==== crash_log.txt（如果有崩溃的话，App.instance.getExternalFilesDir(null)/crash_log.txt） ====")
-                        runCatching {
-                            val dir: File? = ctx.getExternalFilesDir(null)
-                            val crashF = File(dir, "crash_log.txt")
-                            if (crashF.exists()) crashF.readText() else "（不存在 / 本次还没崩过）"
-                        }.onSuccess { append(it) }
-                            .onFailure { append("读取失败：${it.message}") }
-                    }
+                    val content = buildDiagReport()
                     runCatching {
                         val dir: File? = ctx.externalCacheDir
                         val outFile = File(dir, "ai-coder-diag-${System.currentTimeMillis()}.txt")
@@ -559,6 +566,18 @@ fun SettingsPage(
                         ctx.startActivity(Intent.createChooser(intent, "分享诊断包给…").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
                     }.onFailure { t ->
                         Toast.makeText(ctx, "分享失败：${t.message ?: t}", Toast.LENGTH_LONG).show()
+                    }
+                },
+                onCopyAll = {
+                    val ctx = App.instance
+                    val content = buildDiagReport()
+                    runCatching {
+                        val cm = ctx.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
+                                as? android.content.ClipboardManager
+                        cm?.setPrimaryClip(android.content.ClipData.newPlainText("ai-coder-diagnostic", content))
+                        Toast.makeText(ctx, "✅ 完整诊断包已复制（${content.length}字）", Toast.LENGTH_SHORT).show()
+                    }.onFailure { t ->
+                        Toast.makeText(ctx, "复制失败：${t.message}", Toast.LENGTH_LONG).show()
                     }
                 }
             )
@@ -1205,10 +1224,12 @@ private fun RowScope.ThemeModeChip(
 private fun DiagnosticCard(
     lines: List<String>,
     running: Boolean,
+    useQwenEngine: Boolean,      // 🔴 v1.3.25-fix13: 当前是否用 Qwen 引擎（用于警告）
     onStart: () -> Unit,
     onCancel: () -> Unit,
     onGrabLogcat: () -> Unit,    // 📥 手机端抓 LlamaJni 日志
-    onShareAll: () -> Unit      // 📤 一键把诊断日志 + 探针日志 写文件唤起分享菜单
+    onShareAll: () -> Unit,      // 📤 一键把诊断日志 + 探针日志 写文件唤起分享菜单
+    onCopyAll: () -> Unit        // 📋 一键复制完整诊断包到剪贴板
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
@@ -1265,14 +1286,39 @@ private fun DiagnosticCard(
                 }
             }
 
+            // —— 🆕 v1.3.25-fix13: Qwen 引擎警告（自写推理器还没实现 Q4_K_M dequant，会一直超时）——
+            if (useQwenEngine) {
+                Surface(
+                    color = Color(0xFFFFF3E0),
+                    shape = RoundedCornerShape(10.dp),
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 10.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("⚠️", fontSize = 16.sp)
+                        Spacer(Modifier.width(8.dp))
+                        Text(
+                            "当前使用 Qwen 极简推理器（beta），它还没实现 Q4_K_M 量化的 dequant，\n" +
+                                "会一直首 token 超时。请回设置关掉它，用 Llama 引擎。",
+                            fontSize = 11.5.sp,
+                            color = Color(0xFFE65100),
+                            lineHeight = 14.sp
+                        )
+                    }
+                }
+            }
+
             // —— 🆕 v1.3.6 手机端专用按钮（纯手机就能抓日志/分享，不需要电脑/adb/root）——
             Row(
                 Modifier
                     .fillMaxWidth()
-                    .padding(top = 10.dp),
+                    .padding(top = if (useQwenEngine) 8.dp else 10.dp),
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                val ctx2 = androidx.compose.ui.platform.LocalContext.current
                 FilledTonalButton(
                     onClick = onGrabLogcat,
                     shape = RoundedCornerShape(10.dp),
@@ -1292,22 +1338,12 @@ private fun DiagnosticCard(
                 }
                 Spacer(Modifier.weight(1f))
                 FilledTonalButton(
-                    onClick = {
-                        val txt = lines.joinToString("\n")
-                        if (txt.isBlank()) {
-                            Toast.makeText(ctx2, "日志框为空，先点「开始诊断」或「抓LlamaJni日志」", Toast.LENGTH_SHORT).show()
-                            return@FilledTonalButton
-                        }
-                        val cm = ctx2.getSystemService(android.content.Context.CLIPBOARD_SERVICE)
-                                as? android.content.ClipboardManager
-                        cm?.setPrimaryClip(android.content.ClipData.newPlainText("ai-coder-diagnostic", txt))
-                        Toast.makeText(ctx2, "已复制到剪贴板（约${txt.length}字）", Toast.LENGTH_SHORT).show()
-                    },
+                    onClick = onCopyAll,
                     shape = RoundedCornerShape(10.dp),
                     modifier = Modifier.height(36.dp)
                 ) {
                     Icon(Icons.Outlined.ContentCopy, null, Modifier.padding(end = 4.dp))
-                    Text("复制全部", fontSize = 11.5.sp)
+                    Text("📋 复制完整诊断包", fontSize = 11.5.sp)
                 }
             }
 

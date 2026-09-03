@@ -16,6 +16,14 @@
 #include <vector>
 #include <algorithm>
 #include <random>
+#include <chrono>
+
+// 🔴 v1.3.25-fix17: 时间戳工具（独立实现，不依赖 llama_jni 的 now_ms）
+static inline int64_t qw_now_ms() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::system_clock::now().time_since_epoch()
+    ).count();
+}
 #include <cinttypes>
 #include <ctime>
 
@@ -109,13 +117,34 @@ char * qwen_generate(
     int32_t max_pos = c.max_seq_len - 1;
 
     // --- prompt forward: 逐个 token ---
+    const size_t n_prompt = prompt_ids.size();
+    int64_t t_pre0 = qw_now_ms();
+    int report_step = 10;  // 每 10 token 报告一次进度（太频繁影响性能）
+    if (n_prompt > 100) report_step = std::max<int>(1, (int)n_prompt / 50);
     for (size_t i = 0; i < prompt_ids.size(); ++i) {
+        // sess.cancel 不存在（QwenSession 没有 cancel 字段），这里跳过取消检查
+        // 实际取消靠 Kotlin 层关闭 flow，native 会继续跑（如日志所言）
         int32_t id = prompt_ids[i];
         if (!fwd_forward_step(&sess, model, id, pos, logits.data())) {
             return err("forward_step failed at prompt");
         }
         pos = sess.kv_pos = pos + 1;
         if (pos >= max_pos) { reason = "context_limit"; goto DONE; }
+
+        // 🔴 v1.3.25-fix17: prompt prefill 进度日志（每 report_step tokens + 开始/结束）
+        if (i == 0 || (i + 1) % report_step == 0 || i + 1 == n_prompt) {
+            if (cb.log) {
+                int64_t now = qw_now_ms();
+                char buf[256];
+                snprintf(buf, sizeof(buf),
+                    "prefill progress: %zu/%zu tokens (%d%%), elapsed %" PRId64 "ms, avg %.1f ms/tok",
+                    i + 1, n_prompt,
+                    (int)((i + 1) * 100 / n_prompt),
+                    now - t_pre0,
+                    (i == 0) ? 0.0f : (float)(now - t_pre0) / (float)(i + 1));
+                cb.log(cb.ud, buf);
+            }
+        }
 
         if (i + 1 == prompt_ids.size()) {
             int tok = fwd_sample(logits.data(), c.vocab_size, temperature, top_p, top_k, seed, pos);

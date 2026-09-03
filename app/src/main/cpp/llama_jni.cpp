@@ -710,7 +710,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     //   然后 batch.token[i] = tokens[n_consumed + i] 会覆盖 tokens 数组开头（因为 token 指针
     //   直接指向 tokens.data()）。虽然不影响 prefill 结果，但在 b5180 上可能触发内部 assertion。
     //   新方案：用 llama_batch_init(n_batch, 0) 创建最小 batch，只填 1 个 token，安全干净。
-    struct llama_batch batch = llama_batch_init(state->n_batch, 0, 1);
+    // 🔴 v1.3.25-fix17: 彻底不信任 llama_n_batch 覆盖回来的值！
+    //   我在 nativeInit 里设 cparams.n_batch=1，但 llama_n_batch(ctx) 读回 64——
+    //   这导致 llama_batch_init(64,0,1) 分配 64 大小的数组，然后 prefill 循环里
+    //   batch.n_tokens=64 一次喂 64 token，触发 b5180 内部的 assertion SIGABRT！
+    //   修法：无论 state->n_batch 是多少，强制 BATCH_SIZE=1，完全绕开 batch decode 代码路径。
+    //   生成阶段同样 batch.n_tokens=1，确保每次 llama_decode 只处理 1 个 token。
+    constexpr int32_t SAFE_BATCH = 1;
+    struct llama_batch batch = llama_batch_init(SAFE_BATCH, 0, 1);
+    (void)state->n_batch;  // 屏蔽警告
     {
         const int64_t t_pre0 = now_ms();
         int batch_idx = 0;
@@ -723,8 +731,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
                 crash_guard_pop();
                 return;
             }
-            // n_batch=1 时每次只喂 1 个 token
-            batch.n_tokens = std::min<int32_t>(state->n_batch, n_prompt - n_consumed);
+            // SAFE_BATCH=1 → 每次只喂 1 个 token，完全绕开 batch decode 代码路径
+            batch.n_tokens = std::min<int32_t>(SAFE_BATCH, n_prompt - n_consumed);
             for (int i = 0; i < batch.n_tokens; i++) {
                 batch.token[i]    = tokens[n_consumed + i];
                 batch.pos[i]      = n_consumed + i;
@@ -733,8 +741,8 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
                 bool is_last_prefill_token = (n_consumed + i == n_prompt - 1);
                 batch.logits[i]   = is_last_prefill_token ? 1 : 0;
             }
-            LOGI("nativeChat: ⏳ prefill #%d: n_tokens=%d, token[%d]=%d, consumed=%d/%d",
-                 batch_idx, batch.n_tokens, 0, batch.token[0], n_consumed, n_prompt);
+            LOGI("nativeChat: ⏳ prefill #%d: SAFE_BATCH=%d, n_tokens=%d, token[%d]=%d (pos=%d), consumed=%d/%d",
+                 batch_idx, SAFE_BATCH, batch.n_tokens, 0, batch.token[0], batch.pos[0], n_consumed, n_prompt);
             int decode_rc = llama_decode(state->ctx, batch);
             int64_t tb1 = now_ms();
             if (decode_rc != 0) {

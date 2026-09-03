@@ -24,9 +24,18 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 48
-        versionName = "1.3.25-fix16"
-        // v1.3.25-fix16: 【KV cache 清理 = 第二次消息不显示的根因！】
+        versionCode = 49
+        versionName = "1.3.25-fix17"
+        // v1.3.25-fix17: 【Llama SIGABRT 根因！】
+        //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
+        //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！
+        //   根因：nativeInit 设 cparams.n_batch=1，但 llama_n_batch(ctx) 返回 64（被 llama.cpp 内部覆盖）。
+        //     然后 llama_batch_init(state->n_batch=64) 分配了 64 元素的 token 数组，
+        //     prefill 循环里 batch.n_tokens = std::min(64, 247) = 64 → 一次喂 64 token！
+        //     → 触发 b5180 内部 assertion → SIGABRT！
+        //   修法：constexpr SAFE_BATCH = 1，完全不用 state->n_batch，
+        //         llama_batch_init(1,0,1) + batch.n_tokens = 1 永远安全。
+        //   同时给 Qwen 引擎 prefill 循环加进度日志（可诊断是否真的在跑）。
         //   · 用户发现：不管哪个模式，第一次发消息成功，第二次就不显示了！
         //   · 根因：nativeChat 开始时没清 KV cache！第一次对话后 KV cache 残留旧 token，
         //     第二次 prefill 从 pos=0 覆盖，但旧 KV 条目还在 → 模型上下文混乱 → 吐不出字。

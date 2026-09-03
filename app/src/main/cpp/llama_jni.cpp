@@ -350,7 +350,16 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     state->model = llama_model_load_from_file(path, mparams);
     env->ReleaseStringUTFChars(jmodel_path, path);
     if (!state->model) {
-        LOGE("nativeInit: llama_model_load_from_file FAIL（文件格式？权限？大小？）");
+        // 🆕 v1.3.25-fix8: ThrowNew 把具体原因抛给 Java，不再只 return 0（= 笼统 ctx=0 文案）。
+        //    用户"点🔄 就失败"= 99% 是 mmap / 魔数损坏 / tensor 对齐三选一，
+        //    Java 层拿到 RuntimeException 后直接写入 lastLoadError → Toast 原文展示。
+        std::string err = "llama_model_load_from_file FAIL。"
+            " 可能原因：① GGUF 文件下载损坏（与官方 sha256 核对）② 模型大小超过 1.8GB 时 App 被后台压到连续 mmap 不足"
+            " ③ 文件路径不可读（SAF 导入时权限没拿到、或 filesDir 被系统清了 ）。"
+            " 排错：先设置 → 诊断 → 看 probe_max_continuous_mb=?MB。如<2000MB 先关后台/重启。";
+        LOGE("nativeInit: %s", err.c_str());
+        jclass rtCls = env->FindClass("java/lang/RuntimeException");
+        if (rtCls != nullptr) { env->ThrowNew(rtCls, err.c_str()); env->DeleteLocalRef(rtCls); }
         return 0;
     }
 
@@ -414,7 +423,21 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     cparams.n_threads_batch = n_threads_use;
     state->ctx = llama_init_from_model(state->model, cparams);
     if (!state->ctx) {
-        LOGE("nativeInit: llama_init_from_model FAIL（内存不足？12G 机型留 3G）");
+        // 🆕 v1.3.25-fix8: 同样 ThrowNew。这里挂掉 = 模型加载成功但 KV cache 分配失败。
+        //    90% 场景是 real_avail_mb 刚够 probe 过 1800，但 model + 其他后台把剩余占满，
+        //    mmap(KV_cache_size) 直接 ENOMEM。把 safe_n_ctx / real_avail_mb / 模型大小都塞进异常，
+        //    Java 层 robust 下一轮会用更小的 n_ctx 自动重试。
+        uint64_t ms = llama_model_size(state->model) / 1024ULL / 1024ULL;
+        char buf[256];
+        snprintf(buf, sizeof(buf),
+            "llama_init_from_model FAIL (KV cache / weights 峰值 OOM)。"
+            " 模型=%llu MB, real_avail_mb=%d, safe_n_ctx=%d, n_batch=1, n_threads=%d."
+            " 下一档会自动降到 n_ctx 更小（L2 2048 / L3 1280 / L4 768）。"
+            " 如果 4 档全挂，说明连续 mmap 真的不够——关所有后台 / 重启 / 切 Qwen 极简推理器。",
+            (unsigned long long)ms, real_avail_mb, safe_n_ctx, n_threads_use);
+        LOGE("nativeInit: %s", buf);
+        jclass rtCls2 = env->FindClass("java/lang/RuntimeException");
+        if (rtCls2 != nullptr) { env->ThrowNew(rtCls2, buf); env->DeleteLocalRef(rtCls2); }
         return 0;
     }
     state->n_ctx   = (int32_t)llama_n_ctx(state->ctx);

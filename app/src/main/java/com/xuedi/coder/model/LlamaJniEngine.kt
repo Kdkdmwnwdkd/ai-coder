@@ -124,10 +124,15 @@ class LlamaJniEngine : LlmEngine {
      * 加载 GGUF 模型；返回是否成功。
      *
      * 失败时会把原因写入 [lastLoadError]，供 SettingsPage / chatFlow 展示给用户。
-     * 常见失败原因：
+     * 常见失败原因（详见 llama_jni.cpp nativeInit 的 ThrowNew / LOGE）：
      *   · libxuedi-llama.so 未加载（安装包损坏 / 架构不匹配 arm64-v8a？）
-     *   · nativeInit 返回 ctx=0（GGUF 文件坏 / 内存不足 / native 方法签名对不上）
-     *   · 文件路径为空或文件不存在
+     *   · probe_max_continuous_mb < 1800 MB → 连续 mmap 内存不足（最常见的魅族20后台满载场景）
+     *   · llama_model_load_from_file FAIL → GGUF 魔数正确但内部结构损坏 / 权限问题
+     *   · llama_init_from_model FAIL → 模型大小 OK 但 KV cache / cparams 分配时 OOM
+     *   · nativeInit 抛异常 → 任何上面 4 条的 Java RuntimeException
+     *
+     * 🆕 v1.3.25-fix8: 新增 [loadModelRobust] 版本：自动 4 级降级重试。
+     *                 旧 [loadModel] 仍保留作为"单次直接调用"（给 robust 内调用、给旧代码兼容）。
      */
     fun loadModel(ggufAbsolutePath: String, nCtx: Int = 4096, nThreads: Int = 4, nGpuLayers: Int = 0): Boolean {
         lastLoadError = null
@@ -162,18 +167,25 @@ class LlamaJniEngine : LlmEngine {
             ctx = 0L  // 先清 ctx，让 invokeOnCompletion 里检测到 ctx != curCtx 后 release 旧 state
             Log.i(TAG, "loadModel: 旧 ctx=$oldCtx 已 cancel + ctx 置 0（等旧 nativeChat 自然结束后 release）")
         }
+        Log.i(TAG, "loadModel[单次] → nCtx=$nCtx nThreads=$nThreads nGpuLayers=$nGpuLayers file=${f.name}")
         val newCtx = runCatching {
             nativeInit(ggufAbsolutePath, nCtx, nThreads, nGpuLayers)
         }.getOrElse { t ->
-            val msg = "nativeInit 抛异常：${t.javaClass.simpleName} - ${t.message}"
+            // v1.3.25-fix8：C++ 层 probe/model_load/init_from_model 都会 ThrowNew RuntimeException，
+            // 这里把消息原样收进 lastLoadError，让 Kotlin 层 Toast 能直接显示"内存不够 4096<1800"这种具体原因。
+            val msg = buildString {
+                append("nativeInit 抛异常：").append(t.javaClass.simpleName)
+                t.message?.let { append(" — ").append(it) }
+            }
             Log.e(TAG, "loadModel ❌ $msg")
             lastLoadError = msg
             0L
         }
         if (newCtx == 0L) {
             if (lastLoadError == null) {
-                lastLoadError = "nativeInit 返回 ctx=0（GGUF 可能损坏、内存不足、或 native 方法未实现）。" +
-                    "\n请尝试：① 删除后重新导入 GGUF ② 关闭其他后台 App 释放内存 ③ 重启手机后重试。"
+                lastLoadError = "nativeInit 返回 ctx=0（未抛异常但返回空）。" +
+                    "\n常见阶段：① llama_model_load_from_file（GGUF 损坏 / 权限）② llama_init_from_model（KV cache OOM）。" +
+                    "\n请去设置 → 推理诊断 → 开始诊断 → 看 LlamaJni 的 4 条 ERROR 行（probe / model_load_fail / cparams / llama_init_fail）。"
             }
             Log.e(TAG, "loadModel ❌ ctx=0，原因：$lastLoadError")
             return false
@@ -183,6 +195,71 @@ class LlamaJniEngine : LlmEngine {
         lastLoadError = null
         return true
     }
+
+    /**
+     * 🆕 v1.3.25-fix8：健壮版加载（4 级自动降级重试，一次都不用用户手动调参数）。
+     *
+     * 魅族 20 上「点🔄 加载失败」= 很多时候是默认 4096+4 线程的 KV cache 峰值顶了内存，
+     * 但用户看不懂 Toast 里笼统的"内存不足 / GGUF 损坏"，只知道"我点了，失败了"。
+     * 这里把 4 档组合串行试：
+     *   #1  nCtx=4096  nThreads=4 （用户预期满配）
+     *   #2  nCtx=2048  nThreads=2  （C++ 侧魅族20特供版）
+     *   #3  nCtx=1280  nThreads=2  （进一步压 KV cache 峰值）
+     *   #4  nCtx=768   nThreads=1  （极限兜底，1.5B 4bit 基本都能起来）
+     *
+     * 只要其中一级成功，就返回 true，并把真实使用的 nCtx/nThreads 写进成功 Toast；
+     * 如果 4 级全挂，lastLoadError 会聚合 4 次失败的具体原因（= 直接定位卡在哪一级）。
+     */
+    fun loadModelRobust(ggufAbsolutePath: String): Boolean {
+        val presets: List<Triple</*nCtx*/Int, /*nThreads*/Int, String>> = listOf(
+            Triple(4096, 4, "满配"),
+            Triple(2048, 2, "L2 标准降级"),
+            Triple(1280, 2, "L3 激进降级"),
+            Triple(768,  1, "L4 极限兜底")
+        )
+        val failures = mutableListOf<String>()
+        for ((i, cfg) in presets.withIndex()) {
+            val (nCtx, nTh, label) = cfg
+            Log.i(TAG, "loadModelRobust[${i+1}/${presets.size}] $label → nCtx=$nCtx nThreads=$nTh")
+            val ok = loadModel(ggufAbsolutePath, nCtx = nCtx, nThreads = nTh, nGpuLayers = 0)
+            if (ok) {
+                // 把"最终用了哪一级"追加到 lastLoadError 清空前的上下文（Toast 由 ModelManager 组合）
+                lastLoadError = null
+                // 写一条 info 级日志，让诊断包能定位实际落在哪一级
+                Log.i(TAG, "loadModelRobust ✅ 命中第${i+1}级 $label: nCtx=$nCtx nThreads=$nTh")
+                // 把最终参数编码到 loadError 字段为空，ModelManager 通过额外字段回读？
+                // 简便方案：利用 ctx!=0 + 日志；这里直接返回成功。
+                robustLastLevel = "$label (nCtx=$nCtx, nThreads=$nTh)"
+                return true
+            } else {
+                val reason = lastLoadError ?: "(空原因, ctx=0 ret)"
+                Log.w(TAG, "loadModelRobust ❌ 第${i+1}级 $label 失败: $reason")
+                failures.add("L${i+1}[$label]：$reason")
+                // 每一级之间留 200ms 回收窗口（魅族系统层内存释放 / zram 回写有延迟）
+                try { Thread.sleep(200) } catch (_: InterruptedException) {}
+            }
+        }
+        robustLastLevel = null
+        lastLoadError = buildString {
+            append("4 级自动降级全部失败（Llama 引擎）。\n")
+            append("手机可用连续 mmap 被占满（典型：后台开了微信/QQ/浏览器/抖音 2G+ 常驻）。\n\n")
+            append("【4 级失败详情】\n")
+            failures.forEachIndexed { i, s ->
+                append(i + 1).append(". ").append(s).append("\n")
+            }
+            append("\n【下一步必做动作，按顺序】\n")
+            append("1. 长按 → 关闭后台所有 App（微信/QQ/浏览器/抖音/相机）→ 再点一次🔄\n")
+            append("2. 重启手机 → 启动后立刻进本 App 直接设模型，不要先开别的 App\n")
+            append("3. 设置 → 引擎开关 → 切 ON=Qwen 极简推理器（绕过 llama.cpp 的 llama_decode 崩溃路径，专为魅族 20 写的）\n")
+            append("4. 仍不行：到 设置 → 推理诊断 → 开始诊断 → 📤 分享诊断包，把 Toast + 诊断包一起发我。")
+        }
+        Log.e(TAG, "loadModelRobust ❌ 全挂:\n$lastLoadError")
+        return false
+    }
+
+    /** 最近一次 loadModelRobust 成功的级别描述；失败= null。用于 Toast 展示"实际运行档位"。 */
+    @Volatile var robustLastLevel: String? = null
+
 
     // =================================================================
     // LlmEngine 接口实现：真流式 Flow

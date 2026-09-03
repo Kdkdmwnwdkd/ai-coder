@@ -154,34 +154,43 @@ class ModelManager(private val ctx: Context) {
         Log.i(TAG, "switchAndLoadModel 开始加载：${m.displayName} 文件状态=$existSize nCtx=$defaultNCtx")
 
         val ok = runCatching {
-            eng.loadModel(ggufAbsolutePath = m.filePath, nCtx = defaultNCtx)
+            // 🆕 v1.3.25-fix8: 用健壮版 4 级自动降级加载，替代原先单次 4096 硬加载。
+            //   用户反馈"点🔄 加载失败"绝大多数是 4096/4线程下 KV cache 峰值顶了，
+            //   但旧 Toast 只有笼统"GGUF 损坏 / 内存不足"，用户不知道该怎么办。
+            //   现在 LlamaJniEngine.loadModelRobust 会在内部依次尝试：
+            //   (4096,4) → (2048,2) → (1280,2) → (768,1)，并把最终档位写进 robustLastLevel。
+            eng.loadModelRobust(m.filePath)
         }.getOrDefault(false)
 
         val ctx = eng.currentCtx()
         val diagErr = eng.lastLoadError()
+        val level = (eng as? LlamaJniEngine)?.robustLastLevel
         if (ok) {
             lastLoadedPath.set(m.filePath)
-            Log.i(TAG, "switchAndLoadModel ✅ ${m.displayName} 已加载 ctx=$ctx nCtx=$defaultNCtx")
+            Log.i(TAG, "switchAndLoadModel ✅ ${m.displayName} 已加载 ctx=$ctx level=$level")
             true to buildString {
                 append("✅ 加载成功：").append(m.displayName).append("\n")
-                append(" · ctx=0x").append(ctx.toString(16))
-                append(" · nCtx=").append(defaultNCtx)
-                append(" · ").append(existSize)
+                append(" · ctx=0x").append(ctx.toString(16)).append("\n")
+                if (level != null) {
+                    append(" · 降级档位：").append(level).append("\n")
+                    append("   （不是满配说明当前后台内存紧张，如想要满配请关闭所有后台/重启）")
+                } else {
+                    append(" · 文件=").append(existSize)
+                }
             }
         } else {
             Log.e(TAG, "switchAndLoadModel ❌ 加载失败 ctx=$ctx：${m.displayName} diag=$diagErr")
             false to buildString {
-                append("❌ 加载失败：").append(m.displayName).append("\n\n")
-                append("【诊断】\n")
-                append(" · ctx=").append(ctx).append("（0=未初始化）\n")
-                append(" · 文件状态：").append(existSize).append("\n")
-                append(" · nCtx=").append(defaultNCtx).append("\n")
-                if (diagErr != null) append(" · 错误：").append(diagErr).append("\n")
-                append("\n【建议（按顺序尝试）】\n")
-                append("1. 关闭所有后台 App（微信/QQ/浏览器等）→ 再点一次「设为当前模型」\n")
-                append("2. 重启手机 → 打开 APP 直接设置，不要先开其他 App\n")
-                append("3. 删除该模型 → 重新下载 GGUF（Qwen2.5-3B-Instruct-Q4_K_M，2.1GB）→ 重新导入\n")
-                append("4. 若仍失败，请截图此 Toast + 手机型号 + RAM 大小，到 GitHub Issue 反馈")
+                append("❌ 加载失败：").append(m.displayName).append("\n")
+                append("（已自动尝试 4 档组合：4096/4 线程 → 2048/2 线程 → 1280/2 线程 → 768/1 线程）\n\n")
+                if (diagErr != null) {
+                    append("【详细诊断（直接把这整段截图给我）】\n")
+                    append(diagErr).append("\n\n")
+                }
+                append("【3 个兜底方案】\n")
+                append("1. 长按多任务 → 把所有后台 App 都杀掉 → 再点一次🔄\n")
+                append("2. 重启手机 → 开机后第一个打开本 App → 直接设模型（别先开微信/QQ）\n")
+                append("3. 设置 → ⚙ 推理引擎开关 → 切到「Qwen 极简推理器（beta）」（专为魅族 20 绕过 llama_decode 崩溃写的，1.5B 基本都能起来）")
             }
         }
     }

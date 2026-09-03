@@ -24,8 +24,17 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 39
-        versionName = "1.3.25-fix7"
+        versionCode = 40
+        versionName = "1.3.25-fix8"
+        // v1.3.25-fix8: Llama 🔄 按钮"点了加载失败"根治（自动降级 + 精确错误回传）
+        //   · LlamaJniEngine.kt: 新增 loadModelRobust()，4 级自动降级
+        //     L1(4096/4线程) → L2(2048/2) → L3(1280/2) → L4(768/1)，命中即成功。
+        //     4 级全挂时把 4 次失败原因合并写进 lastLoadError，Toast 直接定位"哪一级、什么原因"。
+        //   · ModelManager.kt switchAndLoadModel 改调用 loadModelRobust，成功时
+        //     在 Toast 里显示最终命中的"降级档位"，让用户知道当前跑在满配/标准/激进/兜底。
+        //   · llama_jni.cpp nativeInit: 两个 FAIL 阶段（llama_model_load_from_file、
+        //     llama_init_from_model）都 ThrowNew RuntimeException，把模型大小、real_avail_mb、
+        //     safe_n_ctx、n_threads 一起传给 Java，让 robust 下一轮自动决策 + 失败文案精确定位。
         // v1.3.25-fix7: 引擎开关切换后自动 reload 当前选中模型
         //   · SettingsPage.kt: Switch onCheckedChange 新增 scope.launch，
         //     切到 Qwen 时自动调 switchAndLoadQwenModel；切回 Llama 时自动调 switchAndLoadModel。

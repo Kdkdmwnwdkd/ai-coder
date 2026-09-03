@@ -678,43 +678,16 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     //   参数收紧 (保守档): top_k=10 top_p=0.8 temp=0.3 repeat=1.05 freq=0 presence=0
     //   freq=0 presence=0 是因为 1.5B 模型本来就小, 加 freq/presence 惩罚反而抑制了正常
     //   多字节 UTF-8 序列 (中文每个字都是独立 token, freq 惩罚会让模型回避常用汉字).
+    // 🔴🔴🔴 v1.3.25-fix20: 彻底撤掉 llama_sampler_chain！
+    //   fix17/18/19 SIGABRT 都在「✂️ 手动插BOS」之后立刻触发，
+    //   S1 日志都来不及打出来（信号直接 kill 进程），说明不是 batch 问题，
+    //   是 llama_sampler_chain_init / llama_sampler_accept 本身在 b5180 arm64 上 assertion。
+    //   彻底绕过：纯手写 argmax greedy 采样，连 llama_sample_* API 都不用。
     llama_sampler * sampler = nullptr;
-    {
-        LOGI("nativeChat: [fix18-debug] S1. 初始化 sampler_chain... n_prompt=%d", (int)n_prompt);
-        fflush(stdout); fflush(stderr);
-        auto sp = llama_sampler_chain_default_params();
-        sp.no_perf = true;
-        sampler = llama_sampler_chain_init(sp);
-        LOGI("nativeChat: [fix18-debug] S2. sampler_chain_init OK ptr=%p", (void*)sampler);
-        fflush(stdout); fflush(stderr);
-        // ① penalties: repeat 只对重复 token 生效, freq=0 presence=0 避免抑制中文
-        int32_t repeat_last_n = std::min(std::max(n_prompt, 32), 1600);
-        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
-            /*penalty_last_n=*/repeat_last_n,
-            /*penalty_repeat=*/1.05f,
-            /*penalty_freq=*/0.0f,
-            /*penalty_present=*/0.0f
-        ));
-        LOGI("nativeChat: [fix18-debug] S3. penalties sampler 已添加, repeat_last_n=%d", (int)repeat_last_n);
-        fflush(stdout); fflush(stderr);
-        // ② top_k=10: 只保留概率最高的 10 个 token
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(10));
-        // ③ top_p=0.8: nucleus 采样, 只保留累计概率 0.8 内的 token
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.8f, /*min_keep=*/1));
-        // ④ temp=0.3: 非常低的温度, 接近 greedy
-        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.3f));
-        // ⑤ dist: 最后一层做确定性采样
-        llama_sampler_chain_add(sampler, llama_sampler_init_dist((uint32_t)::time(nullptr) ^ 0xC0FFEEu));
-        LOGI("nativeChat: [fix18-debug] S4. 全部 samplers 已添加 (top_k/top_p/temp/dist)");
-        fflush(stdout); fflush(stderr);
-    }
-    // 🆕 关键：b5180 的 penalties sampler 通过 llama_sampler_accept 把 prompt tokens
-    //     写入内部 last_n 环形缓冲（=告诉 sampler「这些 token 不要重复」）。
-    LOGI("nativeChat: [fix18-debug] S5. 开始 llama_sampler_accept (%d tokens)...", (int)tokens.size());
+    (void)sampler;
+    LOGI("nativeChat: [fix20] 纯手写 greedy argmax 采样（绕过 llama_sampler_chain）");
     fflush(stdout); fflush(stderr);
-    for (llama_token t : tokens) llama_sampler_accept(sampler, t);
-    LOGI("nativeChat: [fix18-debug] S6. sampler_accept 全部完成");
-    fflush(stdout); fflush(stderr);
+    (void)n_prompt;
 
     // -------- 4) 预填充 prompt（按 n_batch 切片） --------
     int32_t n_consumed = 0;
@@ -801,10 +774,18 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         if (state->cancel.load()) { cb_done(env, callback, "cancel"); break; }
 
         int64_t ts0 = now_ms();
-        // a. sample 最后一个 logit（idx = -1）
-        llama_token id = llama_sampler_sample(sampler, state->ctx, /*idx=*/-1);
-        llama_sampler_accept(sampler, id);
+        // a. 🔴 v1.3.25-fix20: 手写 greedy argmax，绕过 llama_sampler_sample/accept
+        //   直接拿 raw logits，找最大值 index，完全不碰 sampler API。
+        float * logits = llama_get_logits(state->ctx);
+        llama_token id = 0;
+        if (logits) {
+            float best = logits[0];
+            for (int32_t k = 1; k < state->n_vocab; k++) {
+                if (logits[k] > best) { best = logits[k]; id = (llama_token)k; }
+            }
+        }
         int64_t ts1 = now_ms();
+        (void)sampler;  // 不再用
 
         // b. EOS / <|im_end|> (Qwen 词表标准 id=151645) / 到上下文上限 → Done
         if (id == eos) {

@@ -234,44 +234,36 @@ static void copy_f32(float * out, const float * src, int64_t ne0, int64_t ne1, s
     }
 }
 
-// 🔴 v1.3.25-fix19: 旧版 dequant_tensor 每次都 malloc + 重新解码 7MB 权重，
-//   1 token × 28层 = 200+ MB malloc/free，3.9秒/token 几乎全是这个开销！
-//   改为全局 F32 权重缓存：按 QwenTensor 指针做 key，首次调用时解量化，
-//   之后直接返回缓存指针，永远不 free。总 F32 权重约 < 3GB，MEIZU 20 有 11GB RAM 完全够用。
-#include <unordered_map>
-struct QwFp32CacheEntry {
-    std::vector<float> buf;
-    size_t ne0;
-    size_t ne1;
-};
-static std::mutex g_qw_cache_mtx;
-static std::unordered_map<const void *, QwFp32CacheEntry> g_qw_fp32_cache;
+// 🔴 v1.3.25-fix20: 立即撤掉 fix19 的全局 F32 缓存！
+//   fix19 338 个 tensor 全缓存成 F32 ≈ 2.8GB，魅族20 可用只有 3-4GB，
+//   跑 9 分钟触发 Android OOM killer → 闪退。
+//   改回「单次 60MB 复用缓冲区」：最大的权重是 ffn_down 8960×1536=55MB，
+//   只需要一个 scratch buffer，每次覆盖写，不再 malloc/free，也不爆内存。
+//   每个 token 28 层还是要重新解量化 ~70MB 量化数据 → 但 3.9s/token 现在
+//   主要是因为没有 NEON 加速 Q4_K_M 解量化本身，等下一轮加。
+#include <mutex>
+#include <vector>
+static std::mutex g_qw_scratch_mtx;
+static std::vector<float> g_qw_fp32_scratch;  // 最大 16M 个 float (64MB)
+static float * g_qw_scratch_ensure(size_t need_elem) {
+    std::lock_guard<std::mutex> lk(g_qw_scratch_mtx);
+    if (g_qw_fp32_scratch.size() < need_elem) {
+        g_qw_fp32_scratch.resize(std::max<size_t>(need_elem, g_qw_fp32_scratch.size() * 2));
+    }
+    return g_qw_fp32_scratch.data();
+}
 
-// 把 QwenTensor 反量化成 F32 buffer（🔴 带缓存！调用者 free 可选，我们缓存了不会泄露）
+// 🔴 dequant_tensor — 返回 scratch buffer（线程安全的全局复用区，不要 free，
+//   也不要长时间持有指针 —— 下次调用会覆盖）
 static float * dequant_tensor(const QwenTensor * t, size_t & out_ne0, size_t & out_ne1) {
     if (!t || !t->data) return nullptr;
-    // 先查缓存
-    {
-        std::lock_guard<std::mutex> lk(g_qw_cache_mtx);
-        auto it = g_qw_fp32_cache.find((const void *)t);
-        if (it != g_qw_fp32_cache.end()) {
-            out_ne0 = it->second.ne0;
-            out_ne1 = it->second.ne1;
-            return it->second.buf.data();
-        }
-    }
-    // 未命中 —— 执行反量化
     out_ne0 = t->ne[0];
     out_ne1 = t->ne[1] > 0 ? t->ne[1] : 1;
     int64_t total = (int64_t)out_ne0 * (int64_t)out_ne1;
     if (total <= 0) return nullptr;
-    QwFp32CacheEntry entry;
-    entry.ne0 = out_ne0;
-    entry.ne1 = out_ne1;
-    entry.buf.resize(total);
-    float * buf = entry.buf.data();
+    float * buf = g_qw_scratch_ensure((size_t)total);
+    if (!buf) return nullptr;
 
-    // 🔴 v1.3.25-fix14: 修复类型判断！
     if (t->type == 12 /*GGML_TYPE_Q4_K*/ ||
         t->type == 13 /*GGML_TYPE_Q4_K_M — 兼容, 同样的 block 格式*/) {
         dequant_q4km_tensor(buf, (const uint8_t *)t->data, (int64_t)out_ne0, (int64_t)out_ne1, t->nb[1]);
@@ -285,17 +277,7 @@ static float * dequant_tensor(const QwenTensor * t, size_t & out_ne0, size_t & o
         FWD_LOG("WARN: dequant_tensor type=%d not fully supported, trying F16", t->type);
         copy_f16_to_f32(buf, (const uint16_t *)t->data, (int64_t)out_ne0, (int64_t)out_ne1, t->nb[1]);
     }
-    // 写入缓存
-    {
-        std::lock_guard<std::mutex> lk(g_qw_cache_mtx);
-        auto key = (const void *)t;
-        // 可能另一线程并发插入了同样 key，直接复用那份就行
-        auto & slot = g_qw_fp32_cache[key];
-        if (slot.buf.empty()) {
-            slot = std::move(entry);
-        }
-        return slot.buf.data();
-    }
+    return buf;
 }
 
 // =====================================================

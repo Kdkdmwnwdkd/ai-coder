@@ -1314,37 +1314,47 @@ private fun DiagnosticCard(
             }
 
             // —— 🆕 v1.3.6 手机端专用按钮（纯手机就能抓日志/分享，不需要电脑/adb/root）——
+            // 🔴 v1.3.25-fix20: 3个按钮用 weight(1f) 平分屏幕宽度，避免最右「复制完整诊断包」
+            //   超出屏幕外看不到（之前魅族20截图里只有两个按钮就是这个原因）
             Row(
                 Modifier
                     .fillMaxWidth()
                     .padding(top = if (useQwenEngine) 8.dp else 10.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
             ) {
                 FilledTonalButton(
                     onClick = onGrabLogcat,
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.height(36.dp),
+                    modifier = Modifier
+                        .height(36.dp)
+                        .weight(1f),
                     enabled = !running
                 ) {
-                    Icon(Icons.Outlined.ReceiptLong, null, Modifier.padding(end = 4.dp))
-                    Text("📥 抓LlamaJni日志", fontSize = 11.5.sp)
+                    Icon(Icons.Outlined.ReceiptLong, null)
+                    Spacer(Modifier.width(2.dp))
+                    Text("📥抓日志", fontSize = 10.5.sp)
                 }
                 OutlinedButton(
                     onClick = onShareAll,
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.height(36.dp)
+                    modifier = Modifier
+                        .height(36.dp)
+                        .weight(1f)
                 ) {
-                    Icon(Icons.Outlined.IosShare, null, Modifier.padding(end = 4.dp))
-                    Text("📤 分享诊断包", fontSize = 11.5.sp)
+                    Icon(Icons.Outlined.IosShare, null)
+                    Spacer(Modifier.width(2.dp))
+                    Text("📤分享包", fontSize = 10.5.sp)
                 }
-                Spacer(Modifier.weight(1f))
                 FilledTonalButton(
                     onClick = onCopyAll,
                     shape = RoundedCornerShape(10.dp),
-                    modifier = Modifier.height(36.dp)
+                    modifier = Modifier
+                        .height(36.dp)
+                        .weight(1f)
                 ) {
-                    Icon(Icons.Outlined.ContentCopy, null, Modifier.padding(end = 4.dp))
-                    Text("📋 复制完整诊断包", fontSize = 11.5.sp)
+                    Icon(Icons.Outlined.ContentCopy, null)
+                    Spacer(Modifier.width(2.dp))
+                    Text("📋复制包", fontSize = 10.5.sp)
                 }
             }
 

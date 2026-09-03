@@ -258,19 +258,22 @@ class LlamaJniEngine : LlmEngine {
      * 魅族 20 上「点🔄 加载失败」= 很多时候是默认 4096+4 线程的 KV cache 峰值顶了内存，
      * 但用户看不懂 Toast 里笼统的"内存不足 / GGUF 损坏"，只知道"我点了，失败了"。
      * 这里把 4 档组合串行试：
-     *   #1  nCtx=4096  nThreads=6  (v1.3.25-perf1 4→6: 骁龙 8 Gen2 1+4+3 甜点，perf 最优)
-     *   #2  nCtx=2048  nThreads=4  (L2 标准降级：ctx 减半 + 回 4 线程防 6 线程内存爆)
+     *   #1  nCtx=4096  nThreads=4  (v1.3.25-perf2: 6线程实测 3B Prefill 44.5s→57.2s 反降 28%，回 4 线程稳定)
+     *   #2  nCtx=2048  nThreads=4  (L2 标准降级：ctx 减半 + 回 4 线程防争用)
      *   #3  nCtx=1280  nThreads=2  (L3 激进降级：KV 再压)
      *   #4  nCtx=768   nThreads=1  (L4 极限兜底，1.5B 4bit 基本都能起来)
      *
      * 只要其中一级成功，就返回 true，并把真实使用的 nCtx/nThreads 写进成功 Toast；
      * 如果 4 级全挂，lastLoadError 会聚合 4 次失败的具体原因（= 直接定位卡在哪一级）。
      *
-     * ⚠️ 回退（若 6 线程变慢或闪退 → 改回 4）：把下面 L1 的 6 改成 4 即可，其它不动。
+     * ⚠️ A/B 调参：
+     *   · 想试 6/8 线程？改 L1 数字即可；
+     *   · v1.3.25-perf1 已实锤 6 线程 3B Qwen2 → 57.2s（4 线程 baseline 44.5s），
+     *     所以后续 8 线程只会更慢，非必要不要打开。
      */
     fun loadModelRobust(ggufAbsolutePath: String): Boolean {
         val presets: List<Triple</*nCtx*/Int, /*nThreads*/Int, String>> = listOf(
-            Triple(4096, 6, "满配(骁龙甜点·6线程)"),
+            Triple(4096, 4, "满配(4线程·稳定)"),
             Triple(2048, 4, "L2 标准降级(ctx2048·4线程)"),
             Triple(1280, 2, "L3 激进降级(ctx1280·2线程)"),
             Triple(768,  1, "L4 极限兜底(ctx768·1线程)")

@@ -450,10 +450,12 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     //         与 Qwen2 的 GGUF metadata 不匹配。perf1 阶段永久关批量，
     //         将来升级到 llama.cpp b5800+ 后，把下面 'false &&' 去掉即可一键重开（=零代码回归）。
     {
-        bool batch_ok = false;
+        bool batch_ok    = false;
+        bool batch_tried = false;  // v1.3.25-perf2 fix: 是否"真的进入过批量尝试分支"。只有 tried+failed 才叫 BATCH_FB。
         const int N = (int)tokens.size();
         // 🔴 PERM DISABLED: 原条件 (N > 1 && N <= 1024)。保留结构，后续开只要改 false &&。
         if (false && N > 1 && N <= 1024) {
+            batch_tried = true;
             LOGI("🔬 PREFILL-BATCH: 尝试一次性 prefill（N=%d tokens）。若 ret!=0 立即 fallback 逐 token", N);
             // 单独构造临时 batch_all（不影响下面的 SAFE batch 生命周期变量，避免 cleanup 双 free）
             llama_batch batch_all = llama_batch_init(N, /*embd=*/0, /*n_seq_max=*/1);
@@ -490,9 +492,16 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
 
         if (!batch_ok) {
             // ---- 5.1 FALLBACK：原 SAFE 逐 token prefill（100% 不崩的黄金路径）----
-            LOGI("🛟 PREFILL FALLBACK: 启动 STEPx1（%d tokens）。N <=1 或批量失败的兜底", total_prefill);
-            cb_onPrefillMode(tenv, gCb,
-                             (N <= 1) ? PREF_MODE_STEPBYSTEP : PREF_MODE_FALLBACK);
+            // v1.3.25-perf2 prefMode 语义修正：
+            //   · 真正尝试过批量 (batch_tried=true) 且失败 → BATCH_FB
+            //   · 没试过批量（false&& 关了 / N<=1 / N>1024）     → STEPx1
+            if (batch_tried) {
+                LOGI("🛟 PREFILL FALLBACK: 启动 STEPx1（%d tokens）。批量失败后回退到逐token 兜底", total_prefill);
+                cb_onPrefillMode(tenv, gCb, PREF_MODE_FALLBACK);
+            } else {
+                LOGI("⏩ PREFILL: 使用 STEPx1（%d tokens）。批量分支已禁用 / 未进入", total_prefill);
+                cb_onPrefillMode(tenv, gCb, PREF_MODE_STEPBYSTEP);
+            }
 
             for (int i = 0; i < (int)tokens.size(); ++i) {
                 if (st->cancel.load(std::memory_order_relaxed)) {

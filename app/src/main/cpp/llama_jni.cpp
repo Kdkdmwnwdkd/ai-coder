@@ -397,11 +397,12 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     llama_kv_cache_clear(st->ctx);
     LOGI("nativeChat: kv cache 已清。开始 prefill [%zu tokens]", tokens.size());
 
-    // ---- Step 5: batch init（固定 SAFE_N_BATCH=1，官方最简：n_tokens_max=1, n_seq_max=0, embd=0）----
+    // ---- Step 5: batch init（固定 SAFE_N_BATCH=1，官方最简：n_tokens_max=1, n_seq_max=1, embd=0）----
     // llama_batch_init(n_tokens_max, n_seq_max, embd)
+    // n_seq_max 必须 >= 1：因为后续 batch.seq_id[0][0] = 0，b5180 内部 GGML_ASSERT(seq_id < n_seq_max)
     // embd=0: 正常 token 输入（不是 embedding 输入）
-    llama_batch batch = llama_batch_init(SAFE_N_BATCH, 0, 0);
-    LOGI("nativeChat: batch created (n_tokens_max=%d, embd=0)。SAFE 路径：batch.n_tokens 永远 =1", SAFE_N_BATCH);
+    llama_batch batch = llama_batch_init(SAFE_N_BATCH, 1, 0);
+    LOGI("nativeChat: batch created (n_tokens_max=%d, n_seq_max=1, embd=0)。SAFE 路径：batch.n_tokens 永远 =1", SAFE_N_BATCH);
 
     int n_past = 0;
     const int total_prefill = (int)tokens.size();

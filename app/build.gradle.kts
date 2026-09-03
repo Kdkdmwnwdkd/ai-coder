@@ -24,22 +24,19 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 41
-        versionName = "1.3.25-fix9"
-        // v1.3.25-fix9: 根治今日两大症状：Llama 输出乱码 + Qwen kv[0] value_type=1952671092 ("tnia")
-        //   · Llama (llama_jni.cpp nativeChat): 新增 llama_sampler_init_penalties
-        //     (repeat_last_n=min(n_prompt,1600), repeat=1.05, freq=0.05, present=0.05)，
-        //     采样缩到 top_k=30 / top_p=0.9 / temp=0.6，并通过 llama_sampler_accept
-        //     把 prompt tokens 填入 penalties 内部 last_n 环形缓冲（之前空转无效）。
-        //     目标：修复截图里的 "庇/庄/耳边/CAST/spectacle…" 语义漂移乱码。
-        //   · Qwen ggml_loader.cpp 根因修复：fix5 错误把 header n_tensors_count /
-        //     metadata_kv_count 改成"固定 uint64 LE 16 字节"，但 GGUF v3 规范仍是
-        //     LEB128 变长（llama.cpp = gguf_get_varint(aligned=false)）。对于 Qwen2.5-1.5B
-        //     (n_tensors=144 用 1B LEB, n_kv≈38 用 1B LEB)，旧代码多读 14B 冲进
-        //     "general.architecture" 字符串中段 → kv[0] key_len=0 key=''，
-        //     value_type 从 't','i','n','t' 读出=0x746E6974=1952671092（和诊断包完全吻合）。
-        //     现改回 r.vu64() 读两个 count，并保留固定 U64 fallback + 16B raw hex
-        //     dump 打到 err msg（下次再错位就不用再让用户抓 logcat，Toast 自带定位）。
+        versionCode = 42
+        versionName = "1.3.25-fix10"
+        // v1.3.25-fix10: 【重大修正】fix9 把 GGUF v3 规范搞反了！
+        //   · Qwen ggml_loader.cpp: fix9 错误把 header counts 和 string length 改成
+        //     ULEB128(vu64)，但官方 gguf_reader.py (b5180) 确认 GGUF v3 全部用固定
+        //     uint64 LE。结果 1.5B 模型的 n_tensors=144 (0x90 0x00...) 被 vu64 读成 16
+        //     (0x90 高位置继续 0x00 停止 = 16)，恰好过 sanity check 但 offset 错了
+        //     → KV 解析错位 → tensor header corrupt。现全部还原为固定 r<uint64_t>()。
+        //   · Llama llama_jni.cpp: fix9 采样器顺序错 (top_k 在 penalties 前)，
+        //     penalties 对已截断的分布无效。现正确顺序: penalties→top_k→top_p→temp→dist，
+        //     参数收紧: top_k=10 top_p=0.8 temp=0.3 freq=0 present=0 (中文每个字独立 token,
+        //     freq/presence 惩罚反而抑制正常输出)。目标: 根治乱码。
+        // v1.3.25-fix9: Llama 乱码 + Qwen kv parse failed (但错误地用了 ULEB128)
         // v1.3.25-fix8: Llama 🔄 加载失败根治：4 级自动降级
         //   · LlamaJniEngine.kt: 新增 loadModelRobust()，4 级自动降级
         //     L1(4096/4线程) → L2(2048/2) → L3(1280/2) → L4(768/1)，命中即成功。

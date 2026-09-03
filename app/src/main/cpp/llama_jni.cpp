@@ -669,27 +669,35 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         return;
     }
 
-    // -------- 3) sampling chain：top_k → top_p → penalties(重复/频率/存在) → temp → dist --------
-    // 🆕 v1.3.25-fix9 乱码根治 1/2: 新增 penalties 链（之前完全没有 repeat_penalty 导致生成容易在多字节中英片段上漂移发散，
-    //   截图里的 "庇/庄/耳边/CAST/plement..." 就是典型"重复惩罚缺失 + 采样过宽"）。
-    //   参数保守可落地（llama.cpp b5180 稳定档）：
-    //     repeat_last_n = min(n_prompt, 1600)   ·  repeat_penalty=1.05  freq=0.05  presence=0.05
-    //     top_k=30  top_p=0.9  temp=0.6 （之前 40/0.95/0.7 太宽 → 魅族 20 上输出漂移）
+    // -------- 3) sampling chain：penalties → top_k → top_p → temp → dist --------
+    // 🆕 v1.3.25-fix10: 彻底重写采样器链. 之前 fix9 顺序错 (top_k 在 penalties 前)
+    //   导致 penalties 对已截断的分布完全无效, 加上 temp=0.6/top_k=30/top_p=0.9 太宽,
+    //   魅族20 (骁龙8 Gen2 + 1.5B Q4_K_M) 上输出漂移发散成乱码.
+    //
+    //   正确顺序: penalties 先作用于 raw logits, 再 top_k/top_p 截断, 最后 temp 缩放.
+    //   参数收紧 (保守档): top_k=10 top_p=0.8 temp=0.3 repeat=1.05 freq=0 presence=0
+    //   freq=0 presence=0 是因为 1.5B 模型本来就小, 加 freq/presence 惩罚反而抑制了正常
+    //   多字节 UTF-8 序列 (中文每个字都是独立 token, freq 惩罚会让模型回避常用汉字).
     llama_sampler * sampler = nullptr;
     {
         auto sp = llama_sampler_chain_default_params();
         sp.no_perf = true;
         sampler = llama_sampler_chain_init(sp);
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(30));
-        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.9f, /*min_keep=*/1));
+        // ① penalties: repeat 只对重复 token 生效, freq=0 presence=0 避免抑制中文
         int32_t repeat_last_n = std::min(std::max(n_prompt, 32), 1600);
         llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
             /*penalty_last_n=*/repeat_last_n,
             /*penalty_repeat=*/1.05f,
-            /*penalty_freq=*/0.05f,
-            /*penalty_present=*/0.05f
+            /*penalty_freq=*/0.0f,
+            /*penalty_present=*/0.0f
         ));
-        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.6f));
+        // ② top_k=10: 只保留概率最高的 10 个 token
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_k(10));
+        // ③ top_p=0.8: nucleus 采样, 只保留累计概率 0.8 内的 token
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.8f, /*min_keep=*/1));
+        // ④ temp=0.3: 非常低的温度, 接近 greedy
+        llama_sampler_chain_add(sampler, llama_sampler_init_temp(0.3f));
+        // ⑤ dist: 最后一层做确定性采样
         llama_sampler_chain_add(sampler, llama_sampler_init_dist((uint32_t)::time(nullptr) ^ 0xC0FFEEu));
     }
     // 🆕 关键：b5180 的 penalties sampler 通过 llama_sampler_accept 把 prompt tokens

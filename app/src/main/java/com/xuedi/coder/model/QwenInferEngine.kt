@@ -108,6 +108,21 @@ class QwenInferEngine : LlmEngine {
             Log.e(TAG, "loadModel ❌ $lastLoadError")
             return false
         }
+        // === v1.3.25-fix6: 把 crash 日志目录告诉 C++，一有信号就落盘 + 打 logcat ===
+        runCatching {
+            val ctx: android.content.Context? = try {
+                val appClass = Class.forName("com.xuedi.coder.App")
+                val field = appClass.getDeclaredField("instance")
+                field.isAccessible = true
+                field.get(null) as? android.content.Context
+            } catch (_: Throwable) { null }
+            val dir = ctx?.getExternalFilesDir(null)?.absolutePath
+                ?: ctx?.filesDir?.absolutePath
+                ?: ggufAbsolutePath.substringBeforeLast("/models/").substringBeforeLast('/')
+            nativeSetCrashLogDir(dir)
+            Log.i(TAG, "crashLogDir → $dir")
+        }.onFailure { t -> Log.w(TAG, "setCrashLogDir failed (非致命): ${t.message}") }
+
         if (ggufAbsolutePath.isBlank()) {
             lastLoadError = "模型文件路径为空"
             return false
@@ -127,7 +142,17 @@ class QwenInferEngine : LlmEngine {
         val ok = runCatching { nativeLoadModel(ggufAbsolutePath) }.getOrDefault(false)
         if (!ok) {
             if (lastLoadError == null) {
-                lastLoadError = "nativeLoadModel 返回 false（GGUF 可能损坏、内存不足、或 Q4_K_M 以外量化不支持）。\n建议：关闭所有后台 App → 重试；或删除后重新导入 Qwen2.5-1.5B Q4_K_M。"
+                // v1.3.25-fix6: 提示用户去诊断页看 qwen-loader 日志，不再是千篇一律"损坏/内存不足"
+                lastLoadError = buildString {
+                    append("nativeLoadModel 返回 false。\n")
+                    append("根因请立刻去：设置页 → 推理诊断 → 看「设置页黑底日志框」里以【qwen-loader】开头的逐-KV 日志。\n")
+                    append("—— v1.3.25-fix6 新增定位：每一条 KV 都会打印 key=名字 + vtype=类型 + off=位置。\n\n")
+                    append("典型原因（对应 qwen-loader 最后一条 FAIL 行）：\n")
+                    append("1) kv[??] key='???' parse failed unsupported value_type=N — 新版 GGUF 增加了类型，请把 N 的值和上一条成功 KV 的 key 发我，我加支持。\n")
+                    append("2) kv[??] key='tokenizer.ggml.merges' 卡在循环 — 可能 merges 数组元素类型非 STRING(8)，请发日志。\n")
+                    append("3) n_kv/n_tensors 过大 → header 偏移错，版本号不对？\n")
+                    append("4) 正常到最后 kv 都 PASS，但后面 tensor 解析阶段挂 → 请发完整 qwen-loader / qwen-jni 行。\n")
+                }
             }
             Log.e(TAG, "loadModel ❌：$lastLoadError")
             return false
@@ -275,6 +300,9 @@ class QwenInferEngine : LlmEngine {
     private external fun nativeIsLoaded(): Boolean
     /** 释放 g_model（权重+KV cache 全部 free） */
     private external fun nativeRelease()
+    /** v1.3.25-fix6：设置 C++ 信号捕获写 crash_log 的目录（传 externalFilesDir.absolutePath）；
+     *  生成阶段若崩 → 在此目录下写 qwen_crash_log.txt + logcat 打 E/qwen-jni */
+    private external fun nativeSetCrashLogDir(dir: String)
     /**
      * 阻塞式推理：prompt → tokenize → embedding → 逐层前向 → 采样 → 回调。
      *   onToken(id, bytesUTF8) = 出 1 个 token 就调用

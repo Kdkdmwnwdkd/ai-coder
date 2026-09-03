@@ -222,49 +222,68 @@ struct kv_entry {
     std::string value_string;  // 对 string scalar
 };
 
-// Fix v1.3.25-fix5c: 彻底按 GGUF v3 规范重写.
-// GGUF v3 metadata value_type enum:
+// Fix v1.3.25-fix6: 加详细逐 KV 日志 + HAINT(type=13) 支持 + 错误带上下文.
+// GGUF v3 metadata value_type enum (含现代 llama.cpp 扩展的 type=13 HAINT):
 //   0=UINT8, 1=INT8, 2=UINT16, 3=INT16, 4=UINT32, 5=INT32,
 //   6=FLOAT32(4B), 7=BOOL(1B), 8=STRING, 9=ARRAY,
-//   10=UINT64, 11=INT64, 12=FLOAT64(8B)
-static void consume_kv_value(gguf_reader & r, kv_entry & kv) {
+//   10=UINT64, 11=INT64, 12=FLOAT64(8B), 13=HAINT (ULEB128 变长 uint, 新版 GGUF meta/tensor 可能用到)
+static char s_kv_errbuf[512];
+static void consume_kv_value(gguf_reader & r, kv_entry & kv,
+                             uint64_t ctx_idx, const char * ctx_key, size_t file_len)
+{
+    size_t off_before = r.off;
     kv.value_type = r.r<uint32_t>();
     switch (kv.value_type) {
         case 0: case 1:    // UINT8 / INT8 (1B)
             kv.scalar_type = kv.value_type;
-            if (r.eof(1)) { r.ok=false; return; }
+            if (r.eof(1)) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: UINT8/INT8 want 1B but EOF (off=%llu left=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off,(unsigned long long)(file_len-r.off)); r.ok=false; return; }
             kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+1); r.off += 1; break;
         case 2: case 3:    // UINT16 / INT16 (2B)
             kv.scalar_type = kv.value_type;
-            if (r.eof(2)) { r.ok=false; return; }
+            if (r.eof(2)) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: UINT16/INT16 want 2B but EOF (off=%llu left=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off,(unsigned long long)(file_len-r.off)); r.ok=false; return; }
             kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+2); r.off += 2; break;
         case 4: case 5:    // UINT32 / INT32 (4B)
             kv.scalar_type = kv.value_type;
-            if (r.eof(4)) { r.ok=false; return; }
+            if (r.eof(4)) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: UINT32/INT32 want 4B but EOF (off=%llu left=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off,(unsigned long long)(file_len-r.off)); r.ok=false; return; }
             kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+4); r.off += 4; break;
-        case 6:            // FLOAT32 (4B!) — 之前的 gguf_type_size 错写成 8
+        case 6:            // FLOAT32 (4B)
             kv.scalar_type = kv.value_type;
-            if (r.eof(4)) { r.ok=false; return; }
+            if (r.eof(4)) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: FLOAT32 want 4B but EOF (off=%llu left=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off,(unsigned long long)(file_len-r.off)); r.ok=false; return; }
             kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+4); r.off += 4; break;
         case 7:            // BOOL (1B)
             kv.scalar_type = kv.value_type;
-            if (r.eof(1)) { r.ok=false; return; }
+            if (r.eof(1)) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: BOOL want 1B but EOF (off=%llu left=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off,(unsigned long long)(file_len-r.off)); r.ok=false; return; }
             kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+1); r.off += 1; break;
         case 8:            // STRING
             kv.scalar_type = kv.value_type;
-            kv.value_string = r.r_str(); break;
+            kv.value_string = r.r_str();
+            if (!r.ok) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: STRING read failed (vu64 len EOF) (off=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off); return; }
+            break;
         case 9: {          // ARRAY: array_type (uint32) + arr_count (uint64) + elements
             kv.arr_type  = r.r<uint32_t>();
             kv.arr_count = r.r<uint64_t>();
+            if (!r.ok) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: ARRAY header read failed (off=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off); return; }
             if (kv.arr_type == 8) {  // string array
                 for (uint64_t i = 0; i < kv.arr_count; ++i) {
-                    kv.arr_strings.push_back(r.r_str());
+                    std::string s = r.r_str();
+                    if (!r.ok) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: ARRAY(STRING) item[%llu] read failed (off=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)i,(unsigned long long)r.off); return; }
+                    kv.arr_strings.push_back(std::move(s));
+                }
+            } else if (kv.arr_type == 13) {  // ARRAY(HAINT): 每个元素 ULEB128
+                // 每个元素写 8 字节 little-endian uint64 到 arr_bytes
+                kv.arr_bytes.reserve((size_t)kv.arr_count * 8);
+                for (uint64_t i = 0; i < kv.arr_count; ++i) {
+                    uint64_t v = r.vu64();
+                    if (!r.ok) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: ARRAY(HAINT) item[%llu] vu64 failed (off=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)i,(unsigned long long)r.off); return; }
+                    uint8_t buf[8];
+                    memcpy(buf, &v, 8);
+                    kv.arr_bytes.insert(kv.arr_bytes.end(), buf, buf+8);
                 }
             } else {
                 size_t es = gguf_type_size(kv.arr_type);
-                if (es == 0) { r.ok = false; return; }
+                if (es == 0) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: ARRAY arr_type=%u has gguf_type_size=0 (unsupported element type)",(unsigned long long)ctx_idx,ctx_key,(unsigned)kv.arr_type); r.ok=false; return; }
                 size_t total = es * (size_t)kv.arr_count;
-                if (r.eof(total)) { r.ok = false; return; }
+                if (r.eof(total)) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: ARRAY want %lluB (es=%u count=%llu) but EOF (off=%llu left=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)total,(unsigned)es,(unsigned long long)kv.arr_count,(unsigned long long)r.off,(unsigned long long)(file_len-r.off)); r.ok=false; return; }
                 kv.arr_bytes.assign(r.base + r.off, r.base + r.off + total);
                 r.off += total;
             }
@@ -272,15 +291,32 @@ static void consume_kv_value(gguf_reader & r, kv_entry & kv) {
         }
         case 10: case 11:  // UINT64 / INT64 (8B)
             kv.scalar_type = kv.value_type;
-            if (r.eof(8)) { r.ok=false; return; }
+            if (r.eof(8)) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: UINT64/INT64 want 8B but EOF (off=%llu left=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off,(unsigned long long)(file_len-r.off)); r.ok=false; return; }
             kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+8); r.off += 8; break;
         case 12:           // FLOAT64 (8B)
             kv.scalar_type = kv.value_type;
-            if (r.eof(8)) { r.ok=false; return; }
+            if (r.eof(8)) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: FLOAT64 want 8B but EOF (off=%llu left=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off,(unsigned long long)(file_len-r.off)); r.ok=false; return; }
             kv.scalar_bytes.assign(r.base+r.off, r.base+r.off+8); r.off += 8; break;
-        default:
-            LOG("consume_kv_value: unknown value_type=%u, abort", kv.value_type);
-            r.ok = false; break;
+        case 13: {         // HAINT: 新版 GGUF meta 标量 (ULEB128, 同 vu64)
+            kv.scalar_type = kv.value_type;
+            uint64_t v = r.vu64();
+            if (!r.ok) { snprintf(s_kv_errbuf,sizeof(s_kv_errbuf),"kv[%llu] %s: HAINT vu64 read failed (off=%llu)",(unsigned long long)ctx_idx,ctx_key,(unsigned long long)r.off); return; }
+            kv.scalar_bytes.resize(8);
+            memcpy(kv.scalar_bytes.data(), &v, 8);
+            break;
+        }
+        default: {
+            unsigned long long left = (unsigned long long)(file_len > r.off ? file_len - r.off : 0);
+            LOG("kv[%llu] %s: UNKNOWN value_type=%u (file_off=%llu left=%llu bytes, before_read_off=%llu) → CANNOT PARSE, ABORT",
+                (unsigned long long)ctx_idx, ctx_key, (unsigned)kv.value_type,
+                (unsigned long long)r.off, left, (unsigned long long)off_before);
+            snprintf(s_kv_errbuf, sizeof(s_kv_errbuf),
+                "kv[%llu] key='%s': unsupported GGUF value_type=%u (file_off=%llu left=%lluB, before_read=%lluB)",
+                (unsigned long long)ctx_idx, ctx_key, (unsigned)kv.value_type,
+                (unsigned long long)r.off, left, (unsigned long long)off_before);
+            r.ok = false;
+            return;
+        }
     }
 }
 
@@ -327,28 +363,98 @@ char * qwen_load_model(const char * gguf_path, QwenModel * & out_model) {
     gguf_reader r;
     r.base = (uint8_t *)p;
     r.len  = flen;
+    s_kv_errbuf[0] = 0;
     // magic
     uint32_t magic = r.r<uint32_t>();
     if (magic != 0x46554747u /* GGUF */) {
         return err("bad magic, not GGUF");
     }
     uint32_t ver = r.r<uint32_t>();
-    if (ver != 3 && ver != 2) return err("only GGUF v2/v3 supported");
-    // Fix v1.3.25-fix5: GGUF header 的 tensor_count / metadata_kv_count 是固定 uint64,
-    // 不是 ULEB128! 之前用 vu64() 读会导致文件位置从头偏移, 后面所有东西全错.
+    if (ver != 3 && ver != 2) { char b[128]; snprintf(b,sizeof(b),"only GGUF v2/v3 supported (got=%u)",ver); return err(b); }
+    // Fix v1.3.25-fix5: tensor_count / metadata_kv_count = 固定 uint64, 不是 ULEB128.
     uint64_t n_tensors = r.r<uint64_t>();
     uint64_t n_kv      = r.r<uint64_t>();
-    if (!r.ok) return err("header parse failed");
+    if (!r.ok) {
+        char b[192];
+        snprintf(b,sizeof(b),"header parse failed: ver=%u n_tensors=%llu n_kv=%llu (file_len=%llu off=%llu)",
+                 ver,(unsigned long long)n_tensors,(unsigned long long)n_kv,(unsigned long long)flen,(unsigned long long)r.off);
+        return err(b);
+    }
+    LOG("GGUF HEADER: ver=%u n_tensors=%llu n_kv=%llu file_len=%lluMB next_off=%llu",
+        ver, (unsigned long long)n_tensors, (unsigned long long)n_kv,
+        (unsigned long long)(flen>>20), (unsigned long long)r.off);
+    if (n_kv > 10000) {
+        char b[160];
+        snprintf(b,sizeof(b),"n_kv=%llu too large (file_len=%lluMB), likely header offset corrupt (read as fixed uint64 but is it actually v1?)",
+                 (unsigned long long)n_kv, (unsigned long long)(flen>>20));
+        return err(b);
+    }
+    if (n_tensors > 2000) {
+        char b[160];
+        snprintf(b,sizeof(b),"n_tensors=%llu too large (file_len=%lluMB), header corrupt",
+                 (unsigned long long)n_tensors, (unsigned long long)(flen>>20));
+        return err(b);
+    }
 
     // kv
     std::unordered_map<std::string, kv_entry> kvs;
     for (uint64_t i=0; i<n_kv; ++i) {
+        size_t key_off_beg = r.off;
         std::string k = r.r_str();
+        if (!r.ok) {
+            char b[192];
+            snprintf(b,sizeof(b),"kv[%llu/%llu]: r_str(key) failed @ off=%llu left=%lluB (str_off_before=%llu)",
+                     (unsigned long long)i,(unsigned long long)n_kv,
+                     (unsigned long long)r.off,(unsigned long long)(flen-r.off),
+                     (unsigned long long)key_off_beg);
+            return err(b);
+        }
+        size_t val_off_beg = r.off;
         kv_entry e;
-        consume_kv_value(r, e);
-        if (!r.ok) return err("kv parse failed");
+        consume_kv_value(r, e, i, k.c_str(), flen);
+        if (!r.ok) {
+            const char * why = s_kv_errbuf[0] ? s_kv_errbuf : "no-detail";
+            LOG("KV FAIL kv[%llu/%llu] '%s' @ value_begin_off=%llu key_begin_off=%llu left=%lluB — detail=%s",
+                (unsigned long long)i, (unsigned long long)n_kv, k.c_str(),
+                (unsigned long long)val_off_beg, (unsigned long long)key_off_beg,
+                (unsigned long long)(flen-val_off_beg), why);
+            // 返回可定位的错误（不是"kv parse failed"）
+            char b[512];
+            snprintf(b, sizeof(b),
+                "kv[%llu/%llu] key='%s' parse failed (ver=%u). Details: %s | "
+                "file_len=%lluMB key_off=%llu value_off=%llu left=%lluB | "
+                "请发下一条日志的 full qwen-loader 给我.",
+                (unsigned long long)i, (unsigned long long)n_kv, k.c_str(), ver, why,
+                (unsigned long long)(flen>>20),
+                (unsigned long long)key_off_beg, (unsigned long long)val_off_beg,
+                (unsigned long long)(flen > val_off_beg ? flen-val_off_beg : 0));
+            return err(b);
+        }
+        // 打一条简短成功日志（避免 150K merges 刷屏, 只对非 tokenizer merge/score 的 KV 打详情长度）
+        unsigned is_merge = (k.find("merges") != std::string::npos) ? 1 : 0;
+        if (is_merge) {
+            if ((i & 0xFFF) == 0) {  // 每 4096 条 merge 打一条心跳
+                LOG("kv[%llu/%llu] '%s' type=%u arr_strings_count=%zu (heartbeat)",
+                    (unsigned long long)i,(unsigned long long)n_kv,k.c_str(),(unsigned)e.value_type,
+                    (size_t)(e.arr_type==8?e.arr_strings.size():e.arr_count));
+            }
+        } else {
+            char val_desc[96]; val_desc[0] = 0;
+            if (e.value_type == 8) snprintf(val_desc,sizeof(val_desc),"STRING len=%zu", e.value_string.size());
+            else if (e.value_type == 9) {
+                if (e.arr_type == 8) snprintf(val_desc,sizeof(val_desc),"ARRAY(STRING) count=%zu", e.arr_strings.size());
+                else snprintf(val_desc,sizeof(val_desc),"ARRAY(type=%u count=%llu bytes=%zu)", (unsigned)e.arr_type,(unsigned long long)e.arr_count,e.arr_bytes.size());
+            }
+            else snprintf(val_desc,sizeof(val_desc),"SCALAR(type=%u bytes=%zu)", (unsigned)e.scalar_type, e.scalar_bytes.size());
+            LOG("kv[%llu/%llu] '%s' = vtype=%u %s (off_after=%llu / total %lluMB)",
+                (unsigned long long)i,(unsigned long long)n_kv,k.c_str(),(unsigned)e.value_type,
+                val_desc,(unsigned long long)r.off,(unsigned long long)(flen>>20));
+        }
         kvs.emplace(std::move(k), std::move(e));
     }
+    LOG("KV DONE: parsed %llu/%llu KVs, next_off=%llu, left=%llu bytes",
+        (unsigned long long)n_kv, (unsigned long long)n_kv,
+        (unsigned long long)r.off, (unsigned long long)(flen > r.off ? flen-r.off : 0));
 
     // --- 填配置 ---
     auto & cfg = m->cfg;

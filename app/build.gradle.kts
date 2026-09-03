@@ -24,8 +24,21 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 37
-        versionName = "1.3.25-fix5"
+        versionCode = 38
+        versionName = "1.3.25-fix6"
+        // v1.3.25-fix6: 定位 kv parse failed + 生成闪退
+        //   · ggml_loader.cpp: 新增逐 KV 详细日志 (qwen-loader tag), 每个 KV 打印 key/type/位置
+        //     新增 value_type=13(HAINT) 支持 + 所有错误带 kv 索引/key/偏移/剩余字节上下文
+        //     (之前只有一句 "kv parse failed" — v1.3.25-fix5 的 10 个格式 bug 修了但还缺定位信息)
+        //   · qwen_jni.cpp: 新增 SIGSEGV/SIGABRT/SIGBUS/SIGFPE 信号捕获
+        //     抓到后写 externalFilesDir/qwen_crash_log.txt + logcat 打 E/qwen-jni [qwen-signal]
+        //     解决「一发你好就闪退、诊断包抓不到原因」
+        //   · QwenInferEngine.kt: 新增 nativeSetCrashLogDir 初始化, loadModel 后立刻 set
+        // v1.3.25-fix5: GGUF v3 格式重写 — 修了 10 个解析 bug
+        //   (tensor_count/metadata_kv_count 固定 uint64 非 ULEB、value_type 枚举严格值、
+        //   gguf_type_size FLOAT32=4/BOOL=1, LOG 宏补 android/log.h include,
+        //   tensor offset 改为 weights_start + tensor.off 而非循环内 r.off,
+        //   ggml_type_size Q4_K_M=144 而非 256)
         // v1.3.24-beta: 新增从零自写的极简 Qwen 推理器（不依赖 llama.cpp 解码循环）
         //   背景: v1.3.22 在魅族 20 / 骁龙 8 Gen 2 上 llama_tokenize 探测触发 prefill 前
         //     SIGABRT, v1.3.23 硬编码 im_end id 虽不崩但仍有乱码尾巴风险.

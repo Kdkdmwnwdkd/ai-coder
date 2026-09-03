@@ -2,6 +2,9 @@
 // qwen_jni.cpp — 极简 Qwen 推理器的 JNI 入口
 // 单独编为 libqwen-jni.so, 与 libxuedi-llama.so 互不干扰.
 // Kotlin 侧类: com.xuedi.coder.model.QwenInferEngine (与 llama 的 LlamaJniEngine 分路, 同包)
+//
+// v1.3.25-fix6: 新增 SIGSEGV/SIGABRT/SIGBUS/SIGFPE 信号捕获 → 写 crash_log + LOGE,
+//   避免 "生成阶段闪退 诊断包抓不到原因" (同 llama_jni.cpp 机制).
 // =====================================================
 #include "qwen_infer.h"
 #include <jni.h>
@@ -12,13 +15,117 @@
 #include <thread>
 #include <vector>
 
+// ====== signal handler ======
+#include <signal.h>
+#include <ucontext.h>
+#include <dlfcn.h>
+#include <cstdio>
+#include <cinttypes>
+#include <sys/types.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #define LOG_TAG  "qwen-jni"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR,LOG_TAG, __VA_ARGS__)
 
-static JavaVM * g_vm = nullptr;
-static std::mutex g_mutex;
+static char       g_crash_dir[512] = "";   // Kotlin 传 crash_log 目录 (通常 App externalFilesDir)
+static std::mutex g_crash_mutex;
+
+// —— 全局状态：必须放在信号处理函数之前声明，否则 C++ 报 undeclared identifier ——
+static JavaVM    * g_vm    = nullptr;
+static std::mutex  g_mutex;
 static QwenModel * g_model = nullptr;  // 全局单例, 由 load / release 管理
+
+static void write_crash_log(const char * line) {
+    if (!line) return;
+    std::lock_guard<std::mutex> l(g_crash_mutex);
+    // 优先写 crash_dir, 失败再回退到 /data/local/tmp
+    FILE * fp = nullptr;
+    char path[1024];
+    if (g_crash_dir[0]) {
+        snprintf(path, sizeof(path), "%s/qwen_crash_log.txt", g_crash_dir);
+        fp = fopen(path, "a");
+    }
+    if (!fp) {
+        snprintf(path, sizeof(path), "/data/local/tmp/qwen_crash_log.txt");
+        fp = fopen(path, "a");
+    }
+    if (fp) {
+        fputs(line, fp); fputc('\n', fp); fflush(fp); fclose(fp);
+    }
+    LOGE("%s", line);  // 同步打到 logcat (会出现在诊断包里)
+}
+
+static struct sigaction g_old_segv, g_old_abrt, g_old_bus, g_old_fpe;
+static void gqwen_signal_handler(int sig, siginfo_t * info, void * ctx) {
+    (void)ctx;
+    char line[1024];
+    const char * sig_name = "UNKNOWN";
+    const char * guess = "native crash";
+    switch (sig) {
+        case SIGSEGV: sig_name = "SIGSEGV"; guess = "内存访问越界 (nullptr/野指针/munmap后访问/KV cache写溢出)"; break;
+        case SIGABRT: sig_name = "SIGABRT"; guess = "abort()/assert失败 → 可能 OOM mmap 失败 / ARM NEON 指令非法 / C++ std::terminate"; break;
+        case SIGBUS:  sig_name = "SIGBUS";  guess = "mmap 文件被截断 / 总线错误 (tensor mmap 越界)"; break;
+        case SIGFPE:  sig_name = "SIGFPE";  guess = "浮点除零 (sampler/div0)"; break;
+    }
+    void * offending_pc = nullptr;
+#ifdef __arm64__
+    if (ctx) {
+        ucontext_t * uc = (ucontext_t *)ctx;
+        offending_pc = (void*)uc->uc_mcontext.pc;
+    }
+#endif
+    Dl_info dli;
+    const char * lib_name = "?";
+    const char * sym_name = "?";
+    if (offending_pc && dladdr(offending_pc, &dli) && dli.dli_fname) {
+        lib_name = dli.dli_fname;
+        sym_name = dli.dli_sname ? dli.dli_sname : "(no-symbol)";
+    }
+    snprintf(line, sizeof(line),
+        "[qwen-signal] %s code=%d addr=%p pc=%p lib=%s sym=%s → %s",
+        sig_name, info ? info->si_code : -1,
+        info ? info->si_addr : nullptr,
+        offending_pc, lib_name, sym_name, guess);
+    write_crash_log(line);
+
+    // 再写一条上下文快照
+    if (g_model) {
+        auto & c = g_model->cfg;
+        snprintf(line, sizeof(line),
+            "[qwen-signal] model loaded: n_layer=%d n_embd=%d n_head=%d n_head_kv=%d head_dim=%d vocab=%d max_seq=%d",
+            c.n_layer, c.n_embd, c.n_head, c.n_head_kv, c.head_dim, c.vocab_size, c.max_seq_len);
+        write_crash_log(line);
+    } else {
+        write_crash_log("[qwen-signal] model NOT loaded (crash during load?)");
+    }
+    // 卸载信号处理 → 重新触发默认行为 (让系统正常杀死/ tombstone, 但我们的日志先落盘了)
+    struct sigaction sa{}; sa.sa_handler = SIG_DFL; sigemptyset(&sa.sa_mask);
+    if (sig == SIGSEGV) sigaction(SIGSEGV, &sa, &g_old_segv);
+    if (sig == SIGABRT) sigaction(SIGABRT, &sa, &g_old_abrt);
+    if (sig == SIGBUS)  sigaction(SIGBUS,  &sa, &g_old_bus);
+    if (sig == SIGFPE)  sigaction(SIGFPE,  &sa, &g_old_fpe);
+    raise(sig);
+}
+static void gqwen_install_signals() {
+    static bool installed = false;
+    if (installed) return;
+    installed = true;
+    struct sigaction sa{};
+    sa.sa_sigaction = gqwen_signal_handler;
+    sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&sa.sa_mask);
+    sigaddset(&sa.sa_mask, SIGSEGV);
+    sigaddset(&sa.sa_mask, SIGABRT);
+    sigaddset(&sa.sa_mask, SIGBUS);
+    sigaddset(&sa.sa_mask, SIGFPE);
+    sigaction(SIGSEGV, &sa, &g_old_segv);
+    sigaction(SIGABRT, &sa, &g_old_abrt);
+    sigaction(SIGBUS,  &sa, &g_old_bus);
+    sigaction(SIGFPE,  &sa, &g_old_fpe);
+    LOGI("signal handlers installed (SIGSEGV/ABRT/BUS/FPE)");
+}
 
 // =====================================================
 //  回调桥: 把 C 回调转为 Java 接口调用
@@ -90,8 +197,27 @@ static void cb_log_wrap(void * ud, const char * msg) {
 // =====================================================
 extern "C" JNIEXPORT jint JNI_OnLoad(JavaVM * vm, void *) {
     g_vm = vm;
+    gqwen_install_signals();  // v1.3.25-fix6: 早装信号, 后续任何 SIGxxx 都先抓再崩
     LOGI("JNI_OnLoad: libqwen-jni.so loaded");
     return JNI_VERSION_1_6;
+}
+
+// Kotlin 在系统加载后设置 crash 日志写目录
+// Kotlin 侧调用: nativeSetCrashLogDir(App.instance.getExternalFilesDir(null)!!.absolutePath)
+extern "C" JNIEXPORT void JNICALL
+Java_com_xuedi_coder_model_QwenInferEngine_nativeSetCrashLogDir(
+        JNIEnv * env, jobject, jstring jdir) {
+    if (!jdir) return;
+    const char * d = env->GetStringUTFChars(jdir, nullptr);
+    if (d) {
+        std::lock_guard<std::mutex> l(g_crash_mutex);
+        strncpy(g_crash_dir, d, sizeof(g_crash_dir)-1);
+        g_crash_dir[sizeof(g_crash_dir)-1] = 0;
+        // 创建目录 (可能不存在)
+        mkdir(g_crash_dir, 0777);
+        LOGI("crash log dir: %s", g_crash_dir);
+        env->ReleaseStringUTFChars(jdir, d);
+    }
 }
 
 extern "C" JNIEXPORT jboolean JNICALL

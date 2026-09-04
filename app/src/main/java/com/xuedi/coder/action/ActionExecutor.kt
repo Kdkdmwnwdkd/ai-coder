@@ -104,11 +104,12 @@ object ActionExecutor {
         "set_brightness_low", "set_brightness_high"
     )
 
-    // 正则：<ACTION...> ... </ACTION> 没有（我们是单标签），所以：
-    // <ACTION\s*:\s*(\S+)(?:\s+"((?:[^"\\]|\\.)*)"|(?:\s+(\S+)))?\s*>
-    // 为了更宽松，我们允许参数用引号或不用引号。
+    // 宽松正则：同时匹配
+    //   格式A：<ACTION: open_app "pkg">          （我们期望的标准格式）
+    //   格式B：<open_app 'pkg'>                  （1.5B 模型可能漏了 ACTION: 前缀）
+    // (?:ACTION\s*:\s*)? 让 ACTION: 变成可选前缀
     private val ACTION_REGEX = Regex(
-        pattern = """<\s*ACTION\s*:\s*([^\s>]+)(?:\s+("[^"]*"|'[^']*'|\S+))?\s*>""",
+        pattern = """<\s*(?:ACTION\s*:\s*)?([A-Za-z_][A-Za-z0-9_]*)(?:\s+("[^"]*"|'[^']*'|\S+))?\s*>""",
         option = RegexOption.IGNORE_CASE
     )
 

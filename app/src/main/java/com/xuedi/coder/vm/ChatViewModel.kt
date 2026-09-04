@@ -119,21 +119,14 @@ class ChatViewModel : ViewModel() {
      */
     private val ACTION_KEYWORD_RE = Regex("打开|复制|亮度|设置|安装|跳转|启动|粘贴|搜索应用")
     private val ACTION_DYNAMIC_HINT = run {
-        // 极简指令，避免 AI 把分隔符抄进输出。用 XML 风格 <user> 当分隔（LLM 不输出 XML 标签）。
-        // 规则：直接告诉 AI 要做什么，用自然语言而不是容易被复制的标记。
-        val rules = listOf(
-            "copy_to_clipboard \"要复制的文字\"",
-            "open_app \"包名\" 系统设置是 com.android.settings",
-            "open_browser \"https://网址\"",
-            "set_brightness_low / set_brightness_high",
-            "vibrate_once / show_toast \"提示\" / share \"文字\"",
-        ).joinToString("\n- ")
-        "你是一个能在手机上执行操作的助手。在回答末尾（不要在开头或中间）输出一个单独的" +
-            "ACTION 标签来执行操作。标签格式是尖括号包起来，冒号后空格分开动作名和参数：\n" +
-            "<ACTION: 动作名 \"参数\">\n" +
-            "可执行动作（白名单）：\n- $rules\n" +
-            "记住：只输出一个标签，放在回答最后一行，不要输出任何关于标签格式的说明文字。\n" +
-            "下面是用户真正说的话，你正常回答，最后加标签：\n"
+        // 极简指令，1.5B 模型能记住且少占 token。
+        // 格式故意不写 ACTION: 前缀——因为我们 ActionExecutor 已经放宽正则同时接受两种格式了。
+        // 这样 AI 只需输出 <动作名 "参数"> 就够了，prefill token 再省 2-3 个。
+        """帮用户执行操作时，回答末尾加一行，格式如：
+<open_app "包名">   <copy_to_clipboard "文字">   <vibrate_once>
+设置=com.android.settings  浏览器=open_browser  复制=copy_to_clipboard  震动=vibrate_once  提示=show_toast
+
+"""
     }
 
     /**
@@ -308,21 +301,8 @@ class ChatViewModel : ViewModel() {
         val rawContent = text.trim()
         if (rawContent.isEmpty()) return
 
-        // 🔥 1.4 动态提示词注入（核心：不常驻系统提示词，不修改 LlamaJniEngine）：
-        //   · 匹配到动作关键词（打开/复制/亮度/设置/安装…）→ 临时 prepend 指令，让 AI 输出 ACTION 标签。
-        //   · 其余普通闲聊（"你好"/写代码/解释）→ 保持原样，Prefill token 不变（≈200 token）。
-        //   · 联网搜索 @搜索：先立刻触发插件异步后台搜索（非阻塞，不卡 UI，0 ANR 风险）。
-        val hitAction = ACTION_KEYWORD_RE.containsMatchIn(rawContent)
-        val contentForEngine = if (hitAction) ACTION_DYNAMIC_HINT + rawContent else rawContent
-        runCatching {
-            // 两个插件的 onPreSend 都必须是 <1ms（不联网/不阻塞）：
-            //   · ToolExecutionPlugin.onPreSend 原样返回（占位）
-            //   · WebSearchPlugin.onPreSend 看到 @搜索 立刻 return 原文 + 后台 launch 协程搜
-            val step1 = toolPlugin.onPreSend(rawContent)
-            val unusedResult = searchPlugin.onPreSend(step1)
-            // 禁止 val _ 单下划线命名（Kotlin 1.7+ 保留），上面用个显式名就 OK
-            unusedResult ?: Unit
-        }
+        // 🔴 删除了旧的 onPreSend 调用（返回值被丢了等于没做）。
+        // WebSearchPlugin 改为在后台协程里同步搜（最多 5s），见下面 Dispatchers.Default 里。
 
         // 🔴 ANR 双保险修复：nativeChat JNI 是 CPU 密集阻塞，推理工作流必须完整地在
         //    后台协程池（Dispatchers.Default）里跑，不能在 Main.immediate 上发起 collect。
@@ -362,6 +342,35 @@ class ChatViewModel : ViewModel() {
                 chatDao.upsert(ChatMsgEntity.from(userMsg, topicId))
                 topicDao.touchActive(topicId, System.currentTimeMillis())
             }
+
+            // 🔥 1.5 同步搜索 + 动态提示词（在 Dispatchers.Default 里跑，不卡 UI）：
+            //   · @搜索 关键词 → 同步搜 SearXNG（5s 超时），搜到的 prepend 到 userMsg 里
+            //   · 动作关键词 → prepend ACTION_DYNAMIC_HINT
+            var effectiveInput = rawContent
+            if (rawContent.startsWith("@搜索")) {
+                val query = rawContent.removePrefix("@搜索").trim()
+                if (query.isNotEmpty()) {
+                    _infStatus.value = InfStatus.Preparing
+                    _infElapsedMs.value = 0L
+                    val searchResult = searchPlugin.searchSync(query, timeoutMs = 5_000L)
+                    if (searchResult != null) {
+                        // 把搜索结果 prepend 到用户消息正文里（DB 也会更新）
+                        val withSearch = searchResult + "\n\n【用户问题】$query"
+                        effectiveInput = withSearch
+                        // 同时更新 UI 上那条 userMsg 的 content
+                        val updatedUserMsg = userMsg.copy(content = withSearch)
+                        _messages.value = _messages.value.map {
+                            if (it.id == userMsg.id) updatedUserMsg else it
+                        }
+                        viewModelScope.launch(Dispatchers.IO) {
+                            chatDao.upsert(ChatMsgEntity.from(updatedUserMsg, topicId))
+                        }
+                    }
+                }
+            }
+            val hitAction = ACTION_KEYWORD_RE.containsMatchIn(rawContent)
+            val contentForEngine = if (hitAction) ACTION_DYNAMIC_HINT + effectiveInput else effectiveInput
+
 
             // 🔴 TODO-4c/4d 推理状态流：
             //   Preparing（启动 ticker）→ 首个 Token 转 Running → Done 转 Idle / Error 转 Failed|Timeout

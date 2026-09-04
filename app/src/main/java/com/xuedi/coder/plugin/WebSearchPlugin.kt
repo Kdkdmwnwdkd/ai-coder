@@ -63,6 +63,21 @@ class WebSearchPlugin(
     private val trigger = Regex("""^@搜索\s+(.+)$""", RegexOption.DOT_MATCHES_ALL)
 
     /**
+     * 同步阻塞搜索（在协程里调用，不卡主线程）。
+     * 最多等 [timeoutMs] 毫秒，超时返回 null。
+     * ChatViewModel 在 Dispatchers.Default 里调这个，搜完再喂给 Llama——这样 AI 一开始
+     * 就能看到搜索结果，而不是异步搜完才补（那时候用户已经在等 AI 回复了）。
+     *
+     * @return 拼好的 "【联网搜索结果 — query】\n1. 标题: 摘要\n..." 文本，或 null（搜不到/超时）。
+     */
+    suspend fun searchSync(query: String, timeoutMs: Long = 5_000L): String? {
+        if (query.isBlank()) return null
+        val result = withTimeoutOrNull(timeoutMs) { runSearXNG(query) }
+        if (result.isNullOrBlank()) return null
+        return buildReport(query, result)
+    }
+
+    /**
      * 上一次注入结果（防止同一个 userMsg 因为 sendMessage 重入被多次注入）。
      */
     private val lastInjected = AtomicReference<String?>(null)

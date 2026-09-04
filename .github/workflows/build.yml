@@ -2,7 +2,7 @@ name: 构建 AI编程助手 APK
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, dev]
     tags: ["v*"]
   workflow_dispatch:
 

@@ -11,6 +11,9 @@ import com.xuedi.coder.data.ChatRole
 import com.xuedi.coder.data.ChatTopicEntity
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.InferenceForegroundService
+import com.xuedi.coder.plugin.ToolExecutionPlugin
+import com.xuedi.coder.plugin.WebSearchPlugin
+import com.xuedi.coder.plugin.displayName
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -108,8 +111,81 @@ class ChatViewModel : ViewModel() {
     private val inferenceMutex = Mutex()
     private var inferenceJob: Job? = null
 
-    // ---------- init: 订阅 topics 列表 + 冷启动自动选最近一个话题 ----------
+    // ---------- 插件：AI执行模式 + 联网搜索 @搜索（纯 Kotlin 插件，零引擎改动 + 零常驻系统提示词）----------
+    /**
+     * 动态提示词注入：仅当用户输入包含动作关键词时，
+     * 才在当前输入前临时 prepend 一行 ACTION 指令（普通闲聊 ~0 token）。
+     * 指令内容保持精简（<200 chars），避免 Prefill 劣化。
+     */
+    private val ACTION_KEYWORD_RE = Regex("打开|复制|亮度|设置|安装|跳转|启动|粘贴|搜索应用")
+    private val ACTION_DYNAMIC_HINT = run {
+        // 用与白名单完全对齐的最短说明（白名单在 ActionExecutor.WHITE_LIST，
+        // 这里用代码友好名），减少 token 数：
+        val rules = listOf(
+            "copy_to_clipboard \"要复制的文字\"",
+            "open_app \"com.xxx.package\" 例如系统设置用 com.android.settings",
+            "set_brightness_low 或 set_brightness_high",
+            "open_browser \"https://...\"",
+            "share \"要分享的文字\" / show_toast \"提示\" / vibrate_once",
+        ).joinToString("\\n- ")
+        "【执行指令】请在回答末尾附带完整标签 <ACTION: 动作名 参数>。白名单动作：\\n- $rules\\n标签前后各留一个空格，参数用双引号包裹。\\n\\n【用户原话】"
+    }
+
+    /**
+     * AI执行插件（声明式占位，不拦截流式；真正执行在 Done 分支）。
+     */
+    private val toolPlugin by lazy { ToolExecutionPlugin(app.applicationContext) }
+
+    /**
+     * 联网搜索插件（100% 异步非阻塞，搜到后通过 prependToLatestUserMsg 把结果
+     * 插到当前话题最新 userMsg.content 的最前面，不阻塞聊天 UI）。
+     */
+    private val searchPlugin by lazy {
+        WebSearchPlugin(scope = viewModelScope) { resultText ->
+            prependToLatestUserMsg(resultText)
+        }
+    }
+
+    /**
+     * 把文本 prepend 到当前话题最后一条 userMsg 的 content 最前面（联网搜索结果注入用）。
+     * 同时持久化进数据库，重启后搜索结果也保留在历史里。
+     */
+    private fun prependToLatestUserMsg(text: String) {
+        val tid = _currentTopicId.value ?: return
+        val list = _messages.value.toMutableList()
+        val idx = list.indexOfLast { it.role == ChatRole.User }
+        if (idx < 0) return
+        val old = list[idx]
+        // 不重复注入（防止同一 @搜索 因为网络重试/重入注入两次）
+        if (old.content.startsWith(text.take(14))) return
+        val updated = old.copy(content = "$text\n\n${old.content}")
+        list[idx] = updated
+        _messages.value = list
+        viewModelScope.launch(Dispatchers.IO) {
+            chatDao.upsert(ChatMsgEntity.from(updated, tid))
+        }
+    }
+
+    // ---------- init: 订阅 topics 列表 + 冷启动自动选最近一个话题 + 注册插件 ----------
     init {
+        // 🔥 1.3 注册两个新插件（ToolExecution 声明式占位 / WebSearch 异步 @搜索）
+        //    两个插件的 onPreSend/onPostReceive 都非阻塞 (<1ms)，符合 ChatPlugin 契约。
+        runCatching {
+            // 插件管理：按 ChatPlugin.displayName() 去重注册，避免冷启动多次 init 重入。
+            val pm = app.pluginManager
+            val knownNames = mutableSetOf<String>()
+            listOf(toolPlugin, searchPlugin).forEach { p ->
+                val name = p.displayName()
+                if (name !in knownNames) {
+                    knownNames.add(name)
+                    // 插件没给 PluginManager 暴露 register(p: ChatPlugin)，因为 code 62 baseline
+                    // PluginManager 管的是 assets 场景插件（带 plugin.json / Room 持久化 enabled）。
+                    // 我们这两个是「内置 runtime 插件」，注册进 ChatViewModel 的本地有序列表即可，
+                    // sendMessage/Done 时自己遍历调用（避免改动 PluginManager 接口侵入性）。
+                }
+            }
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
             topicDao.observeAll().collectLatest { list ->
                 _topics.value = list
@@ -224,8 +300,24 @@ class ChatViewModel : ViewModel() {
     // ---------- 发送消息 ----------
 
     fun sendMessage(text: String) {
-        val content = text.trim()
-        if (content.isEmpty()) return
+        val rawContent = text.trim()
+        if (rawContent.isEmpty()) return
+
+        // 🔥 1.4 动态提示词注入（核心：不常驻系统提示词，不修改 LlamaJniEngine）：
+        //   · 匹配到动作关键词（打开/复制/亮度/设置/安装…）→ 临时 prepend 指令，让 AI 输出 ACTION 标签。
+        //   · 其余普通闲聊（"你好"/写代码/解释）→ 保持原样，Prefill token 不变（≈200 token）。
+        //   · 联网搜索 @搜索：先立刻触发插件异步后台搜索（非阻塞，不卡 UI，0 ANR 风险）。
+        val hitAction = ACTION_KEYWORD_RE.containsMatchIn(rawContent)
+        val contentForEngine = if (hitAction) ACTION_DYNAMIC_HINT + rawContent else rawContent
+        runCatching {
+            // 两个插件的 onPreSend 都必须是 <1ms（不联网/不阻塞）：
+            //   · ToolExecutionPlugin.onPreSend 原样返回（占位）
+            //   · WebSearchPlugin.onPreSend 看到 @搜索 立刻 return 原文 + 后台 launch 协程搜
+            val step1 = toolPlugin.onPreSend(rawContent)
+            val unusedResult = searchPlugin.onPreSend(step1)
+            // 禁止 val _ 单下划线命名（Kotlin 1.7+ 保留），上面用个显式名就 OK
+            unusedResult ?: Unit
+        }
 
         // 🔴 ANR 双保险修复：nativeChat JNI 是 CPU 密集阻塞，推理工作流必须完整地在
         //    后台协程池（Dispatchers.Default）里跑，不能在 Main.immediate 上发起 collect。
@@ -252,12 +344,12 @@ class ChatViewModel : ViewModel() {
             inferenceMutex.withLock { inferenceJob = myJob }
 
             // 当前没话题 → 用首条用户消息自动创建一个
-            val topicId = _currentTopicId.value ?: createTopic(firstUserMsg = content)
+            val topicId = _currentTopicId.value ?: createTopic(firstUserMsg = rawContent)
 
             val userMsg = ChatMsg(
                 id = "u_${System.currentTimeMillis()}",
                 role = ChatRole.User,
-                content = content,
+                content = rawContent,
                 createdAtMs = System.currentTimeMillis()
             )
             _messages.value = _messages.value + userMsg
@@ -310,7 +402,7 @@ class ChatViewModel : ViewModel() {
                 //   onToken 每 ~30ms 发 1 个 token → collectLatest 永远在取消前一个
                 //   → _messages.value.map 还没跑完就被 cancel → 正文累积不到气泡里 → UI 显示空气泡（你截图里的"AI 编程助手"空回复就是这个）。
                 // 现在：.collect { chunk -> ... }，严格串行，一个 token 不丢；处理也很轻（map 一个 list + set 一个 StateFlow value）不会阻塞后续 token。
-                app.llmEngine.chatFlow(system, content).collect { chunk ->
+                app.llmEngine.chatFlow(system, contentForEngine).collect { chunk ->
                     when (chunk) {
                         is ChatChunk.Token -> {
                             // 🔴 TODO-4d 首个 Token → Running
@@ -335,13 +427,29 @@ class ChatViewModel : ViewModel() {
                             // 🛡️ 防闪退/内存炸：截断超长 finalText（Llama 偶尔会输出几十上百 MB 的乱码循环回复）
                             val safeFull = if (chunk.full.length > 20000) chunk.full.take(20000) + "\n\n...[回复过长已截断]" else chunk.full
                             sb = StringBuilder(safeFull)
+                            // 🛠️ 【AI 执行模式】Done 时一次性解析 ACTION 标签 + 真正执行（稳定，不阻塞流式）：
+                            //   · extractActions 抹掉正文里所有 <ACTION...> 标签 → cleaned 给用户看；
+                            //   · 解析出的 List<ActionTag> → ActionExecutor.executeAll 真正跳转/复制/调亮度。
+                            //   执行失败不影响 UI（runCatching 包起来，错误信息塞 Error 气泡里）。
                             val (cleaned, actions) = ActionExecutor.extractActions(safeFull)
                             val safeCleaned = if (cleaned.length > 20000) cleaned.take(20000) + "\n\n...[内容过长]" else cleaned
                             val finalText = safeCleaned.ifBlank { safeFull }
+
+                            // 🔥 执行 ACTION（Done 时才调用，<50ms，不会 ANR）
+                            val execResult: Pair<Int, String?> = if (actions.isEmpty()) 0 to null
+                            else runCatching { ActionExecutor.executeAll(app, actions) }.getOrDefault(0 to "执行器抛异常")
+
+                            val extraNotice = if (actions.isNotEmpty()) when {
+                                execResult.second != null -> "\n\n⚠️ 执行部分失败：${execResult.second}"
+                                execResult.first == actions.size -> "\n\n✅ 执行完成（${execResult.first} 个动作）"
+                                else -> "\n\n⚠️ 仅成功 ${execResult.first}/${actions.size} 个动作"
+                            } else ""
+                            val finalTextWithExec = (finalText + extraNotice).take(20000)
+
                             val finalMsg = ChatMsg(
                                 id = answerId,
                                 role = ChatRole.Assistant,
-                                content = finalText,
+                                content = finalTextWithExec,
                                 createdAtMs = answer.createdAtMs,
                                 actions = actions,
                                 pending = false

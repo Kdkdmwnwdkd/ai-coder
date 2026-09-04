@@ -162,6 +162,17 @@ class PluginManager(private val ctx: Context) {
         dao.setEnabled(id, enable)
     }
 
+    /**
+     * 【v1.3.26-gpu1-hotfix1-modes-v2 改造：零常驻全局提示词】
+     *
+     * 只拼 code 62 原有的 BASE_PROMPT + 当前已开启场景插件的 inject_system（Android/Java 等模板）。
+     *
+     * 🔥 关键删除：旧版本把 ACTION_RULE（"如需帮用户执行操作，输出 ACTION 标签…"）永久拼在
+     * system prompt 里 → 导致普通"你好"闲聊每次 Prefill 都多 ~200 token，1.5B 模型 Prefill 多 ~2s。
+     * 新版本按规则 1「不改系统提示词（不常驻），只在需要时动态注入」：
+     *   ACTION 相关的指令只在 ChatViewModel.sendMessage 检测到「打开/复制/亮度/设置/安装」
+     *   动作关键词时，临时 prepend 到用户输入里。普通闲聊完全不增加 token。
+     */
     suspend fun buildMergedSystemPrompt(): String {
         val base = StringBuilder(BASE_PROMPT)
         val enabled = dao.getAll().filter { it.enabled }
@@ -173,7 +184,7 @@ class PluginManager(private val ctx: Context) {
                 }
             }
         }
-        base.append("\n\n").append(ACTION_RULE)
+        // 🔥 这里不再 append ACTION_RULE（遵守「不修改全局系统提示词」的设计规则）。
         return base.toString()
     }
 
@@ -201,21 +212,6 @@ class PluginManager(private val ctx: Context) {
 - 写代码时给出可以直接复制的完整片段，保留全部 import 语句和必要上下文。
 - 不编造不存在的 API；不确定就明确标注"需要验证"。
 - 回答中的代码块必须用 ```语言``` 形式包裹，例如 ```kotlin ... ``` 或 ```bash ... ```。
-        """.trimIndent()
-
-        val ACTION_RULE = """
-如需帮用户执行操作（复制代码、打开APP、跳转设置等），请在代码或回答最后附带一个完整的 ACTION 标签：
- <ACTION: 动作名 参数>
-可用动作（白名单）：
-- copy_to_clipboard "要复制的文本或代码"
-- open_app "com.xxx.package" 例如 open_app "com.android.settings" / open_app "com.tencent.mm"
-- open_browser "https://..."
-- show_toast "提示信息"
-- vibrate_once
-- take_screenshot
-- set_brightness_low | set_brightness_high
-
-ACTION 标签必须完整输出，前后各留一个空格。
         """.trimIndent()
     }
 }

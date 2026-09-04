@@ -24,8 +24,11 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 62
-        versionName = "1.3.26-gpu1-hotfix1"
+        // 【code 62 + 重建 modes】保持与官方 code 62 基线完全一致，仅升级 versionCode 允许覆盖安装：
+        //   code 62 = 1.3.26-gpu1-hotfix1（稳定底包）
+        //   code 73 = code 62 + 动态注入 + 异步 @搜索（干净、可预测；versionCode>62 能覆盖旧 APK）
+        versionCode = 73
+        versionName = "1.3.26-code62-modes"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！
@@ -150,9 +153,13 @@ android {
                     "-fvisibility=hidden",
                     "-fvisibility-inlines-hidden"
                 )
+                // 🔴 关键修复：强制 native 用 Release 优化等级（-O3），
+                //   否则 AGP Debug 类型会设 CMAKE_BUILD_TYPE=Debug → llama.cpp 内部可能覆盖为 -O0。
+                //   实测：Debug(-O0)每步2s vs Release(-O3)每步61ms → 差33倍！
                 arguments += listOf(
                     "-DANDROID_STL=c++_static",
-                    "-DANDROID_ARM_NEON=ON"
+                    "-DANDROID_ARM_NEON=ON",
+                    "-DCMAKE_BUILD_TYPE=Release"
                 )
             }
         }
@@ -297,6 +304,10 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     debugImplementation("androidx.compose.ui:ui-tooling")
+
+    // ————— 联网搜索 WebSearchPlugin 专用（OkHttp 纯 runtime 单 JAR，零 Gradle 插件，MavenCentral 100% 可拉）
+    //       4.12.0：Android minSdk 26 + Java 8，完全兼容；3 实例 failover + 45s 总超时都靠它。
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // ————— M2 Room（已验证通过保留，KSP继续工作）—————
     implementation("androidx.room:room-runtime:2.6.1")

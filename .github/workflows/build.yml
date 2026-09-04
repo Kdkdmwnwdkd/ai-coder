@@ -134,7 +134,7 @@ jobs:
           echo "→ $APK  →  $OUT"
           ls -lh "$OUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: AI编程助手-debug-apk
           path: ${{ steps.apk.outputs.apk_file }}
@@ -142,7 +142,7 @@ jobs:
           if-no-files-found: error
 
       - name: 上传完整 Gradle 日志（方便后续排查）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: gradle-build-debug-log
@@ -255,14 +255,14 @@ jobs:
           echo "rapk_file=$OUT" >> "$GITHUB_OUTPUT"
           ls -lh "$OUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: AI编程助手-release-apk
           path: ${{ steps.rapk.outputs.rapk_file }}
           retention-days: 90
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: gradle-build-release-log
@@ -282,12 +282,12 @@ jobs:
       contents: write
     steps:
       - name: 下载 Release APK artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: AI编程助手-release-apk
 
       - name: 上传到 GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.0.8
         with:
           files: "*.apk"
           generate_release_notes: true
@@ -359,7 +359,7 @@ jobs:
           echo "✅ 拿到国内直链: $URL"
 
       - name: 把直链作为 Release asset 挂回
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.0.8
         with:
           tag_name: ${{ env.TAG }}
           files: mirror-url.txt

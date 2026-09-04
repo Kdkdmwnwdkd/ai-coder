@@ -30,3 +30,7 @@ signing/*.b64
 !signing/README.md
 app/src/main/cpp/llama.cpp/
 app/schemas/
+
+# code 62: 防止本地 Ninja 临时目录/构建日志被误 commit（之前 vc 清理版不小心提交过一次）
+.ninja-j1/
+build-vulkan-debug.log

@@ -24,8 +24,8 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 62
-        versionName = "1.3.26-gpu1-hotfix1"
+        versionCode = 63
+        versionName = "1.3.26-gpu1-hotfix1-modes"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！
@@ -323,6 +323,11 @@ dependencies {
     //    Google 官方出品，2008 年存在至今，MavenCentral 坐标 100% 可拉：
     //    https://repo1.maven.org/maven2/com/google/code/gson/gson/2.10.1/
     implementation("com.google.code.gson:gson:2.10.1")
+
+    // code 62 - 联网搜索插件（WebSearchPlugin）依赖：OkHttp 4.12.0
+    //   · Square 出品，稳定 Android HTTP 客户端；纯 runtime，单 JAR，无 Gradle 插件。
+    //   · 3 SearXNG 实例 failover 需要的超时/重试/重定向 都是 OkHttp 原生支持。
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // 2) DataStore Preferences：ThemeStore 存"背景URI字符串 + 透明度Float"的持久化容器。
     //    Google 官方（属于 AndroidX），MavenCentral 坐标：

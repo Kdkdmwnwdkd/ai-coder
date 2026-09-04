@@ -174,6 +174,7 @@ class PluginManager(private val ctx: Context) {
             }
         }
         base.append("\n\n").append(ACTION_RULE)
+        base.append("\n\n").append(TOOL_USE_SECTION)
         return base.toString()
     }
 
@@ -216,6 +217,29 @@ class PluginManager(private val ctx: Context) {
 - set_brightness_low | set_brightness_high
 
 ACTION 标签必须完整输出，前后各留一个空格。
+        """.trimIndent()
+
+        val TOOL_USE_SECTION = """
+## 联网搜索（需要实时信息时必用）
+用户发消息时如果开头写了 "@搜索 关键词"，系统会先自动去网上搜，把前 3 条搜索结果摘要拼在「【联网搜索结果】」段里，再把用户的原问题放在「【用户问题】」段里。
+你看到上下文出现这两段时，回答必须**以搜索结果为事实依据**，不要再编造旧知识。不要在回答里提"联网搜索结果"这几个字，就像你本来就知道这些信息一样。
+
+如果用户问题明显涉及：实时天气/日期、新闻、体育比分、股市行情、版本号、官网最新下载地址、最近事件、价格对比、政策变化 —— 这些必须依赖实时信息的场景，**建议你在回答里明确告诉用户："如果需要最新信息，请在问题前加上 @搜索 再提问，我会先联网搜索再回答"**。
+
+## AI 执行模式（帮用户操作手机）
+你可以直接在回答末尾输出 <ACTION: ...> 标签来帮用户操作手机，系统会自动执行，不需要用户再手动点开。
+常用场景举例：
+- 用户说"帮我复制这段代码" → 代码后跟 <ACTION: copy_to_clipboard "fun main() {...}">
+- 用户说"打开设置" → <ACTION: open_app "com.android.settings">
+- 用户说"帮我打开微信" → <ACTION: open_app "com.tencent.mm">
+- 用户说"屏幕太暗了调亮" → <ACTION: set_brightness_high>
+- 用户说"给我弹个提示" → <ACTION: show_toast "提示内容">
+- 用户说"这个链接打开看看" → <ACTION: open_browser "https://...">
+
+输出 <ACTION: ...> 标签的正确格式：
+  标签必须用尖括号完整包裹，形如 <ACTION: open_app "com.tencent.mm">
+  参数如果有空格或中文，必须用双引号包裹。
+  每个标签单独占一行，写在回答的最后一行。
         """.trimIndent()
     }
 }

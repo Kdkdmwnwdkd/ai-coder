@@ -139,6 +139,17 @@ class ChatViewModel : ViewModel() {
         }
     }
 
+    // =================================================================
+    // code 62 新增：内置插件列表（纯 Kotlin，零引擎改动）
+    //   · onPreSend：在 nativeChat 调用前，按序处理用户输入（联网搜索 @搜索 拦截）
+    //   · onPostReceive：流式 token 后处理；Done 时刻 ActionExecutor 已经帮我们执行 action
+    // =================================================================
+    private val builtinPlugins by lazy {
+        listOf(
+            com.xuedi.coder.plugin.WebSearchPlugin()
+        )
+    }
+
     // ---------- 话题操作 ----------
 
     /** 创建新话题，返回 topicId；可选首条用户消息用于自动生成标题 */
@@ -224,8 +235,17 @@ class ChatViewModel : ViewModel() {
     // ---------- 发送消息 ----------
 
     fun sendMessage(text: String) {
-        val content = text.trim()
-        if (content.isEmpty()) return
+        val rawContent = text.trim()
+        if (rawContent.isEmpty()) return
+
+        // 🧩 code 62 插件：onPreSend 链路（按序折叠所有内置 ChatPlugin）
+        //    - WebSearchPlugin 会把 "@搜索 xxx" 变成 【联网搜索结果】...【用户问题】@搜索 xxx
+        //    - 失败时自动 fail-open，不会抛错也不会改原文
+        val content = runCatching {
+            var v = rawContent
+            builtinPlugins.forEach { v = it.onPreSend(v) }
+            v
+        }.getOrDefault(rawContent)
 
         // 🔴 ANR 双保险修复：nativeChat JNI 是 CPU 密集阻塞，推理工作流必须完整地在
         //    后台协程池（Dispatchers.Default）里跑，不能在 Main.immediate 上发起 collect。
@@ -352,6 +372,25 @@ class ChatViewModel : ViewModel() {
                             viewModelScope.launch(Dispatchers.IO) {
                                 chatDao.upsert(ChatMsgEntity.from(finalMsg, topicId))
                                 topicDao.touchActive(topicId, System.currentTimeMillis())
+                            }
+                            // 🧩 code 62 AI 执行模式：Done 时刻真正执行解析出的 ACTION 标签
+                            //     所有动作被 baseline 的 ActionExecutor 白名单严格包裹，异常会被
+                            //     executeAll 内部 runCatching 吞掉，返回 (ok, firstError)，
+                            //     绝不影响 UI、绝不闪退。
+                            if (actions.isNotEmpty()) {
+                                viewModelScope.launch(Dispatchers.Main) {
+                                    runCatching {
+                                        val (ok, firstErr) = ActionExecutor.executeAll(app, actions)
+                                        // 有动作但全失败时，Toast 打一条第一个错误给用户（可手动排查）
+                                        if (ok == 0 && firstErr != null) {
+                                            android.widget.Toast.makeText(
+                                                app,
+                                                "执行失败: $firstErr",
+                                                android.widget.Toast.LENGTH_SHORT
+                                            ).show()
+                                        }
+                                    }
+                                }
                             }
                         }
                         is ChatChunk.Error -> {

@@ -40,7 +40,14 @@
 // =============================================================================
 // 全局常量（b5180 魅族 20 踩过的坑，全部硬编码）
 // =============================================================================
-static constexpr int   SAFE_N_BATCH    = 1;     // 唯一不崩的 batch 大小（硬证据：fix10 n_batch=1 跑通 1024t）
+// =====================================================
+// 方案D 最终一次（vc66）：SAFE_N_BATCH 1→32 + 打开 Prefill-BATCH 分支
+//   · 目标：247 tokens Prefill 一次 llama_decode，从 71s 降到 ~11s
+//   · 注意：llama.cpp 内部会把 n_batch < GGML_KQ_MASK_PAD(32) 强制抬到 32，
+//          设 1 只是自欺欺人，真实一直都是 32。
+//   · 失败约定：若 SIGSEGV/SIGABRT 本次结果就是证明，永久不用再修改。
+// =====================================================
+static constexpr int   SAFE_N_BATCH    = 32;    // 方案D最终版：32 批量 Prefill
 static constexpr int   DEFAULT_MAX_GEN = 2048;  // v1.3.25-stable: 800 → 2048，给更长对话留空间
 static constexpr int   EOS_GUARD_STEPS = 32;    // v1.3.25-stable: argmax 采样下"生成 7 token 就 EOS"的根治：前 32 步硬禁 EOS
 static constexpr int   N_KV_MAX_SHIFT  = 0;     // 预留
@@ -304,10 +311,10 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     LOGI("nativeInit ✅ model loaded。n_vocab=%d n_embd=%d vocab=%p",
          llama_vocab_n_tokens(vocab), llama_model_n_embd(model), (const void*)vocab);
 
-    // ---- 2. llama_init_from_model（cparams.n_batch 强制 SAFE_N_BATCH=1）----
+    // ---- 2. llama_init_from_model（cparams.n_batch=SAFE_N_BATCH=32，方案D最终版）----
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx       = (uint32_t)n_ctx;
-    cparams.n_batch     = (uint32_t)SAFE_N_BATCH;   // 🔴 关键：强制 1，不允许 llama.cpp 内部覆盖
+    cparams.n_batch     = (uint32_t)SAFE_N_BATCH;   // 方案D：32，对齐 Prefill-BATCH 上限
     cparams.n_ubatch    = (uint32_t)SAFE_N_BATCH;
     cparams.n_threads   = (uint32_t)n_threads;
     cparams.n_threads_batch = (uint32_t)n_threads;
@@ -478,8 +485,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         bool batch_ok    = false;
         bool batch_tried = false;  // v1.3.25-perf2 fix: 是否"真的进入过批量尝试分支"。只有 tried+failed 才叫 BATCH_FB。
         const int N = (int)tokens.size();
-        // 🔴 PERM DISABLED: 原条件 (N > 1 && N <= 1024)。保留结构，后续开只要改 false &&。
-        if (false && N > 1 && N <= 1024) {
+        // 🔴 方案D最终版（vc66）：打开 Prefill-BATCH 分支。
+        // 若本次仍 SIGSEGV/SIGABRT，证明 perf1 代码级断言（llama_build_attn_rope）永久无法绕过，永久回退。
+        if (N > 1 && N <= 1024) {
             batch_tried = true;
             LOGI("🔬 PREFILL-BATCH: 尝试一次性 prefill（N=%d tokens）。若 ret!=0 立即 fallback 逐 token", N);
             // 单独构造临时 batch_all（不影响下面的 SAFE batch 生命周期变量，避免 cleanup 双 free）

@@ -221,9 +221,6 @@ fun SettingsPage(
     // ---- 诊断运行态 ----
     val diagLines = remember { mutableStateListOf<String>() }
     var diagRunning by remember { mutableStateOf(false) }
-    // 🔴 v1.3.11 方案A：模拟模式开关状态（镜像 LlamaJniEngine.forceMockMode，
-    //    用 remember/mutableStateOf 让 Compose 重组；切换时同步回静态变量）
-    var mockMode by remember { mutableStateOf(LlamaJniEngine.forceMockMode) }
     val diagTsFmt = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.CHINA) }
     fun ts() = diagTsFmt.format(Date())
     fun addLog(line: String) { diagLines.add("[${ts()}] $line") }
@@ -294,107 +291,9 @@ fun SettingsPage(
         }
         item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
 
-        // ---- 分组：模拟模式（防闪退兜底）----
-        item(key = "mock-mode-group") {
-            SectionHeader(title = "🧱 模拟模式（防闪退兜底）")
-        }
-        item(key = "mock-mode-card") {
-            OutlinedCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 56.dp)
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "启用模拟回复（不跑真模型，防闪退）",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "ON=逐字返回预设回复，绕过 C++ 引擎；OFF=调用真推理",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = mockMode,
-                        onCheckedChange = { newChecked ->
-                            mockMode = newChecked
-                            LlamaJniEngine.forceMockMode = newChecked
-                            val tip = if (newChecked) "已切换到模拟模式" else "已切换到真实推理模式"
-                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                }
-            }
-        }
-
-        // ---- 分组 2.5：推理偏好开关（方案A/C 用户级回退）----
+        // ---- 分组 2.5：推理偏好 ----
         item(key = "perf-prefs-group") {
-            SectionHeader(title = "🧠 推理偏好（默认模型·GPU加速）")
-        }
-        item(key = "pref-vulkan") {
-            val app = App.instance
-            // 读一次当前值做 Compose state；异步写回 ModelPrefs DataStore
-            val (useVulkan, setUseVulkan) = remember {
-                mutableStateOf(
-                    runBlocking(Dispatchers.IO) {
-                        runCatching { app.modelPrefs.getUseVulkanAccel() }
-                            .getOrDefault(ModelPrefsStore.DEFAULT_USE_VULKAN)
-                    }
-                )
-            }
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 56.dp)
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "允许 Vulkan GPU 加速",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "ON=尝试把模型层卸载到 Adreno GPU（OFF=强制CPU，最稳定回退）。加载失败时会自动降回CPU。",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = useVulkan,
-                        onCheckedChange = { checked ->
-                            setUseVulkan(checked)
-                            (app as? CoroutineScope)?.launch(Dispatchers.IO) {
-                                runCatching { app.modelPrefs.setUseVulkanAccel(checked) }
-                            }
-                            val tip = if (checked)
-                                "✅ 已开启 Vulkan（重新加载模型生效，失败自动CPU兜底）"
-                            else
-                                "🛡️ 已切换到纯 CPU（下一次加载模型生效）"
-                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                }
-            }
+            SectionHeader(title = "🧠 推理偏好（默认模型）")
         }
         item(key = "pref-fast-15b") {
             val app = App.instance

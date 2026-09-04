@@ -22,10 +22,10 @@ android {
 
     defaultConfig {
         applicationId = "com.xuedi.coder"
-        minSdk = 26
+        minSdk = 26  // vc65 CPU 回滚到 code62 同等覆盖范围（Android 8.0+）
         targetSdk = 34
-        versionCode = 63
-        versionName = "1.3.26-gpu2-Vulkan"
+        versionCode = 67
+        versionName = "1.3.27-perfD-vc67"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！
@@ -150,6 +150,9 @@ android {
                     "-fvisibility=hidden",
                     "-fvisibility-inlines-hidden"
                 )
+                // 强制 ninja 串行：cgroup 只有 4G、clang++ 每进程 300MB+，
+                // 并行编译会叠加到 >2G 把 Gradle daemon 挤去 OOM-kill。
+                // 代价：llama.cpp ≈350 个 .cpp 单进程编译 ~3~4 分钟；收益：能出 APK。
                 arguments += listOf(
                     "-DANDROID_STL=c++_static",
                     "-DANDROID_ARM_NEON=ON"

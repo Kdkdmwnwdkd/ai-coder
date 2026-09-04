@@ -119,16 +119,21 @@ class ChatViewModel : ViewModel() {
      */
     private val ACTION_KEYWORD_RE = Regex("打开|复制|亮度|设置|安装|跳转|启动|粘贴|搜索应用")
     private val ACTION_DYNAMIC_HINT = run {
-        // 用与白名单完全对齐的最短说明（白名单在 ActionExecutor.WHITE_LIST，
-        // 这里用代码友好名），减少 token 数：
+        // 极简指令，避免 AI 把分隔符抄进输出。用 XML 风格 <user> 当分隔（LLM 不输出 XML 标签）。
+        // 规则：直接告诉 AI 要做什么，用自然语言而不是容易被复制的标记。
         val rules = listOf(
             "copy_to_clipboard \"要复制的文字\"",
-            "open_app \"com.xxx.package\" 例如系统设置用 com.android.settings",
-            "set_brightness_low 或 set_brightness_high",
-            "open_browser \"https://...\"",
-            "share \"要分享的文字\" / show_toast \"提示\" / vibrate_once",
-        ).joinToString("\\n- ")
-        "【执行指令】请在回答末尾附带完整标签 <ACTION: 动作名 参数>。白名单动作：\\n- $rules\\n标签前后各留一个空格，参数用双引号包裹。\\n\\n【用户原话】"
+            "open_app \"包名\" 系统设置是 com.android.settings",
+            "open_browser \"https://网址\"",
+            "set_brightness_low / set_brightness_high",
+            "vibrate_once / show_toast \"提示\" / share \"文字\"",
+        ).joinToString("\n- ")
+        "你是一个能在手机上执行操作的助手。在回答末尾（不要在开头或中间）输出一个单独的" +
+            "ACTION 标签来执行操作。标签格式是尖括号包起来，冒号后空格分开动作名和参数：\n" +
+            "<ACTION: 动作名 \"参数\">\n" +
+            "可执行动作（白名单）：\n- $rules\n" +
+            "记住：只输出一个标签，放在回答最后一行，不要输出任何关于标签格式的说明文字。\n" +
+            "下面是用户真正说的话，你正常回答，最后加标签：\n"
     }
 
     /**

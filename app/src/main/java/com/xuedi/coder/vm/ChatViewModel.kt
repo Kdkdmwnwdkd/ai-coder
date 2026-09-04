@@ -11,6 +11,9 @@ import com.xuedi.coder.data.ChatRole
 import com.xuedi.coder.data.ChatTopicEntity
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.InferenceForegroundService
+import com.xuedi.coder.model.LlamaJniEngine
+import com.xuedi.coder.plugin.ToolExecutionPlugin
+import com.xuedi.coder.plugin.WebSearchPlugin
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -108,8 +111,27 @@ class ChatViewModel : ViewModel() {
     private val inferenceMutex = Mutex()
     private var inferenceJob: Job? = null
 
-    // ---------- init: 订阅 topics 列表 + 冷启动自动选最近一个话题 ----------
+    // ---------- init: 订阅 topics 列表 + 冷启动自动选最近一个话题 + 注册 ChatPlugin 流钩子 ----------
     init {
+        // 🆕 v1.3.26-code62-modes：把 AI 执行 + 联网搜索 插件挂到 LlamaJniEngine.plugins 上。
+        //   · WebSearchPlugin → onPreSend 拦截 "@搜索 关键词"，把搜索结果注入用户输入。
+        //   · ToolExecutionPlugin → Done-time JSON 执行（在 ChatChunk.Done 分支显式调 companion）；
+        //     注册进 list 是为插件链归属 & 后续扩展 onPostReceive 钩子方便。
+        //   · 按 displayName() 去重，避免 ViewModel 重建时重复注册。
+        viewModelScope.launch(Dispatchers.Default) {
+            val eng = (app.llmEngine as? LlamaJniEngine) ?: return@launch
+            val existingNames = java.util.HashSet<String>()
+            for (i in 0 until eng.plugins.size) {
+                existingNames.add(eng.plugins[i].displayName())
+            }
+            if (!existingNames.contains("AI执行模式")) {
+                eng.plugins.add(ToolExecutionPlugin(app))
+            }
+            if (!existingNames.contains("联网搜索(@搜索)")) {
+                eng.plugins.add(WebSearchPlugin())
+            }
+        }
+
         viewModelScope.launch(Dispatchers.IO) {
             topicDao.observeAll().collectLatest { list ->
                 _topics.value = list
@@ -335,9 +357,18 @@ class ChatViewModel : ViewModel() {
                             // 🛡️ 防闪退/内存炸：截断超长 finalText（Llama 偶尔会输出几十上百 MB 的乱码循环回复）
                             val safeFull = if (chunk.full.length > 20000) chunk.full.take(20000) + "\n\n...[回复过长已截断]" else chunk.full
                             sb = StringBuilder(safeFull)
+                            // 1) code 62 原版：<ACTION: ...> 标签抽取 → 动作芯片（用户点一下执行）
                             val (cleaned, actions) = ActionExecutor.extractActions(safeFull)
-                            val safeCleaned = if (cleaned.length > 20000) cleaned.take(20000) + "\n\n...[内容过长]" else cleaned
-                            val finalText = safeCleaned.ifBlank { safeFull }
+                            // 2) 🆕 AI 执行模式：Done-time 一次抽取 JSON 动作并自动执行，返回
+                            //    (移除JSON后的正文, 执行结果说明)。JSON 解析/执行过程 100% runCatching 兜底，
+                            //    任何异常不会污染 cleaned，也不会带崩 App。
+                            val (textNoJson, execNote) = ToolExecutionPlugin.extractExecute(app, cleaned)
+                            val safeCleaned = if (textNoJson.length > 20000)
+                                textNoJson.take(20000) + "\n\n...[内容过长]"
+                            else
+                                textNoJson
+                            val noteBlock = if (execNote.isNotBlank()) "\n\n$execNote" else ""
+                            val finalText = (safeCleaned + noteBlock).trim().ifBlank { safeFull }
                             val finalMsg = ChatMsg(
                                 id = answerId,
                                 role = ChatRole.Assistant,

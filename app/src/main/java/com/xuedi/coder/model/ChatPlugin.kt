@@ -19,6 +19,12 @@ package com.xuedi.coder.model
  */
 interface ChatPlugin {
     /**
+     * 用于显示/去重的可读名（默认用类名）。
+     * 具体插件可 override 为中文友好名，如「AI执行模式」「联网搜索(@搜索)」。
+     */
+    fun displayName(): String = this::class.java.simpleName
+
+    /**
      * 发送前修改用户输入。
      * @param input 上一个插件 onPreSend 处理完的文本（首个插件是用户原始输入）。
      * @return 修改后的文本（想原样返回直接 return input）。

@@ -24,8 +24,12 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        versionCode = 62
-        versionName = "1.3.26-gpu1-hotfix1"
+        // v1.3.26-code62-modes (vc73): 基于 code 62 (1.3.26-gpu1-hotfix1) 纯增量。
+        //   · 引擎：llama_jni.cpp / n_batch=1 / 4级降级 = code 62 原版，零改动
+        //   · 新增：AI 执行模式插件 + 联网搜索(@搜索)插件（全 Kotlin，不碰 C++）
+        //   · 不删除 Vulkan UI、不删除模拟模式、不动 CMake、不动 Prefill 逻辑
+        versionCode = 73
+        versionName = "1.3.26-code62-modes"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！
@@ -328,6 +332,11 @@ dependencies {
     //    Google 官方（属于 AndroidX），MavenCentral 坐标：
     //    https://repo1.maven.org/maven2/androidx/datastore/datastore-preferences/1.0.0/
     implementation("androidx.datastore:datastore-preferences:1.0.0")
+
+    // ————— 🌐 新 M8 = 联网搜索插件（WebSearchPlugin）依赖 —————
+    //   OkHttp 4.12.0（Square 出品，AndroidX/Kotlin 1.9 完全兼容，Min API 26 无问题）。
+    //   纯 runtime JAR，不引入 Gradle 插件，不碰推理引擎。
+    implementation("com.squareup.okhttp3:okhttp:4.12.0")
 
     // ————— M6 单测：JUnit 4（JVM unit test，CI 直接 ./gradlew testDebugUnit）—————
     testImplementation("junit:junit:4.13.2")

@@ -164,6 +164,7 @@ class PluginManager(private val ctx: Context) {
 
     suspend fun buildMergedSystemPrompt(): String {
         val base = StringBuilder(BASE_PROMPT)
+        // 1. 场景插件（用户在「场景」页选的主题系统提示词）
         val enabled = dao.getAll().filter { it.enabled }
         enabled.forEach { entity ->
             loadFromDir(entity.folderName)?.let { cfg ->
@@ -173,6 +174,10 @@ class PluginManager(private val ctx: Context) {
                 }
             }
         }
+        // 2. 🆕 v1.3.26-code62-modes：工具使用说明（AI 执行 + 联网搜索）。
+        //    放在场景之后、ACTION_RULE 之前，模型读到当前话题的上下文后自然看到工具选项。
+        base.append("\n\n").append(TOOL_USE_SECTION)
+        // 3. 保留 code 62 原版的 <ACTION> 白名单（场景插件/老输出兼容；芯片 UI 手动点）。
         base.append("\n\n").append(ACTION_RULE)
         return base.toString()
     }
@@ -201,6 +206,43 @@ class PluginManager(private val ctx: Context) {
 - 写代码时给出可以直接复制的完整片段，保留全部 import 语句和必要上下文。
 - 不编造不存在的 API；不确定就明确标注"需要验证"。
 - 回答中的代码块必须用 ```语言``` 形式包裹，例如 ```kotlin ... ``` 或 ```bash ... ```。
+        """.trimIndent()
+
+        // 🆕 v1.3.26-code62-modes：AI 执行 + 联网搜索 工具使用说明（注入到系统提示词，模型据此输出）。
+        //   设计原则（与 code 62 底盘 100% 解耦）：
+        //     · 工具格式：扁平 JSON {"action":"xxx", ...}，不嵌套对象。
+        //     · 模型在"用户明确要求执行操作"时输出 JSON；纯聊天 → 正常文字回复即可。
+        //     · 联网搜索用"@搜索 关键词"前置标记（由 WebSearchPlugin 的 onPreSend 在用户发送时即时处理）。
+        val TOOL_USE_SECTION = """
+## 🛠️ 可用工具（当且仅当用户明确要求执行操作时使用）
+
+### 1. AI 执行（输出**纯 JSON，一行一条**，前后不要其他文字）
+
+| 操作 | JSON 格式 | 示例 |
+|------|-----------|------|
+| 打开 App | `{"action":"open_app","package":"包名"}` | `{"action":"open_app","package":"com.tencent.mm"}` |
+| 打开系统设置 | `{"action":"open_settings"}` | `{"action":"open_settings"}` |
+| 复制文字/代码 | `{"action":"copy_text","text":"要复制的内容"}` | `{"action":"copy_text","text":"fun main() {}"}` |
+| 调整屏幕亮度 | `{"action":"set_brightness","level":0~255}` | `{"action":"set_brightness","level":128}` |
+
+⚠️ 规则：
+- 只输出 JSON，不要在 JSON 前后加 "好的我帮你执行"、代码块标记 ```json 等文字。
+- 每个用户请求最多输出 1 条 JSON；需要多个操作时分步回复，让用户确认后再输出下一条。
+- 若用户只是闲聊/写代码/讨论方案，不需要输出 JSON，按你的原有知识正常回答即可。
+
+### 2. 联网搜索（由用户在发送框写 `@搜索 关键词` 自动触发，你无需主动输出）
+
+- 触发方式：用户发送的第一条写 `@搜索 今天天气`，App 会**自动去 SearXNG 拉搜索结果**并注入到你的上下文中。
+- 你会收到形如：
+  ```
+  【联网搜索结果】
+  关键词：今天天气
+  1. ...
+  【用户问题】
+  今天天气怎么样？
+  ```
+- 回答要求：优先基于「联网搜索结果」里的信息给出回答；如果搜索结果为空或失败，明确说明"暂未搜到实时数据，以下为我的离线知识回答"，再按你原有知识回答。
+- 如果用户没有写 `@搜索`，不要假设任何外部时事信息（保持离线知识库回答口径）。
         """.trimIndent()
 
         val ACTION_RULE = """

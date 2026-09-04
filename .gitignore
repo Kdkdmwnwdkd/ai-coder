@@ -30,3 +30,5 @@ signing/*.b64
 !signing/README.md
 app/src/main/cpp/llama.cpp/
 app/schemas/
+.ninja-j1/
+build-vulkan-debug.log

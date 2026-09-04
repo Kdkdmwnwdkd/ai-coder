@@ -24,11 +24,11 @@ android {
         applicationId = "com.xuedi.coder"
         minSdk = 26
         targetSdk = 34
-        // v1.3.26-code62-modes (vc73): 基于 code 62 (1.3.26-gpu1-hotfix1) 纯增量。
-        //   · 引擎：llama_jni.cpp / n_batch=1 / 4级降级 = code 62 原版，零改动
-        //   · 新增：AI 执行模式插件 + 联网搜索(@搜索)插件（全 Kotlin，不碰 C++）
-        //   · 不删除 Vulkan UI、不删除模拟模式、不动 CMake、不动 Prefill 逻辑
-        versionCode = 73
+        // v1.3.26-code62-modes (vc74): 清理版（code 62 稳定底包）
+        //   · 清理：🧱模拟模式开关 UI+forceMockMode、🧠Vulkan GPU加速开关 UI+useVulkanAccel
+        //   · 保留：1.5B快模式默认模型偏好、🔍推理诊断整套（最小自检+抓日志+分享包）
+        //   · 引擎：CMake XUEDI_HAS_VULKAN=OFF（CPU-only，code 62 原版不动），LlamaJniEngine nGpuLayers=0
+        versionCode = 74
         versionName = "1.3.26-code62-modes"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT

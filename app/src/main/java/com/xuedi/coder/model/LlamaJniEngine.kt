@@ -42,14 +42,6 @@ class LlamaJniEngine : LlmEngine {
         /** lib 加载失败时的错误信息（给 SettingsPage / chatFlow 诊断用） */
         @Volatile private var libLoadError: String? = null
 
-        /**
-         * 🔴 v1.3.11 方案A（治标）：强制模拟模式开关。
-         *   true=chatFlow 不调 C++ nativeChat，直接返回 MockLlmEngine 的预设回复流，
-         *   彻底绕过 llama.cpp b4835 arm64 batch 处理 SIGABRT（n_ctx/n_batch 调优均无效）。
-         *   SettingsPage 诊断卡上方 Switch 切换。等方案B（升级 llama.cpp b5179+）后再关。
-         */
-        @Volatile @JvmField var forceMockMode = false
-
         /** 尝试加载 .so；返回 true=已加载可用；false=加载失败。 */
         fun ensureLibLoaded(): Boolean = synchronized(this) {
             libLoaded?.let { return it }
@@ -178,7 +170,7 @@ class LlamaJniEngine : LlmEngine {
      * 🆕 v1.3.25-fix8: 新增 [loadModelRobust] 版本：自动 4 级降级重试。
      *                 旧 [loadModel] 仍保留作为"单次直接调用"（给 robust 内调用、给旧代码兼容）。
      */
-    fun loadModel(ggufAbsolutePath: String, nCtx: Int = 4096, nThreads: Int = 4, nGpuLayers: Int = -1): Boolean {
+    fun loadModel(ggufAbsolutePath: String, nCtx: Int = 4096, nThreads: Int = 4): Boolean {
         lastLoadError = null
         val libOk = ensureLibLoaded()
         if (!libOk) {
@@ -211,9 +203,10 @@ class LlamaJniEngine : LlmEngine {
             ctx = 0L  // 先清 ctx，让 invokeOnCompletion 里检测到 ctx != curCtx 后 release 旧 state
             Log.i(TAG, "loadModel: 旧 ctx=$oldCtx 已 cancel + ctx 置 0（等旧 nativeChat 自然结束后 release）")
         }
-        Log.i(TAG, "loadModel[单次] → nCtx=$nCtx nThreads=$nThreads nGpuLayers=$nGpuLayers file=${f.name}")
+        Log.i(TAG, "loadModel[单次] → nCtx=$nCtx nThreads=$nThreads (强制CPU-only, code62稳定版) file=${f.name}")
         val newCtx = runCatching {
-            nativeInit(ggufAbsolutePath, nCtx, nThreads, nGpuLayers)
+            // v1.3.26-code62: nGpuLayers 强制 0（CMake 侧 XUEDI_HAS_VULKAN=OFF 已确认，无需再传 hint）
+            nativeInit(ggufAbsolutePath, nCtx, nThreads, /*nGpuLayers=*/0)
         }.getOrElse { t ->
             // v1.3.25-fix8：C++ 层 probe/model_load/init_from_model 都会 ThrowNew RuntimeException，
             // 这里把消息原样收进 lastLoadError，让 Kotlin 层 Toast 能直接显示"内存不够 4096<1800"这种具体原因。
@@ -237,8 +230,7 @@ class LlamaJniEngine : LlmEngine {
         ctx = newCtx
         lastUsedThreads = nThreads
         lastUsedNCtx = nCtx
-        lastUsedGpuLayers = nGpuLayers
-        Log.i(TAG, "loadModel ✅ GGUF 已加载 ctx=$ctx；线程=$nThreads nCtx=$nCtx nGpuLayers=$nGpuLayers（C++端编译期无Vulkan会被自动clamp到0）文件=${f.name} size=${f.length()/1024/1024}MB")
+        Log.i(TAG, "loadModel ✅ GGUF 已加载 ctx=$ctx；线程=$nThreads nCtx=$nCtx (CPU-only code62稳定版) 文件=${f.name} size=${f.length()/1024/1024}MB")
         lastLoadError = null
         return true
     }
@@ -246,11 +238,6 @@ class LlamaJniEngine : LlmEngine {
     /** 最近一次成功 loadModel 使用的线程数 / nCtx（诊断卡展示 & 对比 4/6/8 性能用） */
     @Volatile var lastUsedThreads: Int? = null
     @Volatile var lastUsedNCtx: Int? = null
-    /** 🆕 v1.3.26-gpu1：最近一次 loadModel 传入的 n_gpu_layers。
-     *   -1=请求全 offload（C++ 端会按「编译期是否有 Vulkan + llama.cpp 模型层上限」最终 clamp，
-     *   真实值要看 LlamaJni 日志里 nativeInit n_gpu_layers=… 那行）；
-     *   0=CPU-only。给诊断快照做 GPU 加速核对用。 */
-    @Volatile var lastUsedGpuLayers: Int? = null
 
     /** 🆕 v1.3.25-perf1: 最近一次 nativeChat 回合的 prefill 模式。
      *  值见 [TokenCallback.onPrefillMode]：BATCH_OK / BATCH_FB / STEPx1。
@@ -272,34 +259,17 @@ class LlamaJniEngine : LlmEngine {
      * 只要其中一级成功，就返回 true，并把真实使用的 nCtx/nThreads 写进成功 Toast；
      * 如果 4 级全挂，lastLoadError 会聚合 4 次失败的具体原因（= 直接定位卡在哪一级）。
      *
-     * ⚠️ A/B 调参：
-     *   · 想试 6/8 线程？改 L1 数字即可；
-     *   · v1.3.25-perf1 已实锤 6 线程 3B Qwen2 → 57.2s（4 线程 baseline 44.5s），
-     *     所以后续 8 线程只会更慢，非必要不要打开。
-     *   · 想临时关 Vulkan，把下面 gpuLayersDefault=-1 改成 0（忽略 GPU hint，强制 CPU）。
+     * v1.3.26-code62 (稳定底包): CMake 强制 CPU-only(XUEDI_HAS_VULKAN=OFF)，不再需要 gpuLayers。
+     * 健壮版加载（4 级自动降级重试，一次都不用用户手动调参数）。
+     * 魅族 20 上「点🔄 加载失败」= 很多时候是默认 4096+4 线程的 KV cache 峰值顶了内存，
+     * 但用户看不懂 Toast 里笼统的"内存不足 / GGUF 损坏"，只知道"我点了，失败了"。
+     * 这里把 4 档组合串行试：
+     *   #1  nCtx=4096  nThreads=4  (v1.3.25-perf2: 6线程实测 3B Prefill 44.5s→57.2s 反降 28%，回 4 线程稳定)
+     *   #2  nCtx=2048  nThreads=4  (L2 标准降级：ctx 减半 + 回 4 线程防争用)
+     *   #3  nCtx=1280  nThreads=2  (L3 激进降级：KV 再压)
+     *   #4  nCtx=768   nThreads=1  (L4 极限兜底，1.5B 4bit 基本都能起来)
      */
     fun loadModelRobust(ggufAbsolutePath: String): Boolean {
-        // v1.3.26-gpu1：默认 gpuLayersDefault=-1 = 请求全 offload；
-        // 用户级开关由【设置 → 允许Vulkan加速】通过调用 loadModelRobust(path, gpuLayers=0) 走
-        // 另一个重载；这里保持最激进默认，由外层先读偏好再路由。
-        val gpuLayersDefault = -1
-        return loadModelRobust(ggufAbsolutePath, gpuLayers = gpuLayersDefault)
-    }
-
-    /**
-     * v1.3.26-gpu1：显式传 gpuLayers 的重载（给 Settings 开关 / ModelManager 偏好路由用）。
-     *   gpuLayers < 0 → 请求全 offload（C++ Vulkan 按模型层上限 clamp）；
-     *   gpuLayers = 0 → 强制 CPU；
-     *   gpuLayers > 0 → 指定具体 offload 层数。
-     */
-    fun loadModelRobust(ggufAbsolutePath: String, gpuLayers: Int): Boolean {
-        // v1.3.26-gpu1：gpuLayers 由调用方传入（-1=请求全 offload，0=CPU-only）。
-        //   C++ 端若编译期没带 Vulkan(XUEDI_LLAMA_VULKAN=0)，自动 clamp 到 0，纯 CPU 行为不改变；
-        //   若 GPU 初始化失败，nativeInit 会返回 ctx=0 → 这里进入下一级降级 → 最终仍可 CPU 运行，
-        //   因为下一级同样传 gpuLayers（= 用户原始偏好），如果失败原因疑似 Vulkan 关键词，
-        //   自动把 gpuHint 切到 0 再跑后续档位 + 最后补一次 L1 CPU-only 兜底。
-        val gpuHintDefault: Int = gpuLayers.coerceAtLeast(-1)
-        var gpuHint: Int = gpuHintDefault
         val presets: List<Triple</*nCtx*/Int, /*nThreads*/Int, String>> = listOf(
             Triple(4096, 4, "满配(4线程·稳定)"),
             Triple(2048, 4, "L2 标准降级(ctx2048·4线程)"),
@@ -309,47 +279,24 @@ class LlamaJniEngine : LlmEngine {
         val failures = mutableListOf<String>()
         presets.withIndex().forEach { (i, cfg) ->
             val (nCtx, nTh, label) = cfg
-            Log.i(TAG, "loadModelRobust[${i+1}/${presets.size}] $label → nCtx=$nCtx nThreads=$nTh gpuLayers=$gpuHint")
-            val ok = loadModel(ggufAbsolutePath, nCtx = nCtx, nThreads = nTh, nGpuLayers = gpuHint)
+            Log.i(TAG, "loadModelRobust[${i+1}/${presets.size}] $label → nCtx=$nCtx nThreads=$nTh (CPU-only)")
+            val ok = loadModel(ggufAbsolutePath, nCtx = nCtx, nThreads = nTh)
             if (ok) {
                 lastLoadError = null
-                Log.i(TAG, "loadModelRobust ✅ 命中第${i+1}级 $label: nCtx=$nCtx nThreads=$nTh gpuLayers=$gpuHint")
-                robustLastLevel = "$label (nCtx=$nCtx, nThreads=$nTh, gpuLayers=$gpuHint)"
+                Log.i(TAG, "loadModelRobust ✅ 命中第${i+1}级 $label: nCtx=$nCtx nThreads=$nTh")
+                robustLastLevel = "$label (nCtx=$nCtx, nThreads=$nTh, CPU-only)"
                 return true
             } else {
                 val reason = lastLoadError ?: "(空原因, ctx=0 ret)"
                 Log.w(TAG, "loadModelRobust ❌ 第${i+1}级 $label 失败: $reason")
-                failures.add("L${i+1}[$label][gpuHint=$gpuHint]：$reason")
-                // v1.3.26-gpu1 GPU 兜底：只要有一次失败原因疑似 Vulkan 后端问题，
-                // 就把 gpuHint 切到 0，后续所有降级一律 CPU-only（避免 4 次重复踩 Vulkan 失败路径）。
-                val clue = reason.uppercase()
-                if (gpuHint != 0 && (
-                        "VULKAN" in clue || "GPU" in clue || "GGML_VULKAN" in clue ||
-                        "GRAPHICS" in clue || "DRIVER" in clue || "ADRENO" in clue
-                    )
-                ) {
-                    Log.w(TAG, "loadModelRobust: 检测到疑似 Vulkan 失败 → 关闭 gpuHint（后续档位强制 CPU 兜底）")
-                    gpuHint = 0
-                }
+                failures.add("L${i+1}[$label]：$reason")
                 try { Thread.sleep(200) } catch (_: InterruptedException) {}
             }
         }
-        // L1-L4 全部跑完还是失败，但 GPU hint 还没退到 CPU → 额外再补一次 L1 CPU-only，
-        // 保证"只装 3B + GPU 初始化挂"场景也不会被误判成完全跑不动。
-        if (gpuHint != 0) {
-            Log.w(TAG, "loadModelRobust: 4档走完仍未触发关键词兜底 → 再补一次 L1+CPU(gpuLayers=0) 兜底")
-            val (nCtx, nTh, label) = presets[0]
-            val ok = loadModel(ggufAbsolutePath, nCtx = nCtx, nThreads = nTh, nGpuLayers = 0)
-            if (ok) {
-                robustLastLevel = "L1-补档 CPU-only (nCtx=$nCtx, nThreads=$nTh, gpuLayers=0)"
-                return true
-            }
-            failures.add("L1-补档[CPU-only][gpuLayers=0]：${lastLoadError ?: "(空)"}")
-        }
         robustLastLevel = null
         lastLoadError = buildString {
-            append("4 级自动降级全部失败（Llama 引擎）。gpuHint 最终=$gpuHint。\n")
-            append("手机可用连续 mmap 被占满，或 Vulkan 后端初始化失败。\n\n")
+            append("4 级自动降级全部失败（Llama CPU-only 引擎）。\n")
+            append("手机可用连续 mmap 被占满。\n\n")
             append("【逐级失败详情】\n")
             failures.forEachIndexed { i, s ->
                 append(i + 1).append(". ").append(s).append("\n")
@@ -357,7 +304,7 @@ class LlamaJniEngine : LlmEngine {
             append("\n【下一步必做动作，按顺序】\n")
             append("1. 长按 → 关闭后台所有 App → 再点🔄\n")
             append("2. 重启手机 → 启动后立刻进本 App 直接设模型\n")
-            append("3. 设置 → 推理诊断 → 开始诊断 → 📤 分享诊断包（里面含 nativeInit n_gpu_layers 日志）。")
+            append("3. 设置 → 推理诊断 → 开始诊断 → 📤 分享诊断包（含 probe/model_load_fail/cparams 错误行）。")
         }
         Log.e(TAG, "loadModelRobust ❌ 全挂:\n$lastLoadError")
         return false
@@ -372,16 +319,8 @@ class LlamaJniEngine : LlmEngine {
     // =================================================================
 
     override fun chatFlow(system: String, user: String): Flow<ChatChunk> {
-        // ═══════════════════════════════════════════════════════════════
-        // 🔴 v1.3.11 方案A（治标）：forceMockMode=true 时直接返回 MockLlmEngine 的预设回复流，
-        //    彻底绕过 llama.cpp b4835 arm64 batch 处理 SIGABRT（n_ctx/n_batch 调优均无效）。
-        //    SettingsPage 诊断卡上方 Switch 切换。等方案B（升级 llama.cpp b5179+）后再关。
-        // ═══════════════════════════════════════════════════════════════
-        if (forceMockMode) {
-            Log.w(TAG, "🧱 forceMockMode=true → 绕过 C++ nativeChat，返回 MockLlmEngine 预设回复流")
-            return MockLlmEngine().chatFlow(system, user)
-        }
-
+        // —— v1.3.26-code62: 模拟模式已删除，统一走真推理；
+        //    引擎未就绪/模型未加载时下面会明确返回 Error，不再默默 fallback。
         // —— 🔴 v1.3.25-stable: 插件 onPreSend 链（纯 Kotlin，失败不影响主链路）——
         val finalUser = runPreSend(user)
         if (finalUser != user) {

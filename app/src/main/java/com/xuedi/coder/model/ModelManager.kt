@@ -195,20 +195,10 @@ class ModelManager(private val ctx: Context) {
         Log.i(TAG, "switchAndLoadModel 开始加载：${m.displayName} 文件状态=$existSize nCtx=$defaultNCtx")
 
         val ok = runCatching {
-            // 🆕 v1.3.25-fix8: 用健壮版 4 级自动降级加载，替代原先单次 4096 硬加载。
-            //   用户反馈"点🔄 加载失败"绝大多数是 4096/4线程下 KV cache 峰值顶了，
-            //   但旧 Toast 只有笼统"GGUF 损坏 / 内存不足"，用户不知道该怎么办。
-            //   现在 LlamaJniEngine.loadModelRobust 会在内部依次尝试：
-            //   (4096,4) → (2048,2) → (1280,2) → (768,1)，并把最终档位写进 robustLastLevel。
-            //
-            // 🆕 v1.3.26-gpu1（方案A用户开关）：读取【设置 → 允许 Vulkan 加速】偏好。
-            //   true  → gpuLayers = -1（请求全 offload，C++ 端再按编译期/运行期 clamp）
-            //   false → gpuLayers =  0（强制 CPU-only，用户级最稳妥的 Vulkan 回退开关）
-            val pref = (ctx.applicationContext as? App)?.modelPrefs
-            val gpuLayers = if (pref == null) -1 else {
-                if (pref.getUseVulkanAccel()) -1 else 0
-            }
-            (eng as? LlamaJniEngine)?.loadModelRobust(m.filePath, gpuLayers)
+            // v1.3.26-code62 (CPU 稳定底包):
+            //   · CMake XUEDI_HAS_VULKAN=OFF → 强制 CPU；
+            //   · LlamaJniEngine.loadModel 内部 nGpuLayers 已硬编码 0，这里调用无参重载即可。
+            (eng as? LlamaJniEngine)?.loadModelRobust(m.filePath)
                 ?: eng.loadModelRobust(m.filePath)
         }.getOrDefault(false)
 

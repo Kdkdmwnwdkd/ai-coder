@@ -132,7 +132,7 @@ fun SettingsPage(
         .collectAsStateWithLifecycle(initialValue = null)
 
     // ---- 当前 JNI 引擎内存状态（给模型行的状态条用）----
-    //   v1.3.25-fix22：仅 LlamaJniEngine（单引擎），读 ctx + libStatus + lastLoadError
+    //   v1.3.26-code62：仅 Llama 单引擎 CPU 模式，读 ctx / libStatus / lastLoadError / threads / nCtx
     val engineSnapshot = runCatching {
         val app = App.instance
         val eng = app.llamaEngineRef()
@@ -145,7 +145,6 @@ fun SettingsPage(
             lastLoadedPath = app.modelManager.lastLoadedPath(),
             lastThreads = eng.lastUsedThreads,
             lastNCtx = eng.lastUsedNCtx,
-            lastGpuLayers = eng.lastUsedGpuLayers,
             prefMode = eng.lastPrefMode
         )
     }.getOrDefault(
@@ -157,7 +156,6 @@ fun SettingsPage(
             lastLoadedPath = null,
             lastThreads = null,
             lastNCtx = null,
-            lastGpuLayers = null,
             prefMode = null
         )
     )
@@ -221,9 +219,6 @@ fun SettingsPage(
     // ---- 诊断运行态 ----
     val diagLines = remember { mutableStateListOf<String>() }
     var diagRunning by remember { mutableStateOf(false) }
-    // 🔴 v1.3.11 方案A：模拟模式开关状态（镜像 LlamaJniEngine.forceMockMode，
-    //    用 remember/mutableStateOf 让 Compose 重组；切换时同步回静态变量）
-    var mockMode by remember { mutableStateOf(LlamaJniEngine.forceMockMode) }
     val diagTsFmt = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.CHINA) }
     fun ts() = diagTsFmt.format(Date())
     fun addLog(line: String) { diagLines.add("[${ts()}] $line") }
@@ -294,107 +289,9 @@ fun SettingsPage(
         }
         item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
 
-        // ---- 分组：模拟模式（防闪退兜底）----
-        item(key = "mock-mode-group") {
-            SectionHeader(title = "🧱 模拟模式（防闪退兜底）")
-        }
-        item(key = "mock-mode-card") {
-            OutlinedCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 56.dp)
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "启用模拟回复（不跑真模型，防闪退）",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "ON=逐字返回预设回复，绕过 C++ 引擎；OFF=调用真推理",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = mockMode,
-                        onCheckedChange = { newChecked ->
-                            mockMode = newChecked
-                            LlamaJniEngine.forceMockMode = newChecked
-                            val tip = if (newChecked) "已切换到模拟模式" else "已切换到真实推理模式"
-                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                }
-            }
-        }
-
-        // ---- 分组 2.5：推理偏好开关（方案A/C 用户级回退）----
+        // ---- 分组 2.5：推理偏好（默认模型）—— v1.3.26-code62 稳定版只保留 1.5B 快模式 ----
         item(key = "perf-prefs-group") {
-            SectionHeader(title = "🧠 推理偏好（默认模型·GPU加速）")
-        }
-        item(key = "pref-vulkan") {
-            val app = App.instance
-            // 读一次当前值做 Compose state；异步写回 ModelPrefs DataStore
-            val (useVulkan, setUseVulkan) = remember {
-                mutableStateOf(
-                    runBlocking(Dispatchers.IO) {
-                        runCatching { app.modelPrefs.getUseVulkanAccel() }
-                            .getOrDefault(ModelPrefsStore.DEFAULT_USE_VULKAN)
-                    }
-                )
-            }
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 56.dp)
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "允许 Vulkan GPU 加速",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "ON=尝试把模型层卸载到 Adreno GPU（OFF=强制CPU，最稳定回退）。加载失败时会自动降回CPU。",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = useVulkan,
-                        onCheckedChange = { checked ->
-                            setUseVulkan(checked)
-                            (app as? CoroutineScope)?.launch(Dispatchers.IO) {
-                                runCatching { app.modelPrefs.setUseVulkanAccel(checked) }
-                            }
-                            val tip = if (checked)
-                                "✅ 已开启 Vulkan（重新加载模型生效，失败自动CPU兜底）"
-                            else
-                                "🛡️ 已切换到纯 CPU（下一次加载模型生效）"
-                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                }
-            }
+            SectionHeader(title = "🧠 推理偏好（默认模型）")
         }
         item(key = "pref-fast-15b") {
             val app = App.instance
@@ -467,7 +364,7 @@ fun SettingsPage(
                 appendLine("CPU_ABI2：${android.os.Build.CPU_ABI2}（arm64-v8a 必为空）")
                 appendLine()
                 appendLine("═══════════════════════════════════════════")
-                appendLine("当前激活引擎：LlamaJniEngine(b5180 · v1.3.25-fix22 官方最简)；模拟模式=${LlamaJniEngine.forceMockMode}")
+                appendLine("当前激活引擎：LlamaJniEngine(b5180 · v1.3.25-fix22 官方最简 CPU)；")
                 appendLine("当前模型：${app.modelManager.lastLoadedPath() ?: "<未加载>"}")
                 appendLine("—— Llama 引擎 ——")
                 val llamaSt = LlamaJniEngine.libStatus()
@@ -1178,6 +1075,7 @@ private fun MemoryStatusBar(status: MemStatus) {
 
 // ===================================================================
 // 当前 JNI 引擎一次快照（Immutable，便于 Compose 重组）
+// v1.3.26-code62 清理：移除 lastGpuLayers（已强制 CPU-only）
 // ===================================================================
 private data class LoadDiagSnapshot(
     val libLoadedOk: Boolean?,
@@ -1190,9 +1088,6 @@ private data class LoadDiagSnapshot(
     // null = 模型尚未成功加载过。
     val lastThreads: Int?,
     val lastNCtx: Int?,
-    // 🆕 v1.3.26-gpu1: 最近一次 loadModel 请求的 gpuLayers（-1=全 offload，0=CPU，
-    // 真实值由 C++ 端 clamp 后写进日志 nativeInit n_gpu_layers=…）。
-    val lastGpuLayers: Int?,
     // 🆕 v1.3.25-perf1: 最近一次推理回合的 prefill 模式。
     // BATCH_OK = 批量提交成功；BATCH_FB = 批量失败回退逐 token；STEPx1 = 直接走逐 token。
     // null = 尚未跑过推理。
@@ -1481,15 +1376,7 @@ private suspend fun runDiagnosticImpl(
     }
     addLog("③ 引擎状态: $ctxStr  lastLoadErr=${engineSnapshot.lastLoadError?:"(无)"}")
     // 🆕 v1.3.25-perf1: 运行参数透明化，测 4/6/8 线程 & batch prefill 时一眼看到"这次到底用了啥参数"
-    // v1.3.26-gpu1: 新增 gpuLayers 显示（-1=请求全 offload，0=CPU；真机实际卸载层数看 LlamaJni 日志行 nativeInit n_gpu_layers=…）
-    val gpuLayersDisplay = engineSnapshot.lastGpuLayers?.let {
-        when (it) {
-            -1 -> "请求全卸载(-1)（C++端根据编译/Vulkan驱动clamp，真数见LlamaJni日志）"
-            0  -> "CPU-only(0)"
-            else -> "${it}层"
-        }
-    } ?: "(未加载)"
-    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  gpuLayers=$gpuLayersDisplay  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}")
+    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}  模式=CPU-only(code62稳定版)")
 
     // ---- 2. 模型存在性 ----
     if (selectedModel == null) {

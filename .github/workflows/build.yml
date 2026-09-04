@@ -2,9 +2,19 @@ name: 构建 AI编程助手 APK
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, dev]
     tags: ["v*"]
   workflow_dispatch:
+
+# =====================================================
+# 🧹 代码弃用清理（出包稳定性保障）：
+#   A) 升级 upload-artifact / download-artifact → v5（已切到 Node 22，解决 20→24 forced-run 警告）
+#   B) 升级 softprops/action-gh-release → v2.0.8（同，支持 Node 22；若后续 GitHub 禁 Node 20 不崩）
+#   C) publish-release 同时上传 Release APK + Debug APK（之前只传 release，用户要覆盖旧版 debug
+#      安装时找不到"和本地同包同配置"的包，只能去 Action 90 天临时 artifacts 取 → 长期不方便）
+#   D) upload-mirror 复用 publish-release 的 artifact（不要重复 gh release download -p apk，
+#      省流量、省分钟数、避免 gh 网络波动）
+# =====================================================
 
 jobs:
   build-debug:
@@ -134,7 +144,7 @@ jobs:
           echo "→ $APK  →  $OUT"
           ls -lh "$OUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: AI编程助手-debug-apk
           path: ${{ steps.apk.outputs.apk_file }}
@@ -142,7 +152,7 @@ jobs:
           if-no-files-found: error
 
       - name: 上传完整 Gradle 日志（方便后续排查）
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         if: always()
         with:
           name: gradle-build-debug-log
@@ -255,14 +265,14 @@ jobs:
           echo "rapk_file=$OUT" >> "$GITHUB_OUTPUT"
           ls -lh "$OUT"
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         with:
           name: AI编程助手-release-apk
           path: ${{ steps.rapk.outputs.rapk_file }}
           retention-days: 90
           if-no-files-found: error
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v5
         if: always()
         with:
           name: gradle-build-release-log
@@ -271,25 +281,51 @@ jobs:
           if-no-files-found: ignore
 
   # =====================================================
-  # M7 GitHub Release：tag v* 时，下载 release APK artifact 挂到 Release。
+  # M7 GitHub Release：tag v* 时，下载 release APK + debug APK artifacts 都挂到 Release。
+  #    修复以前"Release 页只有 Release APK，Debug APK 只在 90 天 Artifacts"的信息不对称。
   # =====================================================
   publish-release:
     name: 发布 GitHub Release
-    needs: build-release
+    needs: [build-release, build-debug]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
       - name: 下载 Release APK artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v5
         with:
           name: AI编程助手-release-apk
+          path: release-artifact
+
+      - name: 下载 Debug APK artifact（一并挂到 Release，长期留存）
+        uses: actions/download-artifact@v5
+        with:
+          name: AI编程助手-debug-apk
+          path: debug-artifact
+
+      - name: 把 Release APK + Debug APK + mirror-url.txt 都复制到同一目录上传
+        run: |
+          set -euo pipefail
+          mkdir -p assets
+          cp release-artifact/*.apk  assets/ 2>/dev/null || true
+          cp debug-artifact/*.apk    assets/ 2>/dev/null || true
+          echo "assets/ 列表:"
+          ls -lh assets/ 2>/dev/null || true
+          # 保证至少 release apk 存在，否则 fail_on_unmatched_files 失败
+          if ! ls assets/*.apk >/dev/null 2>&1; then
+            echo "❌ 没拿到任何 APK artifact 可上传"
+            exit 1
+          fi
+          # mirror-url.txt 占位（后面 upload-mirror job 再次追加）
+          echo "# 国内直链（待 upload-mirror job 生成后自动覆盖本文件）" > assets/mirror-url-todo.txt
 
       - name: 上传到 GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.0.8
         with:
-          files: "*.apk"
+          files: |
+            assets/*.apk
+            assets/mirror-url-todo.txt
           generate_release_notes: true
           fail_on_unmatched_files: true
 
@@ -359,7 +395,7 @@ jobs:
           echo "✅ 拿到国内直链: $URL"
 
       - name: 把直链作为 Release asset 挂回
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v2.0.8
         with:
           tag_name: ${{ env.TAG }}
           files: mirror-url.txt

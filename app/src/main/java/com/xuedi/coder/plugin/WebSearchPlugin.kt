@@ -13,70 +13,70 @@ import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicReference
 
-/**
- * 联网搜索插件（异步非阻塞版 · 彻底解决 ANR）。
- *
- * ==========================================================
- * 为什么不能在 onPreSend 里 runBlocking(OKHttp)？
- *   ChatViewModel.sendMessage → onPreSend 跑在 Dispatchers.Default（不是 IO），
- *   runBlocking 会把当前协程线程**钉死卡住**直到内部 OkHttp 返回。
- *   国内网访问 SearXNG 公共实例最坏 45s 超时 → Android ANR 阈值 5s → 必死弹窗。
- *
- * 新设计（100% 非阻塞，主线程零等待）：
- * ----------------------------------------------------------
- *   Step 1: onPreSend 看到 `@搜索 关键词`
- *     → 立刻原样返回 input（不阻塞），
- *     → 用插件自己的 CoroutineScope(Dispatchers.IO) 后台 launch 搜 SearXNG，
- *     → 搜到/超时后把结果通过 resultCallback 回传给 ChatViewModel，
- *        让它直接把【联网搜索结果】追加到当前 topic 的最新 userMsg 正文里，
- *        同时弹一条新的 AI 告知气泡（"联网搜索完成，已为你注入结果，现在可以直接追问。"）。
- *
- *   失败降级：45s 超时、3 个 SearXNG 实例全挂、网络错误 → 静默跳过，
- *             只打一条 debug 日志，绝对不破坏聊天 UI。
- * ==========================================================
- *
- * 用法（在 ChatViewModel.init 注册时注入回调）：
- * ```
- * val search = WebSearchPlugin(viewModelScope) { text ->
- *     // text = 【联网搜索结果】标题: 摘要\n...
- *     // 在这里把 text 插进 _messages.value 里最新 userMsg.content 最前面
- * }
- * pluginManager.register(search)
- * ```
- */
+
+    // 联网搜索插件（异步非阻塞版 · 彻底解决 ANR）。
+
+    // ==========================================================
+    // 为什么不能在 onPreSend 里 runBlocking(OKHttp)？
+    // ChatViewModel.sendMessage → onPreSend 跑在 Dispatchers.Default（不是 IO），
+    // runBlocking 会把当前协程线程**钉死卡住**直到内部 OkHttp 返回。
+    // 国内网访问 SearXNG 公共实例最坏 45s 超时 → Android ANR 阈值 5s → 必死弹窗。
+
+    // 新设计（100% 非阻塞，主线程零等待）：
+    // ----------------------------------------------------------
+    // Step 1: onPreSend 看到 `@搜索 关键词`
+    // → 立刻原样返回 input（不阻塞），
+    // → 用插件自己的 CoroutineScope(Dispatchers.IO) 后台 launch 搜 SearXNG，
+    // → 搜到/超时后把结果通过 resultCallback 回传给 ChatViewModel，
+    // 让它直接把【联网搜索结果】追加到当前 topic 的最新 userMsg 正文里，
+    // 同时弹一条新的 AI 告知气泡（"联网搜索完成，已为你注入结果，现在可以直接追问。"）。
+
+    // 失败降级：45s 超时、3 个 SearXNG 实例全挂、网络错误 → 静默跳过，
+    // 只打一条 debug 日志，绝对不破坏聊天 UI。
+    // ==========================================================
+
+    // 用法（在 ChatViewModel.init 注册时注入回调）：
+    // ```
+    // val search = WebSearchPlugin(viewModelScope) { text ->
+    // // text = 【联网搜索结果】标题: 摘要\n...
+    // // 在这里把 text 插进 _messages.value 里最新 userMsg.content 最前面
+    // }
+    // pluginManager.register(search)
+    // ```
+
 class WebSearchPlugin(
-    /** 插件自己的生命周期（绑定 ChatViewModel viewModelScope 即可，随 VM 自动取消）。*/
+    // 插件自己的生命周期（绑定 ChatViewModel viewModelScope 即可，随 VM 自动取消）。
     private val scope: CoroutineScope,
-    /**
-     * 搜索成功后的 UI 回调：参数 = 已拼好的 "【联网搜索结果】\n标题1: 摘要1\n..." 文本。
-     * ChatViewModel 负责把这段文本 prepend 到最新 userMsg 的 content 里 + 刷新 UI。
-     */
+
+    // 搜索成功后的 UI 回调：参数 = 已拼好的 "【联网搜索结果】\n标题1: 摘要1\n..." 文本。
+    // ChatViewModel 负责把这段文本 prepend 到最新 userMsg 的 content 里 + 刷新 UI。
+
     private val resultCallback: (String) -> Unit,
 ) : ChatPlugin {
 
     fun name(): String = "联网搜索"
 
-    /**
-     * 触发关键词正则。
-     * 匹配：`@搜索 今天天气` / `@搜索  北京  物价`（中间任意空白数量 + 至少一个非空字符）。
-     */
-    private val trigger = Regex("""^@搜索\s+(.+)$""", RegexOption.DOT_MATCHES_ALL)
 
-    /**
-     * 同步阻塞搜索（在协程里调用，不卡主线程）。
-     * 最多等 [timeoutMs] 毫秒，超时返回 null。
-     *
-     * 🔥 真实真机实测（魅族 20 · 4G）：
-     *   - SearXNG 7 个公共实例：100% 超时（国内墙）
-     *   - wttr.in HTTP：342ms 返回（User-Agent=curl/* 才返回纯文本，Mozilla 返回 HTML）
-     *   - wttr.in HTTPS：673ms 返回
-     *
-     * 所以策略彻底改：
-     *   【策略1：天气关键词】→ 直接跑 wttr.in（10s 内必返回），不等 SearXNG
-     *   【策略2：非天气】   → SearXNG（3s/instance）快速 2 个实例 failover → 超时就放弃
-     *
-     * 结果会通过 android.util.Log 输出到 logcat，方便真机诊断。
-     */
+    // 触发关键词正则。
+    // 匹配：`@搜索 今天天气` / `@搜索  北京  物价`（中间任意空白数量 + 至少一个非空字符）。
+
+    private val trigger = Regex("^@搜索\\s+(.+)$", RegexOption.DOT_MATCHES_ALL)
+
+
+    // 同步阻塞搜索（在协程里调用，不卡主线程）。
+    // 最多等 [timeoutMs] 毫秒，超时返回 null。
+
+    // 🔥 真实真机实测（魅族 20 · 4G）：
+    // - SearXNG 7 个公共实例：100% 超时（国内墙）
+    // - wttr.in HTTP：342ms 返回（User-Agent=curl/* 才返回纯文本，Mozilla 返回 HTML）
+    // - wttr.in HTTPS：673ms 返回
+
+    // 所以策略彻底改：
+    // 【策略1：天气关键词】→ 直接跑 wttr.in（10s 内必返回），不等 SearXNG
+    // 【策略2：非天气】   → SearXNG（3s/instance）快速 2 个实例 failover → 超时就放弃
+
+    // 结果会通过 android.util.Log 输出到 logcat，方便真机诊断。
+
     suspend fun searchSync(query: String, timeoutMs: Long = 12_000L): String? {
         if (query.isBlank()) return null
         val tag = "WebSearchPlugin"
@@ -108,9 +108,9 @@ class WebSearchPlugin(
         return buildReport(query, result)
     }
 
-    /**
-     * 上一次注入结果（防止同一个 userMsg 因为 sendMessage 重入被多次注入）。
-     */
+
+    // 上一次注入结果（防止同一个 userMsg 因为 sendMessage 重入被多次注入）。
+
     private val lastInjected = AtomicReference<String?>(null)
 
     override fun onPreSend(input: String): String {
@@ -174,10 +174,10 @@ class WebSearchPlugin(
 
     private val WEATHER_RE = Regex("(天气|气温|温度|下雨|晴|多云|weather|forecast|temperature|℃)", RegexOption.IGNORE_CASE)
 
-    /**
-     * 天气关键词兜底：@搜索 "北京天气"、"上海 明天天气" 等 → 调 wttr.in。
-     * 🔥 真机 4G 实测：HTTP wttr.in 342ms 返回，UA 必须是 curl/*（Mozilla 会返回 HTML）
-     */
+
+    // 天气关键词兜底：@搜索 "北京天气"、"上海 明天天气" 等 → 调 wttr.in。
+    // 🔥 真机 4G 实测：HTTP wttr.in 342ms 返回，UA 必须是 curl/*（Mozilla 会返回 HTML）
+
     private suspend fun runWeatherFallback(query: String): String? {
         val city = extractCity(query) ?: "北京"
         return withContext(Dispatchers.IO) {
@@ -214,7 +214,7 @@ class WebSearchPlugin(
         }
     }
 
-    /** wttr.in 即使加了 lang=zh 也常返回英文状态词，简单映射一下，让 AI 更容易理解 */
+    // wttr.in 即使加了 lang=zh 也常返回英文状态词，简单映射一下，让 AI 更容易理解
     private fun translateWttrCn(raw: String): String {
         var r = raw
         val map = mapOf(
@@ -238,10 +238,10 @@ class WebSearchPlugin(
         return r
     }
 
-    /**
-     * 从用户 query 里抽城市名（粗糙版：抓天气前面或后面 2-4 个中文字符）。
-     * 找不到就返回 null，交给 wttr.in 用 "北京" 默认。
-     */
+
+    // 从用户 query 里抽城市名（粗糙版：抓天气前面或后面 2-4 个中文字符）。
+    // 找不到就返回 null，交给 wttr.in 用 "北京" 默认。
+
     private fun extractCity(query: String): String? {
         // 常见城市白名单（最常用 30 个，1.5B 用户覆盖够了）
         val cities = listOf(
@@ -254,19 +254,19 @@ class WebSearchPlugin(
             if (query.contains(c)) return c
         }
         // 简单：匹配 2-4 个连续中文字（中文地址一般 2-4 字城市名）
-        val re = Regex("""([\u4e00-\u9fa5]{2,4})""")
+        val re = Regex("([\\u4e00-\\u9fa5]{2,4})")
         val hits = re.findAll(query).map { it.groupValues[1] }.filter {
             it !in listOf("天气","今天","明天","后天","实时","气温","温度","下雨","多云","报告","预报","查询","现在","几点","什么","怎么","如何","请问")
         }.toList()
         return hits.firstOrNull()
     }
 
-    /**
-     * 把 SearXNG JSON 解析成 3 条 "标题: 摘要" 的纯文本（不用 JSONObject，避免 Android SDK minSdk 问题 + 更稳）。
-     */
+
+    // 把 SearXNG JSON 解析成 3 条 "标题: 摘要" 的纯文本（不用 JSONObject，避免 Android SDK minSdk 问题 + 更稳）。
+
     private fun parseResults(jsonText: String): String {
-        val titleRegex = Regex(""""title"\s*:\s*"((?:[^"\\]|\\.)*)"""")
-        val snippetRegex = Regex(""""content"\s*:\s*"((?:[^"\\]|\\.)*)"""")
+        val titleRegex = Regex("\"title\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
+        val snippetRegex = Regex("\"content\"\\s*:\\s*\"((?:[^\"\\\\]|\\\\.)*)\"")
         // SearXNG JSON 里 items 数组的每个对象都有 title + content（snippet 字段）。
         val titles = titleRegex.findAll(jsonText).map { unescape(it.groupValues[1]) }.filter { it.isNotBlank() }
         val snippets = snippetRegex.findAll(jsonText).map { unescape(it.groupValues[1]) }.filter { it.isNotBlank() }
@@ -278,15 +278,21 @@ class WebSearchPlugin(
     }
 
     private fun unescape(s: String): String {
-        // 处理 JSON 转义 \n \t \" \\
         var out = s
-        val map = listOf("\\n" to "\n", "\\t" to "\t", "\\\"" to "\"", "\\\\" to "\\", "\\/" to "/")
+        val map = listOf(
+            "\\n" to "\n",
+            "\\t" to "\t",
+            "\\\"" to "\"",
+            "\\\\" to "\\",
+            "\\/" to "/"
+        )
         for ((a, b) in map) out = out.replace(a, b)
         return out.trim()
     }
 
-    private fun buildReport(query: String, result: String): String =
-        "【联网搜索结果 — $query】\n" +
+    private fun buildReport(query: String, result: String): String {
+        return "【联网搜索结果 — $query】\n" +
             "$result\n" +
-            "（以上结果来自公共 SearXNG 实例，仅供 AI 参考；如需准确事实请访问原网站。）\n"
+            "（以上结果来自联网搜索 API，仅供 AI 参考。）\n"
+    }
 }

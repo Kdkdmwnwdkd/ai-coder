@@ -248,7 +248,7 @@ android {
             isMinifyEnabled = false
             isShrinkResources = false
             // 统一包名：之前 applicationIdSuffix = ".debug" 导致 debug/release 包名不同 → 覆盖必失败
-            resValue("string", "app_name", "AI编程助手·调试版")
+            resValue("string", "app_name", "AI编程助手")
             signingConfig = signingConfigs.getByName("fixedDebug")
         }
         release {

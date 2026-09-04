@@ -106,6 +106,10 @@ set(LLAMA_WERRORS         OFF CACHE BOOL "" FORCE)
 
 # =====================================================
 # 把 llama.cpp 作为子目录拉进来
+
+# 🔥 强制 native 代码始终用 Release(-O3) 优化，不管 Gradle 是 debug 还是 release 构建
+#    用户实测：O3 比 debug 默认的 O0/O1 推理速度快数倍
+set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 # 会产出 4 个 static lib target：ggml-base、ggml-cpu、ggml、llama
 # =====================================================
 add_subdirectory(${LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama_build)

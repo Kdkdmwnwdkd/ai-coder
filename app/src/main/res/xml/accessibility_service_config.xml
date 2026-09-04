@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  AI编程助手 无障碍服务配置。
+  —— 允许服务：查看窗口内容、执行手势（点击/滑动）、输入文本。
+  —— android:canRetrieveWindowContent="true" 才能拿到 rootInActiveWindow 扫 UI 树。
+  —— android:flagRetrieveInteractiveWindows 让服务能扫描其他 app 的界面。
+-->
+<accessibility-service xmlns:android="http://schemas.android.com/apk/res/android"
+    android:accessibilityEventTypes="typeAllMask"
+    android:accessibilityFeedbackType="feedbackGeneric"
+    android:accessibilityFlags="flagDefault|flagRetrieveInteractiveWindows"
+    android:canPerformGestures="true"
+    android:canRetrieveWindowContent="true"
+    android:description="@string/accessibility_service_desc"
+    android:packageNames="" />

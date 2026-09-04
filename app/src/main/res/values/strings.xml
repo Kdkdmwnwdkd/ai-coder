@@ -51,4 +51,5 @@
     <string name="about_guide_2">2. 打开本应用 → 前往「设置」→「导入 GGUF 模型文件」，选择刚下载的文件。</string>
     <string name="about_guide_3">3. 导入成功后，在模型列表里点「设为当前模型」，等待 Toast 显示「已加载到内存」。</string>
     <string name="about_guide_4">4. 返回「对话」页面，开始与本地大模型自由交谈或编写代码（所有推理在您手机本地完成，不上传任何数据）。</string>
+    <string name="accessibility_service_desc">AI编程助手需要无障碍权限才能帮你操控手机：打开快手后自动搜索、帮你在聊天框输入文字、点击屏幕按钮等。不会收集任何隐私数据，所有操作都在你手机本地执行。授权一次永久生效，随时可在 设置→无障碍 里关闭。</string>
 </resources>

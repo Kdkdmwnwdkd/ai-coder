@@ -11,6 +11,8 @@ import com.xuedi.coder.data.ChatRole
 import com.xuedi.coder.data.ChatTopicEntity
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.InferenceForegroundService
+import com.xuedi.coder.plugin.GitHubPlugin
+import com.xuedi.coder.plugin.GitHubTokenStore
 import com.xuedi.coder.plugin.ToolExecutionPlugin
 import com.xuedi.coder.plugin.WebSearchPlugin
 import com.xuedi.coder.plugin.displayName
@@ -117,7 +119,7 @@ class ChatViewModel : ViewModel() {
      * 才在当前输入前临时 prepend 一行 ACTION 指令（普通闲聊 ~0 token）。
      * 指令内容保持精简（<200 chars），避免 Prefill 劣化。
      */
-    private val ACTION_KEYWORD_RE = Regex("打开|复制|震动|亮度|设置|安装|跳转|启动|粘贴|搜索应用")
+    private val ACTION_KEYWORD_RE = Regex("打开|复制|震动|亮度|设置|安装|跳转|启动|粘贴|搜索应用|github|GitHub|编译|下载apk|触发")
     private val ACTION_DYNAMIC_HINT = run {
         // 🔥 1.5B 模型只能记住 3 个动作！多了全乱。
         //   包名用中文别名表（AI 不知道"微信"=com.tencent.mm）。
@@ -141,6 +143,14 @@ class ChatViewModel : ViewModel() {
      */
     private val searchPlugin by lazy {
         WebSearchPlugin(scope = viewModelScope) { resultText ->
+            prependToLatestUserMsg(resultText)
+        }
+    }
+
+    /** code78 新增：GitHub Actions 插件 —— 触发编译/下载 APK/看状态 */
+    private val githubTokenStore by lazy { GitHubTokenStore(app.applicationContext) }
+    private val githubPlugin by lazy {
+        GitHubPlugin(scope = viewModelScope, ctx = app.applicationContext, tokenStore = githubTokenStore) { resultText ->
             prependToLatestUserMsg(resultText)
         }
     }
@@ -173,7 +183,7 @@ class ChatViewModel : ViewModel() {
             // 插件管理：按 ChatPlugin.displayName() 去重注册，避免冷启动多次 init 重入。
             val pm = app.pluginManager
             val knownNames = mutableSetOf<String>()
-            listOf(toolPlugin, searchPlugin).forEach { p ->
+            listOf(toolPlugin, searchPlugin, githubPlugin).forEach { p ->
                 val name = p.displayName()
                 if (name !in knownNames) {
                     knownNames.add(name)

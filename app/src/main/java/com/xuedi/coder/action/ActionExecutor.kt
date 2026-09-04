@@ -86,7 +86,7 @@ object ActionExecutor {
                 when (a.name) {
                     "show_toast", "open_app", "open_browser", "open_url",
                     "share", "set_brightness_low", "set_brightness_high",
-                    "vibrate_once" -> runOnMainSync(mainHandler) {
+                    "vibrate_once", "accessibility_action" -> runOnMainSync(mainHandler) {
                         executeOne(ctx, a.name, a.argument)
                     }
                     else -> executeOne(ctx, a.name, a.argument)
@@ -136,7 +136,8 @@ object ActionExecutor {
         "vibrate_once" to "震动",
         "take_screenshot" to "截图",
         "set_brightness_low" to "调暗",
-        "set_brightness_high" to "调亮"
+        "set_brightness_high" to "调亮",
+        "accessibility_action" to "系统操控"
     )
 
     fun friendlyName(name: String): String = FRIENDLY_NAMES[name] ?: name
@@ -148,7 +149,8 @@ object ActionExecutor {
     private val WHITE_LIST = setOf(
         "copy_to_clipboard", "open_app", "open_browser", "open_url",
         "share", "show_toast", "vibrate_once", "take_screenshot",
-        "set_brightness_low", "set_brightness_high"
+        "set_brightness_low", "set_brightness_high",
+        "accessibility_action"
     )
 
     // 宽松正则（终极版）——同时匹配 1.5B 模型所有可能的输出格式：
@@ -239,6 +241,18 @@ object ActionExecutor {
                 val i = Intent(Settings.ACTION_DISPLAY_SETTINGS)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 runCatching { ctx.startActivity(i) }
+            }
+
+
+            "accessibility_action" -> {
+                val parts = arg.split("|")
+                val ok = com.xuedi.coder.action.CoderAccessibilityService.dispatch(ctx, parts)
+                if (!ok) {
+                    val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    runCatching { ctx.startActivity(intent) }
+                    Toast.makeText(ctx, "请先在 设置→无障碍 里授权「AI编程助手」", Toast.LENGTH_LONG).show()
+                }
             }
 
             "take_screenshot" -> {

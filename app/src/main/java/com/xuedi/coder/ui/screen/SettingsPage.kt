@@ -48,6 +48,9 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextField
+import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedIconButton
@@ -589,6 +592,152 @@ fun SettingsPage(
                     }
                 }
             )
+        }
+
+
+        // ─────────────────────────────────────────────────
+        // 🆕 code78 分组：GitHub Actions 自动编译
+        // ─────────────────────────────────────────────────
+        item(key = "gh-group") {
+            SectionHeader(title = "🐙 GitHub Actions 自动编译（让 AI 帮你跑编译）")
+        }
+        item(key = "gh-card") {
+            val ghStore = remember { com.xuedi.coder.plugin.GitHubTokenStore(App.instance) }
+            var ghToken by remember { mutableStateOf(ghStore.token) }
+            var ghOwner by remember { mutableStateOf(ghStore.owner) }
+            var ghRepo  by remember { mutableStateOf(ghStore.repo) }
+            var ghWfId  by remember { mutableStateOf(ghStore.workflowId) }
+            val ctx = LocalContext.current
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
+                )
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        "填完 4 项后，在聊天页发：\n" +
+                        "  @github 触发编译      → 手机远程触发 GitHub Actions\n" +
+                        "  @github 看状态        → 查最近一次 run 进度\n" +
+                        "  @github 下载APK       → 把产物拉到手机 Downloads 目录\n" +
+                        "  @github 最新commit    → 拉 HEAD commit 信息",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                    Spacer(Modifier.height(12.dp))
+
+                    OutlinedTextField(
+                        value = ghToken,
+                        onValueChange = { ghToken = it; ghStore.token = it },
+                        label = { Text("GitHub Personal Access Token（ghp_ 开头）", fontSize = 12.sp) },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = ghOwner,
+                            onValueChange = { ghOwner = it; ghStore.owner = it },
+                            label = { Text("Owner（用户名）", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        OutlinedTextField(
+                            value = ghRepo,
+                            onValueChange = { ghRepo = it; ghStore.repo = it },
+                            label = { Text("Repo（仓库名）", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        OutlinedTextField(
+                            value = ghWfId,
+                            onValueChange = { ghWfId = it; ghStore.workflowId = it },
+                            label = { Text("Workflow 文件（默认 build.yml）", fontSize = 11.sp) },
+                            modifier = Modifier.weight(1f),
+                            singleLine = true
+                        )
+                        Spacer(Modifier.width(10.dp))
+                        val configured = ghStore.isConfigured()
+                        Button(
+                            onClick = {
+                                val ok = ghStore.isConfigured()
+                                Toast.makeText(ctx, if (ok) "✅ 已保存，去聊天页 @github 触发编译吧" else "⚠️ 还没填完 4 项", Toast.LENGTH_LONG).show()
+                            },
+                            shape = RoundedCornerShape(12.dp),
+                            colors = ButtonDefaults.buttonColors(
+                                containerColor = if (configured) MaterialTheme.colorScheme.primary
+                                    else MaterialTheme.colorScheme.surfaceVariant,
+                                contentColor = if (configured) MaterialTheme.colorScheme.onPrimary
+                                    else MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        ) {
+                            Text(if (configured) "✅ 已就绪" else "⚠️ 待配置", fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────
+        // 🆕 code78 分组：无障碍系统级操控
+        // ─────────────────────────────────────────────────
+        item(key = "acc-group") {
+            SectionHeader(title = "👁️ 无障碍系统级操控（AI 帮你打开 App 搜索）")
+        }
+        item(key = "acc-card") {
+            val ctx = LocalContext.current
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
+                )
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        "开启后，AI 能帮你做：\n" +
+                        "  • 打开快手后自动点搜索框输入「斗罗大陆」\n" +
+                        "  • 帮你在聊天框输入一段文字\n" +
+                        "  • 上下滑屏幕、返回、Home\n\n" +
+                        "⚠️  这是 Android 系统级权限，首次必须手动点一下「允许」，之后永久生效。\n" +
+                        "🔒 所有操作都在手机本地执行，不上传任何数据。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                ctx.startActivity(intent)
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("🔧 去设置里授权无障碍", fontSize = 12.sp)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val intent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                ctx.startActivity(intent)
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("📚 关于权限说明", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
         }
 
         // ---- Build 信息 ----
@@ -1542,7 +1691,7 @@ private suspend fun runDiagnosticImpl(
         engine.chatFlow(
             system = "你是一个简短的中文助手，只回答一两个字。",
             user = "你好，请回复两个字。"
-        ).collectLatest { chunk ->
+        ).collect { chunk ->
             when (chunk) {
                 is ChatChunk.PrefillProgress -> {
                     if (!prefillDone) {

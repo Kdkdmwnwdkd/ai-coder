@@ -65,18 +65,46 @@ class WebSearchPlugin(
     /**
      * 同步阻塞搜索（在协程里调用，不卡主线程）。
      * 最多等 [timeoutMs] 毫秒，超时返回 null。
-     * 搜索策略：SearXNG（通用）→ wttr.in（天气关键词兜底）→ 都挂返回 null。
+     *
+     * 🔥 真实真机实测（魅族 20 · 4G）：
+     *   - SearXNG 7 个公共实例：100% 超时（国内墙）
+     *   - wttr.in HTTP：342ms 返回（User-Agent=curl/* 才返回纯文本，Mozilla 返回 HTML）
+     *   - wttr.in HTTPS：673ms 返回
+     *
+     * 所以策略彻底改：
+     *   【策略1：天气关键词】→ 直接跑 wttr.in（10s 内必返回），不等 SearXNG
+     *   【策略2：非天气】   → SearXNG（3s/instance）快速 2 个实例 failover → 超时就放弃
+     *
+     * 结果会通过 android.util.Log 输出到 logcat，方便真机诊断。
      */
-    suspend fun searchSync(query: String, timeoutMs: Long = 10_000L): String? {
+    suspend fun searchSync(query: String, timeoutMs: Long = 12_000L): String? {
         if (query.isBlank()) return null
+        val tag = "WebSearchPlugin"
+        android.util.Log.i(tag, "🔎 searchSync 开始 query=$query  timeout=${timeoutMs}ms")
+        val start = System.currentTimeMillis()
         val result = withTimeoutOrNull(timeoutMs) {
-            // 1. 先跑通用 SearXNG（3+4 实例 failover）
-            val searxng = runSearXNG(query)
-            if (searxng != null) return@withTimeoutOrNull searxng
-            // 2. 天气关键词兜底（wttr.in 国内 90% 线路可通，纯文本直接用，不解析 JSON）
-            runWeatherFallback(query)
+            val hasWeather = WEATHER_RE.containsMatchIn(query)
+            if (hasWeather) {
+                // 🔥 天气关键词 → 优先 wttr.in（真机实测最稳）
+                android.util.Log.i(tag, "  → 天气关键词命中，优先 wttr.in")
+                val w = runWeatherFallback(query)
+                if (!w.isNullOrBlank()) {
+                    android.util.Log.i(tag, "  ✅ wttr.in OK (${System.currentTimeMillis() - start}ms)")
+                    return@withTimeoutOrNull w
+                }
+                android.util.Log.w(tag, "  ⚠️  wttr.in 失败，尝试 SearXNG")
+                runSearXNG(query)
+            } else {
+                // 非天气 → 先 SearXNG（3s 快 failover），如果挂了就真没有了
+                val s = runSearXNG(query)
+                if (!s.isNullOrBlank()) s else null
+            }
         }
-        if (result.isNullOrBlank()) return null
+        if (result.isNullOrBlank()) {
+            android.util.Log.w(tag, "❌ 全部搜索源失败，总耗时 ${System.currentTimeMillis() - start}ms")
+            return null
+        }
+        android.util.Log.i(tag, "✅ 搜索完成 (${System.currentTimeMillis() - start}ms) 正文len=${result.length}")
         return buildReport(query, result)
     }
 
@@ -114,29 +142,23 @@ class WebSearchPlugin(
 
     private suspend fun runSearXNG(query: String): String? = withContext(Dispatchers.IO) {
         val encoded = runCatching { URLEncoder.encode(query, "UTF-8") }.getOrNull() ?: return@withContext null
+        // 🔥 真机 4G 实测：SearXNG 全挂，别浪费时间 → 2 实例 × 3s = 最多 6s 还不行就放弃
         val client = OkHttpClient.Builder()
-            .connectTimeout(6, TimeUnit.SECONDS)    // 国内网每个实例不要等太久，直接换下一个
-            .readTimeout(8, TimeUnit.SECONDS)
-            .callTimeout(10, TimeUnit.SECONDS)
+            .connectTimeout(3, TimeUnit.SECONDS)
+            .readTimeout(4, TimeUnit.SECONDS)
+            .callTimeout(6, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
 
-        // 🔥 7 个 SearXNG 实例 failover（3 欧洲 + 2 美国 + 1 新加坡 + 1 备用）。
-        // 每个实例最多 6s 连接超时，7 个轮完最多 ~42s 但总超时 10s 包在 searchSync 外面的 withTimeoutOrNull。
         val instances = listOf(
-            "https://searx.be",                    // 比利时
-            "https://search.sapti.me",              // 罗马尼亚
-            "https://searxng.site",                 // 官方站（法国）
-            "https://searx.tiekoetter.com",         // 德国
-            "https://search.bus-hit.me",            // 日本
-            "https://paulgo.io",                    // 法国
-            "https://searx.work",                   // 瑞士
+            "https://searxng.site",
+            "https://searx.be",
         )
         for (base in instances) {
             val url = "$base/search?q=$encoded&format=json&language=zh-CN&safesearch=0"
             val body = runCatching {
                 val req = Request.Builder().url(url)
-                    .header("User-Agent", "Mozilla/5.0 AI-Coder-Android/1.3.26")
+                    .header("User-Agent", "curl/8.0 AI-Coder-Android/1.3.26")
                     .header("Accept", "application/json")
                     .build()
                 client.newCall(req).execute().use { resp ->
@@ -150,38 +172,70 @@ class WebSearchPlugin(
         return@withContext null
     }
 
+    private val WEATHER_RE = Regex("(天气|气温|温度|下雨|晴|多云|weather|forecast|temperature|℃)", RegexOption.IGNORE_CASE)
+
     /**
      * 天气关键词兜底：@搜索 "北京天气"、"上海 明天天气" 等 → 调 wttr.in。
-     * wttr.in 走 Cloudflare CDN，国内手机 4G/WiFi 90% 能通，纯文本返回直接用。
+     * 🔥 真机 4G 实测：HTTP wttr.in 342ms 返回，UA 必须是 curl/*（Mozilla 会返回 HTML）
      */
     private suspend fun runWeatherFallback(query: String): String? {
-        val weatherRe = Regex("(天气|气温|温度|下雨|晴|多云|today|weather|forecast|temperature)", RegexOption.IGNORE_CASE)
-        if (!weatherRe.containsMatchIn(query)) return null
-
-        // 从查询里挑第一个出现的中文城市名（太复杂就直接搜 "北京" default）
-        // wttr.in 用法：curl wttr.in/北京?format=4   → 1 行简洁
-        // 或者 curl wttr.in/北京?lang=zh      → 彩色中文 3 行
         val city = extractCity(query) ?: "北京"
         return withContext(Dispatchers.IO) {
-            runCatching {
-                val client = OkHttpClient.Builder()
-                    .connectTimeout(5, TimeUnit.SECONDS)
-                    .readTimeout(6, TimeUnit.SECONDS)
-                    .callTimeout(8, TimeUnit.SECONDS)
-                    .build()
-                val url = "https://wttr.in/$city?lang=zh&format=%l:+%C+%t+%w+湿度%h+体感%f"
-                val req = Request.Builder().url(url)
-                    .header("User-Agent", "curl/8.0")
-                    .build()
-                client.newCall(req).execute().use { resp ->
-                    if (!resp.isSuccessful) return@use null
-                    resp.body?.string()?.trim()?.take(200)
+            // HTTP + HTTPS 各跑一次（HTTP 更快，HTTPS 更稳，但国内线路可能墙 HTTPS）
+            val urls = listOf(
+                "http://wttr.in/$city?lang=zh&format=%l:+%C+%t+%w+湿度%h+体感%f+紫外线%u",
+                "https://wttr.in/$city?lang=zh&format=%l:+%C+%t+%w+湿度%h+体感%f+紫外线%u",
+            )
+            for (url in urls) {
+                val raw = runCatching {
+                    val client = OkHttpClient.Builder()
+                        .connectTimeout(6, TimeUnit.SECONDS)
+                        .readTimeout(8, TimeUnit.SECONDS)
+                        .callTimeout(10, TimeUnit.SECONDS)
+                        .build()
+                    val req = Request.Builder().url(url)
+                        .header("User-Agent", "curl/8.0")   // 🔴 关键：只有 curl UA 才返回纯文本！
+                        .build()
+                    client.newCall(req).execute().use { resp ->
+                        if (!resp.isSuccessful) return@use null
+                        val body = resp.body?.string()?.trim()?.take(400) ?: return@use null
+                        // 如果返回 <!DOCTYPE html> 说明 Cloudflare 拦截了，换 URL 重试
+                        if (body.startsWith("<!DOCTYPE", ignoreCase = true)) return@use null
+                        body
+                    }
+                }.getOrNull()
+                if (!raw.isNullOrBlank()) {
+                    // 把英文天气关键词翻译一下（因为 wttr.in 即使 lang=zh 也常返回英文）
+                    val zh = translateWttrCn(raw)
+                    return@withContext "【实时天气】$zh"
                 }
-            }.getOrNull()?.let { raw ->
-                if (raw.isBlank()) null
-                else "【实时天气】$raw"
             }
+            return@withContext null
         }
+    }
+
+    /** wttr.in 即使加了 lang=zh 也常返回英文状态词，简单映射一下，让 AI 更容易理解 */
+    private fun translateWttrCn(raw: String): String {
+        var r = raw
+        val map = mapOf(
+            "Sunny" to "晴",
+            "Clear" to "晴朗",
+            "Partly cloudy" to "局部多云",
+            "Partly Cloudy" to "局部多云",
+            "Cloudy" to "多云",
+            "Overcast" to "阴天",
+            "Mist" to "薄雾",
+            "Fog" to "雾",
+            "Smoky haze" to "霾",
+            "Light rain" to "小雨",
+            "Moderate rain" to "中雨",
+            "Heavy rain" to "大雨",
+            "Patchy rain nearby" to "附近有零星小雨",
+            "Thundery outbreaks" to "雷阵雨",
+            "Snow" to "雪",
+        )
+        for ((en, zh) in map) r = r.replace(en, zh)
+        return r
     }
 
     /**

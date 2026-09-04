@@ -182,25 +182,16 @@ object ActionExecutor {
                     launch.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                     ctx.startActivity(launch)
                 } else {
-                    // 找不到启动页 → Toast 提示 + 跳应用商店让用户下载
-                    Toast.makeText(ctx, "未安装 $pkg，正在跳转应用商店", Toast.LENGTH_SHORT).show()
-                    val market = Intent(Intent.ACTION_VIEW, Uri.parse("market://details?id=$pkg"))
-                        .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                    val marketOk = runCatching { ctx.startActivity(market) }.isSuccess
-                    if (!marketOk) {
-                        // 应用商店没装 → 浏览器打开 Google Play
-                        val web = Intent(Intent.ACTION_VIEW, Uri.parse("https://play.google.com/store/apps/details?id=$pkg"))
-                            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        val webOk = runCatching { ctx.startActivity(Intent.createChooser(web, "安装 $pkg")) }.isSuccess
-                        if (!webOk) {
-                            // 浏览器也没有 → 最后兜底跳系统应用信息页
-                            val i = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                                .setData(Uri.parse("package:$pkg"))
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                            runCatching { ctx.startActivity(i) }
-                                .onFailure { throw IllegalStateException("未安装包 $pkg，且无法跳转应用商店/浏览器/设置页") }
-                        }
-                    }
+                    // 🔴 用户反馈：找不到包时跳应用商店很"怪"（明明让打开微信，结果去了应用商店）
+                    //     → 改成直接 Toast 未安装，不要跳转。
+                    //     常见 4 个例外给出友好中文名。
+                    val alias = mapOf(
+                        "com.tencent.mm" to "微信",
+                        "com.tencent.mobileqq" to "QQ",
+                        "com.eg.android.AlipayGphone" to "支付宝",
+                        "com.ss.android.ugc.aweme" to "抖音",
+                    )[pkg] ?: pkg
+                    throw IllegalStateException("未安装【$alias】(包名 $pkg)，请先安装后再试")
                 }
             }
 

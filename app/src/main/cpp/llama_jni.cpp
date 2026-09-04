@@ -162,6 +162,65 @@ static std::vector<llama_token> tokenize_prompt(const llama_vocab* vocab, const 
 }
 
 // =============================================================================
+// sanitizeUtf8: 截断 std::string 末尾不完整的 UTF-8 continuation bytes
+// —— llama token output 偶尔会把多字节 CJK 字符切成两段
+//    （比如 "天" = 0xe5 0xa4 0xa9，piece 只给了前 2 字节 0xe5 0xa4），
+//    直接喂 NewStringUTF 会触发 JNI "illegal continuation byte" → SIGABRT 闪退。
+//    这里防御性地把末尾不完整的字节裁掉，保证传进 JNI 的一定是合法 UTF-8。
+// =============================================================================
+static std::string sanitizeUtf8(const std::string& in) {
+    if (in.empty()) return in;
+    const unsigned char* p = reinterpret_cast<const unsigned char*>(in.data());
+    size_t len = in.size();
+    // 从末尾往前扫，看最后几个字节里有没有不完整的 continuation
+    // UTF-8: 0xxx xxxx=ASCII, 110x xxxx=2字节头, 1110 xxxx=3字节头, 1111 0xxx=4字节头
+    //        10xx xxxx=continuation byte
+    while (len > 0) {
+        unsigned char last = p[len - 1];
+        if ((last & 0x80) == 0x00) {
+            // ASCII 字节，肯定完整，安全
+            break;
+        } else if ((last & 0xC0) == 0x80) {
+            // continuation byte — 往前找 head byte
+            // 最多回退 3 字节（4 字节序列的 head）
+            if (len >= 2 && (p[len - 2] & 0x80) == 0x00) {
+                // 前一个是 ASCII，当前 continuation 没 head → 截断
+                len--; continue;
+            }
+            if (len >= 2 && (p[len - 2] & 0xC0) == 0x80) {
+                // 前一个也是 continuation — 回退继续找
+                len--; continue;
+            }
+            if (len >= 2) {
+                unsigned char head = p[len - 2];
+                if ((head & 0xE0) == 0xC0) {
+                    // 2 字节 head — 再加上这个 continuation 就够了 → 完整
+                    len--; break;
+                } else if ((head & 0xF0) == 0xE0) {
+                    // 3 字节 head — 需要 2 个 continuation，现在只有 1 个 → 截断
+                    len--; continue;
+                } else if ((head & 0xF8) == 0xF0) {
+                    // 4 字节 head — 需要 3 个 continuation → 截断
+                    len--; continue;
+                }
+            }
+            len--; continue;
+        } else if ((last & 0xE0) == 0xC0) {
+            // 2 字节 head — 但后面没有 continuation → 截断
+            len--; continue;
+        } else if ((last & 0xF0) == 0xE0) {
+            // 3 字节 head — 缺 2 个 continuation → 截断
+            len--; continue;
+        } else if ((last & 0xF8) == 0xF0) {
+            // 4 字节 head — 缺 3 个 continuation → 截断
+            len--; continue;
+        }
+        break;
+    }
+    return std::string(reinterpret_cast<const char*>(p), len);
+}
+
+// =============================================================================
 // 回调 Java 侧 TokenCallback（统一 JNIEnv 从 vm 拿 — nativeChat 跑在 Default 线程池）
 // =============================================================================
 static JNIEnv* getEnvForThread() {
@@ -176,21 +235,21 @@ static JNIEnv* getEnvForThread() {
 
 static void cb_onToken(JNIEnv* env, jobject cb, const std::string& piece) {
     if (!g_midOnToken || !cb) return;
-    jstring jp = env->NewStringUTF(piece.c_str());
+    jstring jp = env->NewStringUTF(sanitizeUtf8(piece).c_str());
     env->CallVoidMethod(cb, g_midOnToken, jp);
     env->DeleteLocalRef(jp);
 }
 
 static void cb_onDone(JNIEnv* env, jobject cb, const std::string& reason) {
     if (!g_midOnDone || !cb) return;
-    jstring jp = env->NewStringUTF(reason.c_str());
+    jstring jp = env->NewStringUTF(sanitizeUtf8(reason).c_str());
     env->CallVoidMethod(cb, g_midOnDone, jp);
     env->DeleteLocalRef(jp);
 }
 
 static void cb_onError(JNIEnv* env, jobject cb, const std::string& msg) {
     if (!g_midOnError || !cb) return;
-    jstring jp = env->NewStringUTF(msg.c_str());
+    jstring jp = env->NewStringUTF(sanitizeUtf8(msg).c_str());
     env->CallVoidMethod(cb, g_midOnError, jp);
     env->DeleteLocalRef(jp);
 }
@@ -203,7 +262,7 @@ static void cb_onPrefill(JNIEnv* env, jobject cb, int consumed, int total) {
 // 🔴 v1.3.25-perf1: 通知 Java 侧本次 prefill 模式（BATCH_OK / BATCH_FB / STEPx1）
 static void cb_onPrefillMode(JNIEnv* env, jobject cb, const std::string& mode) {
     if (!g_midOnPrefillMode || !cb) return;
-    jstring jm = env->NewStringUTF(mode.c_str());
+    jstring jm = env->NewStringUTF(sanitizeUtf8(mode).c_str());
     env->CallVoidMethod(cb, g_midOnPrefillMode, jm);
     env->DeleteLocalRef(jm);
 }

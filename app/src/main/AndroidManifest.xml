@@ -62,4 +62,25 @@
                 android:resource="@xml/file_paths" />
         </provider>
     </application>
+    <!-- Android 11+ (API 30+)：包可见性声明
+         没有 queries 声明时 getLaunchIntentForPackage()/getPackageInfo()
+         对非系统 app 一律返回 null → open_app "未安装" 假阳性。 -->
+    <queries>
+        <package android:name="com.tencent.mm" />
+        <package android:name="com.tencent.mobileqq" />
+        <package android:name="com.eg.android.AlipayGphone" />
+        <package android:name="com.ss.android.ugc.aweme" />
+        <package android:name="com.android.settings" />
+        <package android:name="com.android.chrome" />
+        <package android:name="com.tencent.smtt.sdk" />
+        <intent>
+            <action android:name="android.intent.action.VIEW" />
+            <data android:scheme="https" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.SEND" />
+            <data android:mimeType="text/plain" />
+        </intent>
+    </queries>
+
 </manifest>

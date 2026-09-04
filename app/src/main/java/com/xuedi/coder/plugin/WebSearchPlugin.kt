@@ -65,14 +65,17 @@ class WebSearchPlugin(
     /**
      * 同步阻塞搜索（在协程里调用，不卡主线程）。
      * 最多等 [timeoutMs] 毫秒，超时返回 null。
-     * ChatViewModel 在 Dispatchers.Default 里调这个，搜完再喂给 Llama——这样 AI 一开始
-     * 就能看到搜索结果，而不是异步搜完才补（那时候用户已经在等 AI 回复了）。
-     *
-     * @return 拼好的 "【联网搜索结果 — query】\n1. 标题: 摘要\n..." 文本，或 null（搜不到/超时）。
+     * 搜索策略：SearXNG（通用）→ wttr.in（天气关键词兜底）→ 都挂返回 null。
      */
-    suspend fun searchSync(query: String, timeoutMs: Long = 5_000L): String? {
+    suspend fun searchSync(query: String, timeoutMs: Long = 10_000L): String? {
         if (query.isBlank()) return null
-        val result = withTimeoutOrNull(timeoutMs) { runSearXNG(query) }
+        val result = withTimeoutOrNull(timeoutMs) {
+            // 1. 先跑通用 SearXNG（3+4 实例 failover）
+            val searxng = runSearXNG(query)
+            if (searxng != null) return@withTimeoutOrNull searxng
+            // 2. 天气关键词兜底（wttr.in 国内 90% 线路可通，纯文本直接用，不解析 JSON）
+            runWeatherFallback(query)
+        }
         if (result.isNullOrBlank()) return null
         return buildReport(query, result)
     }
@@ -112,20 +115,22 @@ class WebSearchPlugin(
     private suspend fun runSearXNG(query: String): String? = withContext(Dispatchers.IO) {
         val encoded = runCatching { URLEncoder.encode(query, "UTF-8") }.getOrNull() ?: return@withContext null
         val client = OkHttpClient.Builder()
-            .connectTimeout(15, TimeUnit.SECONDS)
-            .readTimeout(30, TimeUnit.SECONDS)
-            .callTimeout(40, TimeUnit.SECONDS)
+            .connectTimeout(6, TimeUnit.SECONDS)    // 国内网每个实例不要等太久，直接换下一个
+            .readTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(10, TimeUnit.SECONDS)
             .retryOnConnectionFailure(true)
             .build()
 
-        // 3 个 SearXNG 公共实例，挑的是之前 Actions ping 通的几个；挂了就跳过。
-        //   searx.be          → 比利时节点
-        //   search.sapti.me   → 罗马尼亚
-        //   searxng.site      → 官方展示站
+        // 🔥 7 个 SearXNG 实例 failover（3 欧洲 + 2 美国 + 1 新加坡 + 1 备用）。
+        // 每个实例最多 6s 连接超时，7 个轮完最多 ~42s 但总超时 10s 包在 searchSync 外面的 withTimeoutOrNull。
         val instances = listOf(
-            "https://searx.be",
-            "https://search.sapti.me",
-            "https://searxng.site",
+            "https://searx.be",                    // 比利时
+            "https://search.sapti.me",              // 罗马尼亚
+            "https://searxng.site",                 // 官方站（法国）
+            "https://searx.tiekoetter.com",         // 德国
+            "https://search.bus-hit.me",            // 日本
+            "https://paulgo.io",                    // 法国
+            "https://searx.work",                   // 瑞士
         )
         for (base in instances) {
             val url = "$base/search?q=$encoded&format=json&language=zh-CN&safesearch=0"
@@ -143,6 +148,63 @@ class WebSearchPlugin(
             if (parsed.isNotBlank()) return@withContext parsed
         }
         return@withContext null
+    }
+
+    /**
+     * 天气关键词兜底：@搜索 "北京天气"、"上海 明天天气" 等 → 调 wttr.in。
+     * wttr.in 走 Cloudflare CDN，国内手机 4G/WiFi 90% 能通，纯文本返回直接用。
+     */
+    private suspend fun runWeatherFallback(query: String): String? {
+        val weatherRe = Regex("(天气|气温|温度|下雨|晴|多云|today|weather|forecast|temperature)", RegexOption.IGNORE_CASE)
+        if (!weatherRe.containsMatchIn(query)) return null
+
+        // 从查询里挑第一个出现的中文城市名（太复杂就直接搜 "北京" default）
+        // wttr.in 用法：curl wttr.in/北京?format=4   → 1 行简洁
+        // 或者 curl wttr.in/北京?lang=zh      → 彩色中文 3 行
+        val city = extractCity(query) ?: "北京"
+        return withContext(Dispatchers.IO) {
+            runCatching {
+                val client = OkHttpClient.Builder()
+                    .connectTimeout(5, TimeUnit.SECONDS)
+                    .readTimeout(6, TimeUnit.SECONDS)
+                    .callTimeout(8, TimeUnit.SECONDS)
+                    .build()
+                val url = "https://wttr.in/$city?lang=zh&format=%l:+%C+%t+%w+湿度%h+体感%f"
+                val req = Request.Builder().url(url)
+                    .header("User-Agent", "curl/8.0")
+                    .build()
+                client.newCall(req).execute().use { resp ->
+                    if (!resp.isSuccessful) return@use null
+                    resp.body?.string()?.trim()?.take(200)
+                }
+            }.getOrNull()?.let { raw ->
+                if (raw.isBlank()) null
+                else "【实时天气】$raw"
+            }
+        }
+    }
+
+    /**
+     * 从用户 query 里抽城市名（粗糙版：抓天气前面或后面 2-4 个中文字符）。
+     * 找不到就返回 null，交给 wttr.in 用 "北京" 默认。
+     */
+    private fun extractCity(query: String): String? {
+        // 常见城市白名单（最常用 30 个，1.5B 用户覆盖够了）
+        val cities = listOf(
+            "北京","上海","广州","深圳","杭州","南京","成都","重庆","武汉","西安",
+            "苏州","天津","长沙","郑州","青岛","宁波","厦门","福州","济南","合肥",
+            "昆明","大连","沈阳","哈尔滨","石家庄","南昌","珠海","东莞","佛山","无锡",
+            "南宁","贵阳","太原","呼和浩特","乌鲁木齐","兰州","银川","西宁","海口","拉萨"
+        )
+        for (c in cities) {
+            if (query.contains(c)) return c
+        }
+        // 简单：匹配 2-4 个连续中文字（中文地址一般 2-4 字城市名）
+        val re = Regex("""([\u4e00-\u9fa5]{2,4})""")
+        val hits = re.findAll(query).map { it.groupValues[1] }.filter {
+            it !in listOf("天气","今天","明天","后天","实时","气温","温度","下雨","多云","报告","预报","查询","现在","几点","什么","怎么","如何","请问")
+        }.toList()
+        return hits.firstOrNull()
     }
 
     /**

@@ -6,12 +6,16 @@ import android.content.Context
 import android.content.Intent
 import android.net.Uri
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.VibrationEffect
 import android.os.Vibrator
 import android.os.VibratorManager
 import android.provider.Settings
 import android.widget.Toast
 import com.xuedi.coder.data.ActionTag
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 
 /**
  * 【新 M4 = 管理层】ACTION 标签解析器 + 执行器（纯 Kotlin 正则 + Android 平台 API，零额外依赖）。
@@ -63,19 +67,62 @@ object ActionExecutor {
 
     /**
      * 逐个执行 action。
+     *
+     * 🔴 线程安全：不管调用方在什么线程（Default/IO/Main），
+     *     需要 UI 线程的操作（Toast / startActivity / Vibrator 系统服务）都通过 [runOnMainSync]
+     *     同步切到主线程执行，彻底避免：
+     *       "Can't toast on a thread that has not called Looper.prepare()"
+     *       以及后台线程 startActivity 在部分 ROM 上被拦截的崩溃。
+     *
      * @return Pair(成功数量, 第一个失败的描述 or null)
      */
     fun executeAll(ctx: Context, actions: List<ActionTag>): Pair<Int, String?> {
         var ok = 0
         var firstError: String? = null
+        val mainHandler = Handler(Looper.getMainLooper())
         actions.forEach { a ->
-            val res = runCatching { executeOne(ctx, a.name, a.argument) }
+            val res = runCatching {
+                // 需要 UI 线程的动作 → 同步切主；纯系统服务动作 → 就地执行
+                when (a.name) {
+                    "show_toast", "open_app", "open_browser", "open_url",
+                    "share", "set_brightness_low", "set_brightness_high",
+                    "vibrate_once" -> runOnMainSync(mainHandler) {
+                        executeOne(ctx, a.name, a.argument)
+                    }
+                    else -> executeOne(ctx, a.name, a.argument)
+                }
+            }
             if (res.isSuccess) ok++
             else if (firstError == null) {
                 firstError = "${a.name}: ${res.exceptionOrNull()?.message ?: "执行失败"}"
             }
         }
         return ok to firstError
+    }
+
+    /**
+     * 同步切到主线程执行 block（阻塞当前线程等待执行完）。
+     * 本来就是主线程时直接原地跑，避免死锁。
+     */
+    private fun runOnMainSync(handler: Handler, block: () -> Unit) {
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            block()
+            return
+        }
+        val latch = CountDownLatch(1)
+        var err: Throwable? = null
+        handler.post {
+            try {
+                block()
+            } catch (t: Throwable) {
+                err = t
+            } finally {
+                latch.countDown()
+            }
+        }
+        // 最多等 5s（UI 操作都很快），避免 ANR
+        latch.await(5, TimeUnit.SECONDS)
+        err?.let { throw it }
     }
 
     /** 给 UI 用的 action 名称友好显示（中文）。未知名称原样返回。 */
@@ -104,12 +151,14 @@ object ActionExecutor {
         "set_brightness_low", "set_brightness_high"
     )
 
-    // 宽松正则：同时匹配
-    //   格式A：<ACTION: open_app "pkg">          （我们期望的标准格式）
-    //   格式B：<open_app 'pkg'>                  （1.5B 模型可能漏了 ACTION: 前缀）
-    // (?:ACTION\s*:\s*)? 让 ACTION: 变成可选前缀
+    // 宽松正则（终极版）——同时匹配 1.5B 模型所有可能的输出格式：
+    //   格式A：<ACTION: open_app "pkg">       标准格式
+    //   格式B：<open_app 'pkg'>               漏 ACTION: 前缀
+    //   格式C：</open_app>                    居然输出闭合标签（无参数时）
+    //   格式D：</vibrate_once>                AI 以为前面没开所以输出闭标签
+    // 技巧：用 <\s*/?\s*(?:ACTION\s*:\s*)?  让开头的 /（闭合标签标记）变成可选
     private val ACTION_REGEX = Regex(
-        pattern = """<\s*(?:ACTION\s*:\s*)?([A-Za-z_][A-Za-z0-9_]*)(?:\s+("[^"]*"|'[^']*'|\S+))?\s*>""",
+        pattern = """<\s*/?\s*(?:ACTION\s*:\s*)?([A-Za-z_][A-Za-z0-9_]*)(?:\s+("[^"]*"|'[^']*'|\S+))?\s*>""",
         option = RegexOption.IGNORE_CASE
     )
 

@@ -117,15 +117,16 @@ class ChatViewModel : ViewModel() {
      * 才在当前输入前临时 prepend 一行 ACTION 指令（普通闲聊 ~0 token）。
      * 指令内容保持精简（<200 chars），避免 Prefill 劣化。
      */
-    private val ACTION_KEYWORD_RE = Regex("打开|复制|亮度|设置|安装|跳转|启动|粘贴|搜索应用")
+    private val ACTION_KEYWORD_RE = Regex("打开|复制|震动|亮度|设置|安装|跳转|启动|粘贴|搜索应用")
     private val ACTION_DYNAMIC_HINT = run {
-        // 极简指令，1.5B 模型能记住且少占 token。
-        // 格式故意不写 ACTION: 前缀——因为我们 ActionExecutor 已经放宽正则同时接受两种格式了。
-        // 这样 AI 只需输出 <动作名 "参数"> 就够了，prefill token 再省 2-3 个。
-        """帮用户执行操作时，回答末尾加一行，格式如：
-<open_app "包名">   <copy_to_clipboard "文字">   <vibrate_once>
-设置=com.android.settings  浏览器=open_browser  复制=copy_to_clipboard  震动=vibrate_once  提示=show_toast
-
+        // 🔥 1.5B 模型只能记住 3 个动作！多了全乱。
+        //   包名用中文别名表（AI 不知道"微信"=com.tencent.mm）。
+        //   格式只写 3 个示例，一行一个，尽量少 token。
+        """只输出 1 行标签（不要解释）：
+<open_app "包名">  <copy_to_clipboard "文字">  <vibrate_once>
+包名速查：设置=com.android.settings  微信=com.tencent.mm  QQ=com.tencent.mobileqq
+支付宝=com.eg.android.AlipayGphone  抖音=com.ss.android.ugc.aweme  淘宝=com.taobao.taobao
+美团=com.sankuai.meituan  地图=com.autonavi.minimap  短信=com.android.mms
 """
     }
 

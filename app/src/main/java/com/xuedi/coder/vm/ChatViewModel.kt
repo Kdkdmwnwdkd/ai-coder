@@ -125,10 +125,11 @@ class ChatViewModel : ViewModel() {
         //   包名用中文别名表（AI 不知道"微信"=com.tencent.mm）。
         //   格式只写 3 个示例，一行一个，尽量少 token。
         """只输出 1 行标签（不要解释）：
-<open_app "包名">  <copy_to_clipboard "文字">  <vibrate_once>
+<open_app "包名">  <copy_to_clipboard "文字">  <vibrate_once>  <accessibility_action "open_app|包名|搜索词">
 包名速查：设置=com.android.settings  微信=com.tencent.mm  QQ=com.tencent.mobileqq
-支付宝=com.eg.android.AlipayGphone  抖音=com.ss.android.ugc.aweme  淘宝=com.taobao.taobao
-美团=com.sankuai.meituan  地图=com.autonavi.minimap  短信=com.android.mms
+支付宝=com.eg.android.AlipayGphone  抖音=com.ss.android.ugc.aweme  快手=com.smile.gifmaker
+B站=tv.danmaku.bili  淘宝=com.taobao.taobao  美团=com.sankuai.meituan
+例子：帮我打开快手搜斗罗大陆 → <accessibility_action "open_app|com.smile.gifmaker|斗罗大陆">
 """
     }
 

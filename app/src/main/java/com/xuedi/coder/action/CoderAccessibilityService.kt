@@ -104,18 +104,23 @@ class CoderAccessibilityService : AccessibilityService() {
             Log.w(TAG, "open_app: 没找到包 $pkg")
             return
         }
-        // 等 2s 让 App 完全启动
-        sleepHuman(2000, 500)
-        // 自动搜索（快手/抖音/B站 通用逻辑：点"搜索"→输入词→点回车）
+        // 等 2.5s 让 App 完全启动（首屏加载）
+        sleepHuman(2500, 500)
+        // 自动搜索（快手/抖音/B站 通用逻辑：点搜索图标→输入词→点回车）
         if (!keyword.isNullOrBlank()) {
-            tapByText("搜索")
-            sleepHuman(800, 300)
-            tapByText("放大镜")
-            sleepHuman(500, 200)
-            executeType(keyword)
-            sleepHuman(600, 200)
-            // 搜索框里通常有个"搜索"/"回车"按钮，或者直接点 IME 的回车
-            pressImeEnterOrTapSearch()
+            // 1. 找搜索入口：文字"搜索"/"放大镜" 或 contentDescription="搜索"
+            var found = tapByText("搜索", "放大镜", "search", "Search")
+            if (!found) found = tapByContentDesc("搜索", "放大镜", "search", "Search")
+            if (found) {
+                sleepHuman(1000, 300)
+                // 2. 输入关键词
+                executeType(keyword)
+                sleepHuman(800, 200)
+                // 3. 按回车搜索
+                pressImeEnterOrTapSearch()
+            } else {
+                Log.w(TAG, "  没找到搜索入口，只打开了 App")
+            }
         }
     }
 
@@ -132,7 +137,30 @@ class CoderAccessibilityService : AccessibilityService() {
                 for (k in keys) {
                     if (t.contains(k)) {
                         if (clickOrPerformAction(n)) {
-                            Log.i(TAG, "  点击了 '$t'")
+                            Log.i(TAG, "  点击了文字='$t'")
+                            return true
+                        }
+                    }
+                }
+            }
+            for (i in 0 until n.childCount) n.getChild(i)?.let { queue.add(it) }
+        }
+        return false
+    }
+
+    /** 按 contentDescription 查找可点击控件（搜索图标通常没有 text 但有 contentDescription） */
+    private fun tapByContentDesc(vararg keys: String): Boolean {
+        val root = rootInActiveWindow ?: return false
+        val queue = java.util.ArrayDeque<AccessibilityNodeInfo>()
+        queue.add(root)
+        while (queue.isNotEmpty()) {
+            val n = queue.poll()!!
+            val desc = n.contentDescription?.toString() ?: ""
+            if (desc.isNotBlank()) {
+                for (k in keys) {
+                    if (desc.contains(k, ignoreCase = true)) {
+                        if (clickOrPerformAction(n)) {
+                            Log.i(TAG, "  点击了 contentDescription='$desc'")
                             return true
                         }
                     }

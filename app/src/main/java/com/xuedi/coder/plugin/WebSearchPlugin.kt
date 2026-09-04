@@ -169,7 +169,130 @@ class WebSearchPlugin(
             val parsed = parseResults(body)
             if (parsed.isNotBlank()) return@withContext parsed
         }
-        return@withContext null
+        // SearXNG 全挂 → 国内搜索引擎兜底（百度/头条/神马，按顺序试）
+        return@withContext runCnSearchFallbacks(query, encoded)
+    }
+
+    // ==========================================================
+    // 国内搜索引擎兜底（SearXNG 全挂时用）
+    // 顺序：百度 → 头条 → 神马，任一成功即返回
+    // ==========================================================
+    private suspend fun runCnSearchFallbacks(query: String, encoded: String): String? {
+        // 百度
+        runBaiduFallback(query)?.let { return it }
+        // 头条
+        runToutiaoFallback(query)?.let { return it }
+        // 神马
+        runShenmaFallback(query)?.let { return it }
+        return null
+    }
+
+    /** 百度搜索：m.baidu.com 轻量版，解析标题+摘要 */
+    private suspend fun runBaiduFallback(query: String): String? = withContext(Dispatchers.IO) {
+        val encoded = runCatching { URLEncoder.encode(query, "UTF-8") }.getOrNull() ?: return@withContext null
+        val client = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(10, TimeUnit.SECONDS)
+            .build()
+        val url = "https://m.baidu.com/s?word=$encoded&sa=tb&from=844b&bd_page_type=1"
+        val html = runCatching {
+            val req = Request.Builder().url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Mobile Safari/537.36")
+                .header("Accept-Language", "zh-CN,zh;q=0.9")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                resp.body?.string()
+            }
+        }.getOrNull() ?: return@withContext null
+        parseBaiduHtml(html)
+    }
+
+    private fun parseBaiduHtml(html: String): String? {
+        // 百度移动版结果：<h3 class="c-title">标题</h3> + <span class="c-color-text">摘要</span>
+        val titleRe = Regex("<h3[^>]*class=\"[^\"]*c-title[^\"]*\"[^>]*>(.*?)</h3>", RegexOption.DOT_MATCHES_ALL)
+        val contentRe = Regex("<span[^>]*class=\"[^\"]*c-color-text[^\"]*\"[^>]*>(.*?)</span>", RegexOption.DOT_MATCHES_ALL)
+        val titles = titleRe.findAll(html).map { stripHtml(it.groupValues[1]) }.filter { it.isNotBlank() }.toList()
+        val contents = contentRe.findAll(html).map { stripHtml(it.groupValues[1]) }.filter { it.isNotBlank() }.toList()
+        if (titles.isEmpty()) return null
+        val sb = StringBuilder()
+        for (i in titles.indices.take(3)) {
+            val t = titles[i].take(60)
+            val c = contents.getOrNull(i)?.take(120) ?: ""
+            sb.append("${i + 1}. $t").append(": $c").append("\n")
+        }
+        return sb.toString().trim().ifBlank { null }
+    }
+
+    /** 头条搜索 */
+    private suspend fun runToutiaoFallback(query: String): String? = withContext(Dispatchers.IO) {
+        val encoded = runCatching { URLEncoder.encode(query, "UTF-8") }.getOrNull() ?: return@withContext null
+        val client = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(10, TimeUnit.SECONDS)
+            .build()
+        val url = "https://so.toutiao.com/search?keyword=$encoded&dvpf=pc&aid=4916&page_num=0"
+        val html = runCatching {
+            val req = Request.Builder().url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+                .header("Accept-Language", "zh-CN,zh;q=0.9")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                resp.body?.string()
+            }
+        }.getOrNull() ?: return@withContext null
+        parseGenericSearchHtml(html)
+    }
+
+    /** 神马搜索（阿里，UC 浏览器默认） */
+    private suspend fun runShenmaFallback(query: String): String? = withContext(Dispatchers.IO) {
+        val encoded = runCatching { URLEncoder.encode(query, "UTF-8") }.getOrNull() ?: return@withContext null
+        val client = OkHttpClient.Builder()
+            .connectTimeout(5, TimeUnit.SECONDS)
+            .readTimeout(8, TimeUnit.SECONDS)
+            .callTimeout(10, TimeUnit.SECONDS)
+            .build()
+        val url = "https://m.sm.cn/s?q=$encoded&from=smor&sa=tb"
+        val html = runCatching {
+            val req = Request.Builder().url(url)
+                .header("User-Agent", "Mozilla/5.0 (Linux; Android 13) AppleWebKit/537.36 Chrome/120.0 Mobile Safari/537.36")
+                .header("Accept-Language", "zh-CN,zh;q=0.9")
+                .build()
+            client.newCall(req).execute().use { resp ->
+                if (!resp.isSuccessful) return@use null
+                resp.body?.string()
+            }
+        }.getOrNull() ?: return@withContext null
+        parseGenericSearchHtml(html)
+    }
+
+    /** 通用 HTML 搜索结果解析（抓 <h2>/<h3> 标题 + 紧跟的摘要文本） */
+    private fun parseGenericSearchHtml(html: String): String? {
+        // 抓所有标题标签里的文本
+        val titleRe = Regex("<h[23][^>]*>(.*?)</h[23]>", RegexOption.DOT_MATCHES_ALL)
+        val titles = titleRe.findAll(html).map { stripHtml(it.groupValues[1]) }.filter { it.isNotBlank() && it.length > 4 }.take(5).toList()
+        if (titles.isEmpty()) return null
+        // 抓摘要：<p> 标签或 class 含 content/abstract/text 的 span/div
+        val contentRe = Regex("<(?:p|span|div)[^>]*class=\"[^\"]*(?:content|abstract|text|desc)[^\"]*\"[^>]*>(.*?)</(?:p|span|div)>", RegexOption.DOT_MATCHES_ALL)
+        val contents = contentRe.findAll(html).map { stripHtml(it.groupValues[1]) }.filter { it.isNotBlank() }.toList()
+        val sb = StringBuilder()
+        for (i in titles.indices.take(3)) {
+            val t = titles[i].take(60)
+            val c = contents.getOrNull(i)?.take(120) ?: ""
+            sb.append("${i + 1}. $t").append(if (c.isNotBlank()) ": $c" else "").append("\n")
+        }
+        return sb.toString().trim().ifBlank { null }
+    }
+
+    /** 去掉所有 HTML 标签，保留纯文本 */
+    private fun stripHtml(s: String): String {
+        var r = s.replace(Regex("<[^>]+>"), "")
+        r = r.replace("&nbsp;", " ").replace("&amp;", "&").replace("&quot;", "\"")
+            .replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">")
+        return r.trim().replace(Regex("\\s+"), " ")
     }
 
     private val WEATHER_RE = Regex("(天气|气温|温度|下雨|晴|多云|weather|forecast|temperature|℃)", RegexOption.IGNORE_CASE)

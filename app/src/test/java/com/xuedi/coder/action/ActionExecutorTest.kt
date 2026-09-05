@@ -165,4 +165,57 @@ class ActionExecutorTest {
         assertEquals(1, actions.size)
         assertEquals("open_app", actions[0].name)
     }
+
+    // ---- code81 补丁：裸格式防误伤（解释性正文不得触发动作）----
+
+    @Test
+    fun `plain open_app with non package word is rejected`() {
+        // AI 解释用法时的正文，不应被解析成动作（否则会跳应用商店）
+        val input = "我可以用 open_app 标签打开应用，open_app 命令很方便"
+        val (text, actions) = ActionExecutor.extractActions(input)
+        assertTrue(actions.isEmpty())
+        assertEquals(input, text)
+    }
+
+    @Test
+    fun `plain open_browser with non url is rejected`() {
+        val input = "先用 open_browser 浏览器 再搜索"
+        val (_, actions) = ActionExecutor.extractActions(input)
+        assertTrue(actions.isEmpty())
+    }
+
+    @Test
+    fun `plain open_app with quoted non package still runs`() {
+        // 引号包裹视为明确指令，即使内容不像包名也放行
+        val input = "open_app \"设置\""
+        val (_, actions) = ActionExecutor.extractActions(input)
+        assertEquals(1, actions.size)
+        assertEquals("设置", actions[0].argument)
+    }
+
+    @Test
+    fun `plain copy_to_clipboard without quotes is rejected`() {
+        val input = "接着 copy_to_clipboard 内容 就完成了"
+        val (_, actions) = ActionExecutor.extractActions(input)
+        assertTrue(actions.isEmpty())
+    }
+
+    @Test
+    fun `plain copy_to_clipboard with quotes still runs`() {
+        val input = "好的，copy_to_clipboard \"你好世界\" 已完成"
+        val (text, actions) = ActionExecutor.extractActions(input)
+        assertEquals(1, actions.size)
+        assertEquals("你好世界", actions[0].argument)
+        assertEquals("好的， 已完成", text)
+    }
+
+    @Test
+    fun `plain open_app with package name and suffix text only removes match`() {
+        val input = "马上 open_app com.tencent.mm 给你看"
+        val (text, actions) = ActionExecutor.extractActions(input)
+        assertEquals(1, actions.size)
+        assertEquals("com.tencent.mm", actions[0].argument)
+        // 只删除匹配片段本身，前后残留双空格（与尖括号格式第一轮行为一致）
+        assertEquals("马上  给你看", text)
+    }
 }

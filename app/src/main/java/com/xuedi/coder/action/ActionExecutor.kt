@@ -63,14 +63,35 @@ object ActionExecutor {
                 val raw = mr.value
                 val namePart = mr.groupValues.getOrNull(1)?.trim()?.lowercase() ?: continue
                 val argPart = mr.groupValues.getOrNull(2)?.trim() ?: ""
+                // 防误伤：解释性正文（如"我用 open_app 标签打开应用"）不应被解析成动作。
+                // 裸格式的参数必须符合对应动作的语义（包名/URL/引号包裹），否则跳过。
+                if (!plausiblePlainArg(namePart, argPart)) continue
                 val argument = stripQuotes(argPart)
                 if (namePart.isNotBlank() && namePart in WHITE_LIST) {
                     actions.add(ActionTag(name = namePart, argument = argument, raw = raw))
-                    cleaned = cleaned.replace(raw, "").trim()
+                    cleaned = cleaned.replaceFirst(raw, "").trim()
                 }
             }
         }
         return cleaned.trimEnd() to actions
+    }
+
+    /**
+     * code81 补丁：裸格式（无尖括号）参数合理性校验。
+     * 1.5B 模型或 AI 解释用法时，正文里可能出现 "open_app 标签" 这类文本；
+     * 若不校验，会被误解析成动作并执行 open_app "标签" → Toast + 跳应用商店。
+     */
+    private fun plausiblePlainArg(name: String, argPart: String): Boolean {
+        val quoted = argPart.length >= 2 &&
+            ((argPart.first() == '"' && argPart.last() == '"') ||
+                (argPart.first() == '\'' && argPart.last() == '\''))
+        return when (name) {
+            "open_app" -> quoted || PKG_STYLE_RE.matches(argPart)
+            "open_browser", "open_url" -> argPart.startsWith("http://") || argPart.startsWith("https://")
+            // 参数为任意文本的动作，裸格式必须引号包裹，裸单词一律视为正文误伤
+            "copy_to_clipboard", "accessibility_action" -> quoted
+            else -> false
+        }
     }
 
     private fun stripQuotes(arg: String): String = when {
@@ -185,6 +206,9 @@ object ActionExecutor {
         pattern = """\b(open_app|open_browser|open_url|copy_to_clipboard|vibrate_once|set_brightness_low|set_brightness_high|accessibility_action)\s+("[^"]*"|'[^']*'|\S+)""",
         option = RegexOption.IGNORE_CASE
     )
+
+    // Android 包名样式：至少两段点分标识符，如 com.tencent.mm、tv.danmaku.bili
+    private val PKG_STYLE_RE = Regex("""[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z0-9_]+)+""")
 
     @Suppress("DEPRECATION")
     private fun executeOne(ctx: Context, name: String, arg: String) {

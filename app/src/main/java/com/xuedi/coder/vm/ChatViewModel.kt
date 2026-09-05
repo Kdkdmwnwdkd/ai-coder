@@ -137,13 +137,11 @@ class ChatViewModel : ViewModel() {
     private val toolPlugin by lazy { ToolExecutionPlugin(app.applicationContext) }
 
     /**
-     * 联网搜索插件（100% 异步非阻塞，搜到后通过 prependToLatestUserMsg 把结果
-     * 插到当前话题最新 userMsg.content 的最前面，不阻塞聊天 UI）。
+     * 联网搜索插件（code81 起为同步搜索版：sendMessage 里调 searchSync，
+     * 结果绑定触发搜索的那条 userMsg，不再走回调注入）。
      */
     private val searchPlugin by lazy {
-        WebSearchPlugin(scope = viewModelScope) { resultText ->
-            prependToLatestUserMsg(resultText)
-        }
+        WebSearchPlugin(scope = viewModelScope)
     }
 
     /** code78 新增：GitHub Actions 插件 —— 触发编译/下载 APK/看状态 */
@@ -311,8 +309,7 @@ class ChatViewModel : ViewModel() {
         val rawContent = text.trim()
         if (rawContent.isEmpty()) return
 
-        // 🔴 删除了旧的 onPreSend 调用（返回值被丢了等于没做）。
-        // WebSearchPlugin 改为在后台协程里同步搜（最多 5s），见下面 Dispatchers.Default 里。
+        // 🔴 code81 修复：@搜索 由下面 sendMessage 内的同步 searchSync 处理（15s 超时）。
 
         // 🔴 ANR 双保险修复：nativeChat JNI 是 CPU 密集阻塞，推理工作流必须完整地在
         //    后台协程池（Dispatchers.Default）里跑，不能在 Main.immediate 上发起 collect。
@@ -348,14 +345,16 @@ class ChatViewModel : ViewModel() {
                 createdAtMs = System.currentTimeMillis()
             )
             _messages.value = _messages.value + userMsg
-            viewModelScope.launch(Dispatchers.IO) {
+            // 🔴 code81 修复：保存持久化 job，后面搜索结果更新同一消息时先 join 它再写，
+            //    避免两个独立 IO 协程乱序导致 DB 里最终存的是无搜索结果的旧版本。
+            val userPersistJob = viewModelScope.launch(Dispatchers.IO) {
                 chatDao.upsert(ChatMsgEntity.from(userMsg, topicId))
                 topicDao.touchActive(topicId, System.currentTimeMillis())
             }
 
             // 🔥 1.5 同步搜索 + 动态提示词（在 Dispatchers.Default 里跑，不卡 UI）：
-            //   · @搜索 关键词 → 同步搜 SearXNG（5s 超时），搜到的 prepend 到 userMsg 里
-            //   · 动作关键词 → prepend ACTION_DYNAMIC_HINT
+            //   · @搜索 关键词 → 同步搜 SearXNG（15s 超时），搜到的 prepend 到 userMsg 里
+            //   · 动作关键词 → prepend ACTION_DYNAMIC_HINT（@搜索 消息除外）
             var effectiveInput = rawContent
             if (rawContent.startsWith("@搜索")) {
                 val query = rawContent.removePrefix("@搜索").trim()
@@ -367,18 +366,25 @@ class ChatViewModel : ViewModel() {
                         // 把搜索结果 prepend 到用户消息正文里（DB 也会更新）
                         val withSearch = searchResult + "\n\n【用户问题】$query"
                         effectiveInput = withSearch
-                        // 同时更新 UI 上那条 userMsg 的 content
+                        // 同时更新 UI 上那条 userMsg 的 content（只改绑定触发消息的 id，不污染后续消息）
                         val updatedUserMsg = userMsg.copy(content = withSearch)
                         _messages.value = _messages.value.map {
                             if (it.id == userMsg.id) updatedUserMsg else it
                         }
+                        // 等第一次 upsert 完成再写更新版，保证 DB 最终是带搜索结果的内容
+                        userPersistJob.join()
                         viewModelScope.launch(Dispatchers.IO) {
                             chatDao.upsert(ChatMsgEntity.from(updatedUserMsg, topicId))
                         }
+                    } else {
+                        // 搜索失败降级：明确告知模型无法联网，避免它对 "@搜索 xxx" 原文瞎编实时信息
+                        effectiveInput = "（联网搜索失败或超时，请直接基于你的知识回答，" +
+                            "并先告知用户本次未能联网获取实时信息。）\n\n【用户问题】$query"
                     }
                 }
             }
-            val hitAction = ACTION_KEYWORD_RE.containsMatchIn(rawContent)
+            val hitAction = !rawContent.startsWith("@搜索") &&
+                ACTION_KEYWORD_RE.containsMatchIn(rawContent)
             val contentForEngine = if (hitAction) ACTION_DYNAMIC_HINT + effectiveInput else effectiveInput
 
 

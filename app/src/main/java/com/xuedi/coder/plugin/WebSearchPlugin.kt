@@ -11,47 +11,18 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.net.URLEncoder
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
 
 
-    // 联网搜索插件（异步非阻塞版 · 彻底解决 ANR）。
-
-    // ==========================================================
-    // 为什么不能在 onPreSend 里 runBlocking(OKHttp)？
-    // ChatViewModel.sendMessage → onPreSend 跑在 Dispatchers.Default（不是 IO），
-    // runBlocking 会把当前协程线程**钉死卡住**直到内部 OkHttp 返回。
-    // 国内网访问 SearXNG 公共实例最坏 45s 超时 → Android ANR 阈值 5s → 必死弹窗。
-
-    // 新设计（100% 非阻塞，主线程零等待）：
-    // ----------------------------------------------------------
-    // Step 1: onPreSend 看到 `@搜索 关键词`
-    // → 立刻原样返回 input（不阻塞），
-    // → 用插件自己的 CoroutineScope(Dispatchers.IO) 后台 launch 搜 SearXNG，
-    // → 搜到/超时后把结果通过 resultCallback 回传给 ChatViewModel，
-    // 让它直接把【联网搜索结果】追加到当前 topic 的最新 userMsg 正文里，
-    // 同时弹一条新的 AI 告知气泡（"联网搜索完成，已为你注入结果，现在可以直接追问。"）。
-
-    // 失败降级：45s 超时、3 个 SearXNG 实例全挂、网络错误 → 静默跳过，
-    // 只打一条 debug 日志，绝对不破坏聊天 UI。
-    // ==========================================================
-
-    // 用法（在 ChatViewModel.init 注册时注入回调）：
-    // ```
-    // val search = WebSearchPlugin(viewModelScope) { text ->
-    // // text = 【联网搜索结果】标题: 摘要\n...
-    // // 在这里把 text 插进 _messages.value 里最新 userMsg.content 最前面
-    // }
-    // pluginManager.register(search)
-    // ```
+// 联网搜索插件（code81 起改为同步搜索版）。
+//
+// 历史：旧版在 onPreSend 里异步搜索 + resultCallback 回调注入，结果会绑到
+// "最后一条 userMsg" 上，导致后续无关消息（如"你好"）被注入搜索结果（搜索污染）。
+// code81 起搜索统一由 ChatViewModel.sendMessage 里的 searchSync 同步完成，
+// 结果直接绑定触发搜索的那条 userMsg；本插件只保留 searchSync 与解析逻辑。
 
 class WebSearchPlugin(
     // 插件自己的生命周期（绑定 ChatViewModel viewModelScope 即可，随 VM 自动取消）。
     private val scope: CoroutineScope,
-
-    // 搜索成功后的 UI 回调：参数 = 已拼好的 "【联网搜索结果】\n标题1: 摘要1\n..." 文本。
-    // ChatViewModel 负责把这段文本 prepend 到最新 userMsg 的 content 里 + 刷新 UI。
-
-    private val resultCallback: (String) -> Unit,
 ) : ChatPlugin {
 
     fun name(): String = "联网搜索"
@@ -109,16 +80,10 @@ class WebSearchPlugin(
     }
 
 
-    // 上一次注入结果（防止同一个 userMsg 因为 sendMessage 重入被多次注入）。
-
-    private val lastInjected = AtomicReference<String?>(null)
-
     override fun onPreSend(input: String): String {
-        // 🔴 code81 修复：不再在这里做异步搜索。
-        // 之前异步搜索结果通过 resultCallback → prependToLatestUserMsg 注入，
-        // 会把搜索结果加到"最后一条 userMsg"上，导致"你好"被注入天气数据。
-        // 现在搜索统一走 ChatViewModel.sendMessage 里的同步 searchSync，
-        // 结果直接绑定到触发搜索的那条 userMsg，不会污染后续对话。
+        // code81 修复：这里保持透传，搜索统一走 ChatViewModel.sendMessage 里的同步 searchSync。
+        // 之前在这里异步搜索 + resultCallback 注入"最后一条 userMsg"，会把搜索结果
+        // 加到后续无关消息（如"你好"）上，造成搜索污染。
         return input
     }
 

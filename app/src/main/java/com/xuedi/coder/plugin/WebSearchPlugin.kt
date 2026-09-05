@@ -114,22 +114,11 @@ class WebSearchPlugin(
     private val lastInjected = AtomicReference<String?>(null)
 
     override fun onPreSend(input: String): String {
-        val m = trigger.matchEntire(input.trim()) ?: return input
-        val query = m.groupValues[1].trim()
-        if (query.isEmpty()) return input
-
-        // 🔥 核心：立刻 return input 透传，然后在后台 IO 协程里慢慢搜。
-        // 这里 100% 非阻塞，保证 sendMessage → 状态机立刻转 Preparing → 跟正常"你好"链路完全一致，
-        // 不会因为联网等待 45s 卡住 UI 触发 ANR。
-        scope.launch(Dispatchers.IO + SupervisorJob()) {
-            val result = withTimeoutOrNull(45_000L) { runSearXNG(query) }
-            val final = if (result.isNullOrBlank()) null else buildReport(query, result)
-            if (final != null && final != lastInjected.getAndSet(final)) {
-                withContext(Dispatchers.Main.immediate) {
-                    runCatching { resultCallback(final) }
-                }
-            }
-        }
+        // 🔴 code81 修复：不再在这里做异步搜索。
+        // 之前异步搜索结果通过 resultCallback → prependToLatestUserMsg 注入，
+        // 会把搜索结果加到"最后一条 userMsg"上，导致"你好"被注入天气数据。
+        // 现在搜索统一走 ChatViewModel.sendMessage 里的同步 searchSync，
+        // 结果直接绑定到触发搜索的那条 userMsg，不会污染后续对话。
         return input
     }
 

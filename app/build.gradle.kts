@@ -29,8 +29,8 @@ android {
         //   code 73 = code 62 + 动态注入 + 异步 @搜索（干净、可预测；versionCode>62 能覆盖旧 APK）
         //   code 74 = code 73 + open_app 不再跳应用商店 + @搜索 天气优先 wttr.in（真机4G实测342ms）+ Looper主线程切主
         //   code 77 = code 76 + 快手包名映射 + SearXNG扩大7实例+Bing兜底 + 中文→包名别名解析 + JNI sanitizeUtf8 + collectLatest修复
-        versionCode = 80
-        versionName = "1.3.26-code80"
+        versionCode = 81
+        versionName = "1.3.26-code81"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！

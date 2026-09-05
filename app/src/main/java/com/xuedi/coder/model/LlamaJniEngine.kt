@@ -8,9 +8,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOf
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.launch
 
 /**
@@ -461,7 +461,10 @@ class LlamaJniEngine : LlmEngine {
                         // —— 🔴 v1.3.25-stable: 插件 onPostReceive 链（纯 Kotlin，失败不影响主链路，不抛异常）——
                         val filtered = runPostReceive(piece)
                         fullSb.append(filtered)
-                        trySend(ChatChunk.Token(text = filtered))
+                        val sendResult = trySend(ChatChunk.Token(text = filtered))
+                        if (sendResult.isFailure) {
+                            Log.w(TAG, "⚠️ trySend Token 失败: '${filtered.take(20)}' reason=${sendResult.exceptionOrNull()?.message}")
+                        }
                     }
                     override fun onDone(reason: String) {
                         if (this@LlamaJniEngine.ctx != curCtx) {
@@ -543,7 +546,7 @@ class LlamaJniEngine : LlmEngine {
                 // 外层 awaitClose 时 CAS 还原（万一上面的 invokeOnCompletion 没跑，兜底）
                 genRunningFlag.set(false)
             }
-        }
+        }.buffer(kotlinx.coroutines.channels.Channel.UNLIMITED)
     }
 
     override fun release() {

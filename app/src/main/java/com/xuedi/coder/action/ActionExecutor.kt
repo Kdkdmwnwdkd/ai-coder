@@ -45,24 +45,40 @@ object ActionExecutor {
      */
     fun extractActions(fullText: String): Pair<String, List<ActionTag>> {
         val actions = mutableListOf<ActionTag>()
-        val cleaned = ACTION_REGEX.replace(fullText) { mr ->
+        // 第一轮：匹配 <open_app "包名"> 格式（带尖括号）
+        var cleaned = ACTION_REGEX.replace(fullText) { mr ->
             val raw = mr.value
             val namePart = mr.groupValues.getOrNull(1)?.trim()?.lowercase() ?: return@replace ""
             val argPart = mr.groupValues.getOrNull(2)?.trim() ?: ""
-            // 去掉引号（如果参数被 "..." 或 '...' 包裹）
-            val argument = when {
-                argPart.length >= 2 && argPart.first() == '"' && argPart.last() == '"' ->
-                    argPart.substring(1, argPart.length - 1)
-                argPart.length >= 2 && argPart.first() == '\'' && argPart.last() == '\'' ->
-                    argPart.substring(1, argPart.length - 1)
-                else -> argPart
-            }
+            val argument = stripQuotes(argPart)
             if (namePart.isNotBlank() && namePart in WHITE_LIST) {
                 actions.add(ActionTag(name = namePart, argument = argument, raw = raw))
             }
-            ""  // 把 ACTION 标签从正文里擦掉
+            ""
+        }
+        // 第二轮：宽容匹配不带尖括号的格式，如 open_app "com.xxx" 或 accessibility_action "open_app|com.xxx|搜索词"
+        if (actions.isEmpty()) {
+            val plainMatches = PLAIN_ACTION_REGEX.findAll(cleaned)
+            for (mr in plainMatches) {
+                val raw = mr.value
+                val namePart = mr.groupValues.getOrNull(1)?.trim()?.lowercase() ?: continue
+                val argPart = mr.groupValues.getOrNull(2)?.trim() ?: ""
+                val argument = stripQuotes(argPart)
+                if (namePart.isNotBlank() && namePart in WHITE_LIST) {
+                    actions.add(ActionTag(name = namePart, argument = argument, raw = raw))
+                    cleaned = cleaned.replace(raw, "").trim()
+                }
+            }
         }
         return cleaned.trimEnd() to actions
+    }
+
+    private fun stripQuotes(arg: String): String = when {
+        arg.length >= 2 && arg.first() == '"' && arg.last() == '"' ->
+            arg.substring(1, arg.length - 1)
+        arg.length >= 2 && arg.first() == '\'' && arg.last() == '\'' ->
+            arg.substring(1, arg.length - 1)
+        else -> arg
     }
 
     /**
@@ -161,6 +177,12 @@ object ActionExecutor {
     // 技巧：用 <\s*/?\s*(?:ACTION\s*:\s*)?  让开头的 /（闭合标签标记）变成可选
     private val ACTION_REGEX = Regex(
         pattern = """<\s*/?\s*(?:ACTION\s*:\s*)?([A-Za-z_][A-Za-z0-9_]*)(?:\s+("[^"]*"|'[^']*'|\S+))?\s*>""",
+        option = RegexOption.IGNORE_CASE
+    )
+
+    // 🔴 code81: 宽容匹配不带尖括号的格式，如: open_app "com.tencent.mm"
+    private val PLAIN_ACTION_REGEX = Regex(
+        pattern = """\b(open_app|open_browser|open_url|copy_to_clipboard|vibrate_once|set_brightness_low|set_brightness_high|accessibility_action)\s+("[^"]*"|'[^']*'|\S+)""",
         option = RegexOption.IGNORE_CASE
     )
 

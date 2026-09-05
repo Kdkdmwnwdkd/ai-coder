@@ -121,15 +121,13 @@ class ChatViewModel : ViewModel() {
      */
     private val ACTION_KEYWORD_RE = Regex("打开|复制|震动|亮度|设置|安装|跳转|启动|粘贴|搜索应用|github|GitHub|编译|下载apk|触发")
     private val ACTION_DYNAMIC_HINT = run {
-        // 🔥 1.5B 模型只能记住 3 个动作！多了全乱。
-        //   包名用中文别名表（AI 不知道"微信"=com.tencent.mm）。
-        //   格式只写 3 个示例，一行一个，尽量少 token。
+        // 🔥 1.5B 模型只能记住 1-2 个动作格式！多了全乱。
+        //   只保留 open_app 一种格式，AI 最容易学会。
+        //   包名用中文别名表，尽量少 token。
         """只输出 1 行标签（不要解释）：
-<open_app "包名">  <copy_to_clipboard "文字">  <vibrate_once>  <accessibility_action "open_app|包名|搜索词">
-包名速查：设置=com.android.settings  微信=com.tencent.mm  QQ=com.tencent.mobileqq
-支付宝=com.eg.android.AlipayGphone  抖音=com.ss.android.ugc.aweme  快手=com.smile.gifmaker
-B站=tv.danmaku.bili  淘宝=com.taobao.taobao  美团=com.sankuai.meituan
-例子：帮我打开快手搜斗罗大陆 → <accessibility_action "open_app|com.smile.gifmaker|斗罗大陆">
+<open_app "包名">
+包名速查：设置=com.android.settings  微信=com.tencent.mm  抖音=com.ss.android.ugc.aweme
+快手=com.smile.gifmaker  B站=tv.danmaku.bili  淘宝=com.taobao.taobao
 """
     }
 
@@ -364,7 +362,7 @@ B站=tv.danmaku.bili  淘宝=com.taobao.taobao  美团=com.sankuai.meituan
                 if (query.isNotEmpty()) {
                     _infStatus.value = InfStatus.Preparing
                     _infElapsedMs.value = 0L
-                    val searchResult = searchPlugin.searchSync(query, timeoutMs = 5_000L)
+                    val searchResult = searchPlugin.searchSync(query, timeoutMs = 15_000L)
                     if (searchResult != null) {
                         // 把搜索结果 prepend 到用户消息正文里（DB 也会更新）
                         val withSearch = searchResult + "\n\n【用户问题】$query"

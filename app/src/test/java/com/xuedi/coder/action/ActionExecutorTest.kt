@@ -127,4 +127,42 @@ class ActionExecutorTest {
         val (text, _) = ActionExecutor.extractActions(input)
         assertEquals("前文  后文", text)
     }
+
+    // ---- code81 P2: 宽容解析（PLAIN_ACTION_REGEX，不带尖括号的格式）----
+
+    @Test
+    fun `plain open_app with double quotes no brackets`() {
+        val input = "好的 open_app \"com.android.settings\""
+        val (text, actions) = ActionExecutor.extractActions(input)
+        assertEquals(1, actions.size)
+        assertEquals("open_app", actions[0].name)
+        assertEquals("com.android.settings", actions[0].argument)
+    }
+
+    @Test
+    fun `plain open_app with single quotes no brackets`() {
+        val input = "open_app 'com.tencent.mm'"
+        val (_, actions) = ActionExecutor.extractActions(input)
+        assertEquals(1, actions.size)
+        assertEquals("open_app", actions[0].name)
+        assertEquals("com.tencent.mm", actions[0].argument)
+    }
+
+    @Test
+    fun `plain open_app no quotes no brackets`() {
+        val input = "帮我 open_app com.android.settings"
+        val (_, actions) = ActionExecutor.extractActions(input)
+        assertEquals(1, actions.size)
+        assertEquals("open_app", actions[0].name)
+        assertEquals("com.android.settings", actions[0].argument)
+    }
+
+    @Test
+    fun `bracket format takes priority over plain`() {
+        // 带尖括号的格式优先匹配，plain 不参与
+        val input = "<open_app \"com.android.settings\">"
+        val (_, actions) = ActionExecutor.extractActions(input)
+        assertEquals(1, actions.size)
+        assertEquals("open_app", actions[0].name)
+    }
 }

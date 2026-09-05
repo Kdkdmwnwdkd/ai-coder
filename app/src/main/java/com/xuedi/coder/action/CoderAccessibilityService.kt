@@ -43,7 +43,8 @@ class CoderAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
-        android.util.Log.i(TAG, "✅ CoderAccessibilityService 已启动")
+        register(this)
+        android.util.Log.i(TAG, "✅ CoderAccessibilityService 已启动并注册")
     }
 
     // ------------------------------------------------------------------

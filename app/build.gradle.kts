@@ -38,8 +38,11 @@ android {
         //   code 98 = code97 + Repo自动拆分owner/repo + Token自动提取ghp_前缀 + 设置页无效token自动清空
         //   code 99 = code98 + 根治LazyColumn闪退(移除scrollToItem靠reverseLayout+key拼idx防重复key)
         //   code 100 = code99 + @github 提交代码到dev分支(Contents API手机直推) + 触发构建改dev分支(main停在code62) + QQ/微信禁用自动化
-        versionCode = 100
-        versionName = "1.3.26-code100"
+        // code101: 版本号改 CI 自动注入 —— GITHUB_RUN_NUMBER 每次构建唯一递增，
+        //   诊断包/关于页直接显示 code<构建号>，一眼分清装的是哪次出的包（本地构建回落 100）。
+        val ciVersion = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 100
+        versionCode = ciVersion
+        versionName = "1.3.26-code$ciVersion"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！

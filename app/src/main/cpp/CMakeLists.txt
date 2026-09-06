@@ -92,6 +92,77 @@ set(GGML_CPU_ARM_MALI     OFF CACHE BOOL "" FORCE)
 #   所以头文件目录要我们在 add_subdirectory 之后手动补到 ggml-vulkan target。
 #   config / 头文件任一缺失 → 与 Vulkan NOT FOUND 同策略：CPU-only，永不阻塞出包。
 # =====================================================
+# code278-fix2：上一版 find_package(Vulkan) 调用本体弄丢了（只剩 Vulkan_FOUND 判断
+#   → 永远未定义 → 一直静默 CPU-only。CI 全绿但 .so 里无 ggml_vk 符号/无 libvulkan 依赖，
+#   拆 APK 实测抓到）。
+#   且 NDK 下裸 find_package(Vulkan) 也靠不住：FindVulkan 的 find_library 默认前缀
+#   不含 sysroot 的 <triple>/<api>/ 子目录（libvulkan.so 实测在
+#   usr/lib/aarch64-linux-android/26/；注意 NDK 的 ANDROID_LLVM_TRIPLE 是
+#   "aarch64-none-linux-android26" 带后缀形态，不能直接拿来拼路径）。
+#   修法：显式预置 NDK include/lib + HOST glslc 三个缓存变量，再让 find_package 验证。
+if (ANDROID)
+    if (CMAKE_ANDROID_ARCH_ABI STREQUAL "arm64-v8a")
+        set(_VK_TRIPLE aarch64-linux-android)
+    elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "armeabi-v7a")
+        set(_VK_TRIPLE arm-linux-androideabi)
+    elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86_64")
+        set(_VK_TRIPLE x86_64-linux-android)
+    elseif (CMAKE_ANDROID_ARCH_ABI STREQUAL "x86")
+        set(_VK_TRIPLE i686-linux-android)
+    endif ()
+    set(_VK_INC "${CMAKE_SYSROOT}/usr/include")
+    set(_VK_LIB "${CMAKE_SYSROOT}/usr/lib/${_VK_TRIPLE}/${ANDROID_PLATFORM_LEVEL}/libvulkan.so")
+    if (NOT EXISTS "${_VK_LIB}")
+        # API 目录兜底：取该 ABI 下最高 API 版本的 stub
+        file(GLOB _VK_LIBS "${CMAKE_SYSROOT}/usr/lib/${_VK_TRIPLE}/*/libvulkan.so")
+        if (_VK_LIBS)
+            list(SORT _VK_LIBS)
+            list(GET _VK_LIBS -1 _VK_LIB)
+        endif ()
+    endif ()
+    if (EXISTS "${_VK_INC}/vulkan/vulkan.h" AND EXISTS "${_VK_LIB}")
+        set(Vulkan_INCLUDE_DIR "${_VK_INC}" CACHE PATH "NDK vulkan headers (xuedi)" FORCE)
+        set(Vulkan_LIBRARY     "${_VK_LIB}" CACHE FILEPATH "NDK libvulkan stub (xuedi)" FORCE)
+        message(STATUS "[xuedi-llama] NDK Vulkan 显式定位: ${_VK_LIB}")
+    else ()
+        message(STATUS "[xuedi-llama] NDK sysroot 未找到 vulkan 头/stub（inc=${_VK_INC} lib=${_VK_LIB}）→ 走 CPU-only")
+    endif ()
+    # glslc 是 HOST 工具：Android toolchain 的 FIND_ROOT_PATH_MODE_PROGRAM=NEVER，
+    # find_program 天然搜宿主机（build.yml 已 apt install glslc）
+    find_program(Vulkan_GLSLC_EXECUTABLE NAMES glslc)
+
+    # code278-fix3：b10819 的 ggml-vulkan.cpp 重度使用 vulkan-hpp（vk::DispatchLoaderDynamic、
+    # VULKAN_HPP_DEFAULT_DISPATCHER 等 C++ 绑定，b5180 还是纯 C API），但 NDK sysroot
+    # 只发 C 头（vulkan.h/vulkan_core.h/vulkan_android.h，没有 vulkan.hpp）→ 必须借 HOST
+    # 的 Vulkan-Headers（build.yml apt install libvulkan-dev，Ubuntu24.04=1.3.275 带全量 .hpp）。
+    #   ① 必须整目录隔离拷贝再 -I：直接 -I/usr/include 会让宿主 glibc 头（stdio.h 等）
+    #      混进交叉编译；拷出纯 vulkan/ 子树就只覆盖 vulkan 一族头。
+    #   ② host 的 .h+.hpp 是同版本一整套（vulkan.hpp 内部 #include 十几个姊妹头），
+    #      整体替代 NDK 的 vulkan/*.h；链接的 loader stub 是稳定 ABI，1.3.237 vs 1.3.275
+    #      版本差无影响（设备函数全走 vkGetInstanceProcAddr 动态派发）。
+    find_path(XUEDI_VULKAN_HPP_DIR NAMES vulkan/vulkan.hpp
+        PATHS /usr/include /usr/local/include
+        NO_CMAKE_FIND_ROOT_PATH)
+    if (XUEDI_VULKAN_HPP_DIR)
+        file(COPY "${XUEDI_VULKAN_HPP_DIR}/vulkan" DESTINATION "${CMAKE_BINARY_DIR}/vk-hpp-isolated")
+        # host vulkan_core.h 还会 #include "vk_video/vulkan_video_codec_*.h"（视频编码标准头，独立目录）
+        if (EXISTS "${XUEDI_VULKAN_HPP_DIR}/vk_video")
+            file(COPY "${XUEDI_VULKAN_HPP_DIR}/vk_video" DESTINATION "${CMAKE_BINARY_DIR}/vk-hpp-isolated")
+        endif ()
+        set(XUEDI_VULKAN_HPP_OK ON)
+        message(STATUS "[xuedi-llama] vulkan-hpp 借用 HOST 头（${XUEDI_VULKAN_HPP_DIR}）→ 隔离到 ${CMAKE_BINARY_DIR}/vk-hpp-isolated")
+    else ()
+        message(STATUS "[xuedi-llama] HOST 缺 vulkan.hpp（CI 应 apt install libvulkan-dev）→ 走 CPU-only")
+    endif ()
+endif ()
+# 带 glslc 组件检测：与 ggml-vulkan 内部 find_package(Vulkan COMPONENTS glslc REQUIRED)
+# 对齐——缺 glslc 在这里就判 NOT FOUND 退 CPU-only，而不是让子目录 FATAL 炸掉整个构建。
+find_package(Vulkan COMPONENTS glslc)
+
+if (NOT ANDROID)
+    set(XUEDI_VULKAN_HPP_OK ON)  # 非 Android：宿主机 Vulkan SDK 自带 .hpp
+endif ()
+
 set(XUEDI_SPIRV_OK OFF)
 if (Vulkan_FOUND)
     # NO_CMAKE_FIND_ROOT_PATH：Android toolchain 把 find_* 限制在 sysroot，
@@ -113,12 +184,15 @@ if (Vulkan_FOUND)
         # 预置 <Pkg>_DIR：find_package 优先吃这个显式路径，不受 sysroot re-root 影响
         get_filename_component(XUEDI_SPIRV_HEADERS_DIR "${XUEDI_SPIRV_HEADERS_CONFIG}" DIRECTORY)
         set(SPIRV-Headers_DIR "${XUEDI_SPIRV_HEADERS_DIR}" CACHE PATH "host SPIRV-Headers cmake dir (xuedi)" FORCE)
+        # code278-fix4：/usr/include 会被 CMake 当"系统隐式目录"从 -I 里剥掉（交叉编译也一样），
+        # 直接 target_include_directories(/usr/include) 无效 → spirv/ 同样隔离拷贝到 vk-hpp-isolated
+        file(COPY "${XUEDI_SPIRV_INCLUDE_DIR}/spirv" DESTINATION "${CMAKE_BINARY_DIR}/vk-hpp-isolated")
         set(XUEDI_SPIRV_OK ON)
     endif ()
 endif ()
 
-if (Vulkan_FOUND AND XUEDI_SPIRV_OK)
-    message(STATUS "[xuedi-llama] Vulkan FOUND (include=${Vulkan_INCLUDE_DIRS} libs=${Vulkan_LIBRARIES} glslc=${Vulkan_GLSLC_EXECUTABLE}) + SPIRV-Headers(${XUEDI_SPIRV_HEADERS_DIR}) → 启用 ggml-vulkan")
+if (Vulkan_FOUND AND XUEDI_SPIRV_OK AND XUEDI_VULKAN_HPP_OK)
+    message(STATUS "[xuedi-llama] Vulkan FOUND (include=${Vulkan_INCLUDE_DIRS} libs=${Vulkan_LIBRARIES} glslc=${Vulkan_GLSLC_EXECUTABLE}) + SPIRV-Headers(${XUEDI_SPIRV_HEADERS_DIR}) + vulkan-hpp → 启用 ggml-vulkan")
     set(GGML_VULKAN                       ON  CACHE BOOL "" FORCE)
     set(GGML_VULKAN_DEBUG                 OFF CACHE BOOL "" FORCE)
     set(GGML_VULKAN_CHECK_RESULTS         OFF CACHE BOOL "" FORCE)
@@ -131,6 +205,8 @@ if (Vulkan_FOUND AND XUEDI_SPIRV_OK)
 else ()
     if (Vulkan_FOUND AND NOT XUEDI_SPIRV_OK)
         message(STATUS "[xuedi-llama] Vulkan 在，但 HOST 缺 spirv-headers（CI 应 apt install spirv-headers）→ CPU-only 构建")
+    elseif (Vulkan_FOUND AND NOT XUEDI_VULKAN_HPP_OK)
+        message(STATUS "[xuedi-llama] Vulkan 在，但 HOST 缺 vulkan.hpp（CI 应 apt install libvulkan-dev）→ CPU-only 构建")
     else ()
         message(STATUS "[xuedi-llama] Vulkan NOT FOUND → CPU-only 构建（= perf2-thread4 底包）")
     endif ()
@@ -155,12 +231,28 @@ set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 # =====================================================
 add_subdirectory(${LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama_build)
 
-# code278-b10819: ggml-vulkan.cpp 要 <spirv/unified1/spirv.hpp>，但 llama.cpp 只
-# find_package(SPIRV-Headers) 从不 link 它 → include 目录我们自己补（HOST 头只含
-# spirv/ 子目录纯常量定义，不会污染 Android sysroot 头搜索）。
+# code278-b10819: ggml-vulkan.cpp 要 <spirv/unified1/spirv.hpp> + <vulkan/vulkan.hpp>，
+# 但 llama.cpp 只 find_package(SPIRV-Headers) 从不 link 它，NDK 又没有 vulkan.hpp
+# → 两者都隔离拷贝到 vk-hpp-isolated（vulkan/ + vk_video/ + spirv/），一次 -I 补全，
+# 不触碰 /usr/include（会被 CMake 剥掉）也不污染交叉编译头搜索。
 if (XUEDI_HAS_VULKAN AND TARGET ggml-vulkan)
-    target_include_directories(ggml-vulkan PRIVATE ${XUEDI_SPIRV_INCLUDE_DIR})
-    message(STATUS "[xuedi-llama] ggml-vulkan 补 SPIRV include: ${XUEDI_SPIRV_INCLUDE_DIR}")
+    target_include_directories(ggml-vulkan PRIVATE "${CMAKE_BINARY_DIR}/vk-hpp-isolated")
+    message(STATUS "[xuedi-llama] ggml-vulkan 补 include: ${CMAKE_BINARY_DIR}/vk-hpp-isolated (vulkan+vk_video+spirv)")
+    # code278-fix5：*.comp.cpp 是 vulkan-shaders-gen 生成的纯数据表（mul_mm 单文件 131MB、
+    # 千万级 0x.. 初始化元素），clang 前端 AST 内存爆炸（6GB 沙箱 -O0 都被 SIGKILL）；
+    # 纯数据数组优化零收益 → 全部强制 -O0，省内存也省 CI 时间。
+    get_target_property(_VK_SRCS ggml-vulkan SOURCES)
+    set(_VK_EMBED_SRCS "")
+    foreach (_s IN LISTS _VK_SRCS)
+        if (_s MATCHES "\\.comp\\.cpp$")
+            list(APPEND _VK_EMBED_SRCS "${_s}")
+        endif ()
+    endforeach ()
+    if (_VK_EMBED_SRCS)
+        set_source_files_properties(${_VK_EMBED_SRCS} TARGET_DIRECTORY ggml-vulkan
+            PROPERTIES COMPILE_OPTIONS "-O0")
+        message(STATUS "[xuedi-llama] ${CMAKE_BUILD_TYPE} 下 shader 嵌入单元(${_VK_EMBED_SRCS} 等)强制 -O0")
+    endif ()
 endif ()
 
 # =====================================================

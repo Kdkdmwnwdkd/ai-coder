@@ -9,4 +9,6 @@
     <external-files-path name="external_files" path="." />
     <!-- /sdcard/Android/data/<pkg>/cache/ -->
     <external-cache-path name="external_cache" path="." />
+    <!-- /sdcard/（code274：GitHub 下载的 APK 存到公共 /Download/，通知点开安装要用 FileProvider） -->
+    <external-path name="external" path="." />
 </paths>

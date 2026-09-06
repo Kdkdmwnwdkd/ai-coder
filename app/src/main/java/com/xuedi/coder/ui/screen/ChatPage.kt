@@ -107,7 +107,7 @@ fun ChatPage(vm: ChatViewModel) {
         drawerState = drawerState,
         drawerContent = {
             ModalDrawerSheet(
-                drawerContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.96f)
+                drawerContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
             ) {
                 // Drawer 顶部：标题 + 「+ 新对话」按钮
                 Row(
@@ -247,19 +247,20 @@ fun ChatPage(vm: ChatViewModel) {
                         verticalAlignment = Alignment.Bottom  // 多行气泡底部对齐（TRAE 风格）
                     ) {
                         // 🔵 TODO-1 TRAE 极简：删掉所有圆形头像 Box / 名字文字 / 左右占位 Spacer
-                        //    用户气泡：右对齐淡蓝；AI 气泡：左对齐白；统一 18dp 圆角，纯极简
+                        //    用户气泡：右对齐淡蓝灰；AI 气泡：左对齐白；统一 18dp 圆角，纯极简
                         val bubbleShape = RoundedCornerShape(18.dp)
                         if (isUser) Spacer(Modifier.weight(1f))  // 用户气泡靠右
                         Card(
                             modifier = Modifier.widthIn(max = 320.dp),
                             shape = bubbleShape,
                             colors = CardDefaults.cardColors(
-                                // code299: 用户气泡改实心主色（预览版设计），AI 气泡保持浅色卡片
+                                // 白色 DeepSeek 排版：气泡改半透明磨砂容器（非实心蓝），背景照片可透出；
+                                // 用户=淡蓝灰 primaryContainer、AI=白 surface、错误/系统=低透明度色调
                                 containerColor = when (msg.role) {
-                                    ChatRole.User      -> MaterialTheme.colorScheme.primary
-                                    ChatRole.Error     -> MaterialTheme.colorScheme.error.copy(alpha = 0.10f)
+                                    ChatRole.User      -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.80f)
+                                    ChatRole.Error     -> MaterialTheme.colorScheme.error.copy(alpha = 0.12f)
                                     ChatRole.System    -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f)
-                                    else               -> MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
+                                    else               -> MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
                                 }
                             )
                         ) {
@@ -270,7 +271,7 @@ fun ChatPage(vm: ChatViewModel) {
                                     lineHeight = 22.sp,
                                     color = when (msg.role) {
                                         ChatRole.Error  -> MaterialTheme.colorScheme.error
-                                        ChatRole.User   -> MaterialTheme.colorScheme.onPrimary
+                                        ChatRole.User   -> MaterialTheme.colorScheme.onPrimaryContainer
                                         else            -> MaterialTheme.colorScheme.onSurface
                                     }
                                 )
@@ -287,24 +288,24 @@ fun ChatPage(vm: ChatViewModel) {
             if (infStatus != InfStatus.Idle) {
                 val (bg, fg, statusText) = when (infStatus) {
                     InfStatus.Preparing -> Triple(
-                        MaterialTheme.colorScheme.surfaceVariant,
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.75f),
                         MaterialTheme.colorScheme.onSurfaceVariant,
                         if (prefillPercent > 0) "正在准备推理…$prefillPercent% · ${formatElapsed(elapsedSec)}"
                         else "正在准备推理…${formatElapsed(elapsedSec)}"
                     )
                     InfStatus.Running -> Triple(
+                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
                         MaterialTheme.colorScheme.primary,
-                        MaterialTheme.colorScheme.onPrimary,
                         "AI 正在回复…${formatElapsed(elapsedSec)} · 已生成 $tokenCount 字"
                     )
                     InfStatus.Failed -> Triple(
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
                         MaterialTheme.colorScheme.error,
-                        MaterialTheme.colorScheme.onError,
                         "推理失败：${(failMsg ?: "未知错误").take(80)}"
                     )
                     InfStatus.Timeout -> Triple(
+                        MaterialTheme.colorScheme.error.copy(alpha = 0.12f),
                         MaterialTheme.colorScheme.error,
-                        MaterialTheme.colorScheme.onError,
                         "启动超时(15s)：建议减少场景开关数量或重启手机释放内存后重试"
                     )
                     InfStatus.Idle -> Triple(Color.Transparent, Color.Transparent, "")
@@ -366,7 +367,7 @@ fun ChatPage(vm: ChatViewModel) {
                     .fillMaxWidth()
                     .padding(vertical = 6.dp)
             ) {
-                // code300: 无边框填充胶囊输入框（预览版设计），比 Outlined 更干净
+                // 白色 DeepSeek 排版：磨砂半透明白输入框（无边框胶囊），背景照片可透出
                 androidx.compose.material3.TextField(
                     value = input,
                     onValueChange = { input = it },
@@ -380,13 +381,13 @@ fun ChatPage(vm: ChatViewModel) {
                     shape = RoundedCornerShape(24.dp),
                     maxLines = 5,
                     colors = androidx.compose.material3.TextFieldDefaults.colors(
-                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
-                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        focusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.72f),
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.60f),
                         focusedIndicatorColor = Color.Transparent,
                         unfocusedIndicatorColor = Color.Transparent
                     )
                 )
-                // 圆形实心发送按钮（正式 IM 应用风格，空输入置灰）
+                // 圆形发送按钮（正式 IM 应用风格，空输入置灰；跟随主色灰蓝，不抢戏）
                 androidx.compose.material3.FilledIconButton(
                     onClick = {
                         val txt = input

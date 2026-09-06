@@ -9,7 +9,7 @@ val MidGray = Color(0xFFA7AAAF)
 val DarkGray = Color(0xFF4A4B4F)
 val Black = Color(0xFF111214)
 
-// code300: 强调色换预览版鲜蓝（对齐新 UI 设计稿）
-val Accent = Color(0xFF2563EB)
-val AccentDim = Color(0xFFE8EFFF)
+// 白色 DeepSeek 排版：强调色用沉静蓝灰，不鲜艳、不抢戏（撤回 code300 鲜蓝）
+val Accent = Color(0xFF5C7C9A)
+val AccentDim = Color(0xFFDCE3EB)
 val ErrorRed = Color(0xFFB3261E)

@@ -62,7 +62,7 @@ fun AppNavHost(
                 //    各页面自己用小号标题行（15sp primary SemiBold），不再占一整块顶部
                 bottomBar = {
                     NavigationBar(
-                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
+                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.85f)
                     ) {
                         val backStack by navController.currentBackStackEntryAsState()
                         val current = backStack?.destination

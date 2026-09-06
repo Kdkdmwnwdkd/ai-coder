@@ -22,7 +22,6 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Divider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -83,10 +82,10 @@ fun AboutPage() {
                 icon = { Icon(Icons.Outlined.Info, null, tint = MaterialTheme.colorScheme.primary) },
                 title = stringResource(R.string.about_group_app)
             )
-            OutlinedCard(
+            Card(
                 shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
                 )
             ) {
                 Column(Modifier.padding(14.dp)) {
@@ -137,7 +136,7 @@ fun AboutPage() {
             Card(
                 shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
                 )
             ) {
                 Column(Modifier.padding(14.dp)) {
@@ -213,7 +212,7 @@ fun AboutPage() {
             Card(
                 shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
                 )
             ) {
                 val items = remember { FAQ_ITEMS }
@@ -271,7 +270,7 @@ fun AboutPage() {
             Card(
                 shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
                 )
             ) {
                 val items = remember { VERSION_HISTORY }
@@ -342,7 +341,7 @@ fun AboutPage() {
             Card(
                 shape = RoundedCornerShape(18.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
                 )
             ) {
                 Column(Modifier.padding(14.dp)) {

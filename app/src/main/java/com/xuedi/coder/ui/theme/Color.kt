@@ -9,9 +9,9 @@ val MidGray = Color(0xFFA7AAAF)
 val DarkGray = Color(0xFF4A4B4F)
 val Black = Color(0xFF111214)
 
-// 极简强调色：灰蓝，不鲜艳、不花里胡哨
-val Accent = Color(0xFF5C7C9A)
-val AccentDim = Color(0xFFDCE3EB)
+// code300: 强调色换预览版鲜蓝（对齐新 UI 设计稿）
+val Accent = Color(0xFF2563EB)
+val AccentDim = Color(0xFFE8EFFF)
 val ErrorRed = Color(0xFFB3261E)
 
 val CodeBlockBg = Color(0xFFF1F2F4)

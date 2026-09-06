@@ -553,11 +553,12 @@ fun SettingsPage(
 // ===================================================================
 @Composable
 private fun SectionHeader(title: String) {
+    // code300: 分组标题改灰色小字（预览版设计），不再用蓝色
     Text(
         text = title,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.primary,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = Modifier.padding(start = 2.dp, bottom = 6.dp, top = 2.dp),
         letterSpacing = 0.5.sp
     )

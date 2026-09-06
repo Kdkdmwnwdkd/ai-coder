@@ -80,11 +80,12 @@ fun PluginsPage(appScope: CoroutineScope) {
         item(key = "header") {
             Column {
                 Row(verticalAlignment = Alignment.CenterVertically) {
+                    // code300: 页标题改正文色（预览版设计），不再用蓝色
                     Text(
                         "场景 · 插件开关",
                         fontSize = 15.sp,
                         fontWeight = FontWeight.SemiBold,
-                        color = MaterialTheme.colorScheme.primary
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                     if (refreshing) {
                         Spacer(Modifier.height(12.dp))

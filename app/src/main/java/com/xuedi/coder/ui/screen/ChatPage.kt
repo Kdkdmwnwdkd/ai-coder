@@ -364,20 +364,25 @@ fun ChatPage(vm: ChatViewModel) {
                     .fillMaxWidth()
                     .padding(vertical = 6.dp)
             ) {
-                OutlinedTextField(
+                // code300: 无边框填充胶囊输入框（预览版设计），比 Outlined 更干净
+                androidx.compose.material3.TextField(
                     value = input,
                     onValueChange = { input = it },
                     placeholder = {
                         Text(
-                            "输入你想写的代码 / 问题 / 需求…",
+                            "输入你的问题…",
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     },
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .weight(1f),
+                    modifier = Modifier.weight(1f),
                     shape = RoundedCornerShape(24.dp),
-                    maxLines = 5
+                    maxLines = 5,
+                    colors = androidx.compose.material3.TextFieldDefaults.colors(
+                        focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant,
+                        focusedIndicatorColor = Color.Transparent,
+                        unfocusedIndicatorColor = Color.Transparent
+                    )
                 )
                 // 圆形实心发送按钮（正式 IM 应用风格，空输入置灰）
                 androidx.compose.material3.FilledIconButton(

@@ -415,11 +415,12 @@ private fun AboutSectionHeader(
         verticalAlignment = Alignment.CenterVertically
     ) {
         icon()
+        // code300: 分组标题改灰色小字（预览版设计）
         Text(
             title,
             fontSize = 13.sp,
             fontWeight = FontWeight.SemiBold,
-            color = MaterialTheme.colorScheme.primary,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
             letterSpacing = 0.5.sp,
             modifier = Modifier.padding(start = 6.dp)
         )

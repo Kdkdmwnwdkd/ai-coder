@@ -386,23 +386,32 @@ fun ChatPage(vm: ChatViewModel) {
                 OutlinedTextField(
                     value = input,
                     onValueChange = { input = it },
-                    placeholder = { Text("输入你想写的代码 / 问题 / 需求...", color = Color.Gray) },
+                    placeholder = {
+                        Text(
+                            "输入你想写的代码 / 问题 / 需求…",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
                     modifier = Modifier
                         .fillMaxWidth()
                         .weight(1f),
-                    shape = RoundedCornerShape(22.dp),
+                    shape = RoundedCornerShape(24.dp),
                     maxLines = 5
                 )
-                IconButton(
+                // 圆形实心发送按钮（正式 IM 应用风格）
+                androidx.compose.material3.FilledIconButton(
                     onClick = {
                         val txt = input
                         if (txt.isNotBlank()) {
                             input = ""
                             vm.sendMessage(txt)
                         }
-                    }
+                    },
+                    enabled = input.isNotBlank(),
+                    modifier = Modifier.size(44.dp),
+                    shape = androidx.compose.foundation.shape.CircleShape
                 ) {
-                    Icon(Icons.Outlined.Send, "发送", tint = MaterialTheme.colorScheme.primary)
+                    Icon(Icons.Outlined.Send, "发送", modifier = Modifier.size(20.dp))
                 }
             }
         }

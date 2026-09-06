@@ -42,14 +42,6 @@ class LlamaJniEngine : LlmEngine {
         /** lib 加载失败时的错误信息（给 SettingsPage / chatFlow 诊断用） */
         @Volatile private var libLoadError: String? = null
 
-        /**
-         * 🔴 v1.3.11 方案A（治标）：强制模拟模式开关。
-         *   true=chatFlow 不调 C++ nativeChat，直接返回 MockLlmEngine 的预设回复流，
-         *   彻底绕过 llama.cpp b4835 arm64 batch 处理 SIGABRT（n_ctx/n_batch 调优均无效）。
-         *   SettingsPage 诊断卡上方 Switch 切换。等方案B（升级 llama.cpp b5179+）后再关。
-         */
-        @Volatile @JvmField var forceMockMode = false
-
         /** 尝试加载 .so；返回 true=已加载可用；false=加载失败。 */
         fun ensureLibLoaded(): Boolean = synchronized(this) {
             libLoaded?.let { return it }
@@ -372,16 +364,6 @@ class LlamaJniEngine : LlmEngine {
     // =================================================================
 
     override fun chatFlow(system: String, user: String): Flow<ChatChunk> {
-        // ═══════════════════════════════════════════════════════════════
-        // 🔴 v1.3.11 方案A（治标）：forceMockMode=true 时直接返回 MockLlmEngine 的预设回复流，
-        //    彻底绕过 llama.cpp b4835 arm64 batch 处理 SIGABRT（n_ctx/n_batch 调优均无效）。
-        //    SettingsPage 诊断卡上方 Switch 切换。等方案B（升级 llama.cpp b5179+）后再关。
-        // ═══════════════════════════════════════════════════════════════
-        if (forceMockMode) {
-            Log.w(TAG, "🧱 forceMockMode=true → 绕过 C++ nativeChat，返回 MockLlmEngine 预设回复流")
-            return MockLlmEngine().chatFlow(system, user)
-        }
-
         // —— 🔴 v1.3.25-stable: 插件 onPreSend 链（纯 Kotlin，失败不影响主链路）——
         val finalUser = runPreSend(user)
         if (finalUser != user) {

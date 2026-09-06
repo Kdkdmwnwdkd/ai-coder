@@ -4,7 +4,6 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import android.util.Log
 import com.xuedi.coder.App
-import com.xuedi.coder.action.ActionExecutor
 import com.xuedi.coder.data.ChatDatabase
 import com.xuedi.coder.data.ChatMsg
 import com.xuedi.coder.data.ChatMsgEntity
@@ -14,7 +13,6 @@ import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.InferenceForegroundService
 import com.xuedi.coder.plugin.GitHubPlugin
 import com.xuedi.coder.plugin.GitHubTokenStore
-import com.xuedi.coder.plugin.ToolExecutionPlugin
 import com.xuedi.coder.plugin.WebSearchPlugin
 import com.xuedi.coder.plugin.displayName
 import kotlinx.coroutines.CancellationException
@@ -114,13 +112,8 @@ class ChatViewModel : ViewModel() {
     private val inferenceMutex = Mutex()
     private var inferenceJob: Job? = null
 
-    // ---------- 插件：AI执行模式 + 联网搜索 @搜索（纯 Kotlin 插件，零引擎改动 + 零常驻系统提示词）----------
-    /**
-     * 动态提示词注入：仅当用户输入包含动作关键词时，
-     * 才在当前输入前临时 prepend 一行 ACTION 指令（普通闲聊 ~0 token）。
-     * 指令内容保持精简（<200 chars），避免 Prefill 劣化。
-     */
-    private val ACTION_KEYWORD_RE = Regex("打开|复制|震动|亮度|设置|安装|跳转|启动|粘贴|搜索|github|GitHub|编译|下载apk|触发|发消息|发送消息|发短信|给.*发")
+    // ---------- 插件：联网搜索 @搜索 + GitHub（纯 Kotlin 插件，零引擎改动 + 零常驻系统提示词）----------
+    // code277: 「打开应用/无障碍」整套动作模式已删除（用户只需要聊天 + @搜索 + @github）。
 
     /**
      * code85: 灵活提取 @搜索 查询词。
@@ -138,33 +131,6 @@ class ChatViewModel : ViewModel() {
         val cleaned = after.trimStart(' ', '\t', '。', '.', '，', ',', '：', ':', '！', '!', '？', '?')
         return cleaned.trim().ifEmpty { null }
     }
-    private val ACTION_DYNAMIC_HINT = run {
-        // code99: 应用名不再写死——任意已安装 App 都能用（按应用显示名自动识别包名）。
-        //   提示词去掉"支持的应用名"白名单，避免模型只敢输出列表里的 App。
-        """你只能输出以下三种动作标签之一，绝对不要输出多个标签，不要输出任何其他格式（禁止 sendMessage()、< "xxx" > 等）：
-
-1) 用户说"打开XX"（不搜索）→ 输出：<open_app "XX">
-   示例：打开微信 → <open_app "微信">
-   示例：打开原神 → <open_app "原神">
-
-2) 用户说"打开XX搜索YY"或"搜索XX的YY" → 输出：<search "XX YY">
-   示例：打开抖音搜索斗罗大陆 → <search "抖音 斗罗大陆">
-
-3) 用户说"给XX的YY发消息ZZ" → 输出：<send_message "XX|YY|ZZ">
-   参数格式：应用名|联系人|消息内容，用竖线 | 分隔。
-   示例：给钉钉的吴文艳发消息"你在干嘛" → <send_message "钉钉|吴文艳|你在干嘛">
-   示例：用微博给妈妈发"回家吃饭" → <send_message "微博|妈妈|回家吃饭">
-
-应用名写用户手机上安装的 App 显示名即可（抖音、淘宝、钉钉、微博、原神等任意已安装应用都行）。
-注意：微信和 QQ 出于账号安全已禁用自动化发消息/搜索，遇到这类请求直接告诉用户"请手动发送"，不要输出 send_message 标签。
-只输出 1 个标签，不要解释，不要输出第二个标签。
-"""
-    }
-
-    /**
-     * AI执行插件（声明式占位，不拦截流式；真正执行在 Done 分支）。
-     */
-    private val toolPlugin by lazy { ToolExecutionPlugin(app.applicationContext) }
 
     /**
      * 联网搜索插件（code81 起为同步搜索版：sendMessage 里调 searchSync，
@@ -223,13 +189,13 @@ class ChatViewModel : ViewModel() {
 
     // ---------- init: 订阅 topics 列表 + 冷启动自动选最近一个话题 + 注册插件 ----------
     init {
-        // 🔥 1.3 注册三个内置 runtime 插件（ToolExecution / WebSearch / GitHub）
-        //    三个插件的 onPreSend/onPostReceive 都非阻塞 (<1ms)，符合 ChatPlugin 契约。
+        // 🔥 1.3 注册两个内置 runtime 插件（WebSearch / GitHub）
+        //    两个插件的 onPreSend/onPostReceive 都非阻塞 (<1ms)，符合 ChatPlugin 契约。
         runCatching {
             val engine = app.llamaEngineRef()
             // 按 displayName 去重，避免冷启动多次 init 重入导致重复注册
             val registeredNames = engine.plugins.mapNotNull { it.displayName() }.toMutableSet()
-            listOf(toolPlugin, searchPlugin, githubPlugin).forEach { p ->
+            listOf(searchPlugin, githubPlugin).forEach { p ->
                 val name = p.displayName()
                 if (name !in registeredNames) {
                     registeredNames.add(name)
@@ -398,9 +364,8 @@ class ChatViewModel : ViewModel() {
                 topicDao.touchActive(topicId, System.currentTimeMillis())
             }
 
-            // 🔥 1.5 同步搜索 + 动态提示词（在 Dispatchers.Default 里跑，不卡 UI）：
-            //   · @搜索 关键词 → 同步搜 SearXNG（15s 超时），搜到的 prepend 到 userMsg 里
-            //   · 动作关键词 → prepend ACTION_DYNAMIC_HINT（@搜索 消息除外）
+            // 🔥 1.5 同步搜索（在 Dispatchers.Default 里跑，不卡 UI）：
+            //   @搜索 关键词 → 同步搜 SearXNG（15s 超时），搜到的 prepend 到 userMsg 里
             var effectiveInput = rawContent
             // code85: 灵活匹配搜索触发：
             //   "@搜索xxx"        → query = "xxx"
@@ -433,14 +398,8 @@ class ChatViewModel : ViewModel() {
                     }
                 }
             }
-            // code94: 插件指令（如 @github）不能 prepend ACTION_DYNAMIC_HINT，
-            //   否则插件 onPreSend 的 ^@github 正则匹配不到，导致 @github 被当成普通搜索走浏览器。
-            //   @搜索 已由上面 searchQuery 分支处理；其他 @xxx 一律视为插件指令，跳过动作提示词。
-            val isPluginCommand = rawContent.startsWith("@") && searchQuery == null
-            val hitAction = searchQuery == null &&
-                !isPluginCommand &&
-                ACTION_KEYWORD_RE.containsMatchIn(rawContent)
-            val contentForEngine = if (hitAction) ACTION_DYNAMIC_HINT + effectiveInput else effectiveInput
+            // code277: 动作模式已删除，不再注入 ACTION_DYNAMIC_HINT，引擎输入就是用户输入（或带搜索结果）。
+            val contentForEngine = effectiveInput
 
 
             // 🔴 TODO-4c/4d 推理状态流：
@@ -519,42 +478,14 @@ class ChatViewModel : ViewModel() {
                             // 🛡️ 防闪退/内存炸：截断超长 finalText（Llama 偶尔会输出几十上百 MB 的乱码循环回复）
                             val safeFull = if (chunk.full.length > 20000) chunk.full.take(20000) + "\n\n...[回复过长已截断]" else chunk.full
                             sb = StringBuilder(safeFull)
-                            // 🛠️ 【AI 执行模式】Done 时一次性解析 ACTION 标签 + 真正执行（稳定，不阻塞流式）：
-                            //   · extractActions 抹掉正文里所有 <ACTION...> 标签 → cleaned 给用户看；
-                            //   · 解析出的 List<ActionTag> → ActionExecutor.executeAll 真正跳转/复制/调亮度。
-                            //   执行失败不影响 UI（runCatching 包起来，错误信息塞 Error 气泡里）。
-                            val (cleaned, allActions) = ActionExecutor.extractActions(safeFull)
-                            // code94: 3B 模型经常违规输出多个标签（如发消息时还附带 search "抖音跳舞教程"）。
-                            //   提示词明确要求只输出 1 个标签，这里只取第一个，丢弃多余的幻觉动作。
-                            val actions = if (allActions.size > 1) {
-                                Log.w("ChatVM", "模型输出了 ${allActions.size} 个动作，只执行第一个: ${allActions.first().name}")
-                                allActions.take(1)
-                            } else allActions
-                            val safeCleaned = if (cleaned.length > 20000) cleaned.take(20000) + "\n\n...[内容过长]" else cleaned
-                            // code89: 如果解析出了动作标签，模型在标签后面输出的正文基本都是幻觉
-                            //   （3B 模型经常在 <send_message "..."> 后面继续输出 "Human: ..." 之类的垃圾）。
-                            //   动作提示词明确要求"只输出 1 行标签，不要解释"，所以有动作时丢弃正文，
-                            //   只保留动作执行结果提示。
-                            val finalText = if (actions.isNotEmpty()) ""
-                            else safeCleaned.ifBlank { safeFull }
-
-                            // 🔥 执行 ACTION（Done 时才调用，<50ms，不会 ANR）
-                            val execResult: Pair<Int, String?> = if (actions.isEmpty()) 0 to null
-                            else runCatching { ActionExecutor.executeAll(app, actions) }.getOrDefault(0 to "执行器抛异常")
-
-                            val extraNotice = if (actions.isNotEmpty()) when {
-                                execResult.second != null -> "\n\n⚠️ 执行部分失败：${execResult.second}"
-                                execResult.first == actions.size -> "\n\n✅ 执行完成（${execResult.first} 个动作）"
-                                else -> "\n\n⚠️ 仅成功 ${execResult.first}/${actions.size} 个动作"
-                            } else ""
-                            val finalTextWithExec = (finalText + extraNotice).take(20000)
+                            // code277: 动作模式已删除——不再解析/执行 <open_app> 等标签，回复原文直出。
 
                             val finalMsg = ChatMsg(
                                 id = answerId,
                                 role = ChatRole.Assistant,
-                                content = finalTextWithExec,
+                                content = safeFull,
                                 createdAtMs = answer.createdAtMs,
-                                actions = actions,
+                                actions = emptyList(),
                                 pending = false
                             )
                             _messages.value = _messages.value.map { m ->

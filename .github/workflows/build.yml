@@ -139,13 +139,8 @@ jobs:
           echo "→ $APK  →  $OUT"
           ls -lh "$OUT"
 
-      - uses: actions/upload-artifact@v4
-        with:
-          name: AI编程助手-debug-apk
-          path: ${{ steps.apk.outputs.apk_file }}
-          retention-days: 90
-          if-no-files-found: error
-
+      # code103: 日志必须先于 APK 上传！artifacts API 按创建时间倒序返回（新的在前），
+      #   旧版 App 下载逻辑兜底拿列表第一个 —— 让 APK 最后上传排到第一，旧包也能下对。
       - name: 上传完整 Gradle 日志（方便后续排查）
         uses: actions/upload-artifact@v4
         if: always()
@@ -154,6 +149,13 @@ jobs:
           path: build-debug.log
           retention-days: 30
           if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AI编程助手-debug-apk
+          path: ${{ steps.apk.outputs.apk_file }}
+          retention-days: 90
+          if-no-files-found: error
 
   # =====================================================
   # M7 Release 打包：tag v* 时跑，出 release APK。

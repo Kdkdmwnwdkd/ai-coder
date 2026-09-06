@@ -206,26 +206,18 @@ fun ChatPage(vm: ChatViewModel) {
                 .fillMaxSize()
                 .padding(horizontal = 14.dp, vertical = 8.dp)
         ) {
-            // 顶部条：汉堡（开话题Drawer）+ 中间当前话题名（不再用"AI编程助手"做大标题，而是和 TRAE 一样用话题名/「新对话」）+ 右侧➕新对话
+            // code299: 极简顶栏——按用户红圈标注删掉中间标题（logo/应用名/话题名整块），
+            //   只留左右两个图标按钮：左=话题列表抽屉，右=新对话。消息区占满更干净。
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(bottom = 4.dp),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(0.dp)
+                horizontalArrangement = Arrangement.SpaceBetween
             ) {
                 IconButton(onClick = { scope.launch { drawerState.open() } }) {
                     Icon(Icons.Outlined.Menu, "话题列表", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                Text(
-                    modifier = Modifier.weight(1f),
-                    text = topics.firstOrNull { it.id == currentTopicId }?.title ?: "新对话",
-                    fontSize = 16.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
-                )
                 IconButton(onClick = { vm.newTopic() }) {
                     Icon(Icons.Outlined.Add, "新建对话", tint = MaterialTheme.colorScheme.primary)
                 }
@@ -261,8 +253,9 @@ fun ChatPage(vm: ChatViewModel) {
                             modifier = Modifier.widthIn(max = 320.dp),
                             shape = bubbleShape,
                             colors = CardDefaults.cardColors(
+                                // code299: 用户气泡改实心主色（预览版设计），AI 气泡保持浅色卡片
                                 containerColor = when (msg.role) {
-                                    ChatRole.User      -> MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)
+                                    ChatRole.User      -> MaterialTheme.colorScheme.primary
                                     ChatRole.Error     -> MaterialTheme.colorScheme.error.copy(alpha = 0.10f)
                                     ChatRole.System    -> MaterialTheme.colorScheme.secondary.copy(alpha = 0.10f)
                                     else               -> MaterialTheme.colorScheme.surface.copy(alpha = 0.94f)
@@ -276,6 +269,7 @@ fun ChatPage(vm: ChatViewModel) {
                                     lineHeight = 22.sp,
                                     color = when (msg.role) {
                                         ChatRole.Error  -> MaterialTheme.colorScheme.error
+                                        ChatRole.User   -> MaterialTheme.colorScheme.onPrimary
                                         else            -> MaterialTheme.colorScheme.onSurface
                                     }
                                 )

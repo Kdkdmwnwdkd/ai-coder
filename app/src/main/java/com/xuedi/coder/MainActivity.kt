@@ -4,6 +4,7 @@ import android.os.Bundle
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.Composable
 import com.xuedi.coder.ui.screen.AppNavHost
 
@@ -19,6 +20,9 @@ import com.xuedi.coder.ui.screen.AppNavHost
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        // code299: 全面屏适配（魅族 20 等长屏机）——内容延伸到状态栏/导航栏后面，
+        //   Scaffold 的 inner padding 会自动避开系统栏，不再留黑边/白边。
+        enableEdgeToEdge()
 
         val app = App.instance
         val appScope = app.appScope

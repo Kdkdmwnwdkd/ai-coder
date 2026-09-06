@@ -233,6 +233,7 @@ class LlamaJniEngine : LlmEngine {
         lastUsedThreads = nThreads
         lastUsedNCtx = nCtx
         lastUsedGpuLayers = nGpuLayers
+        lastModelPath = ggufAbsolutePath
         Log.i(TAG, "loadModel ✅ GGUF 已加载 ctx=$ctx；线程=$nThreads nCtx=$nCtx nGpuLayers=$nGpuLayers（C++端编译期无Vulkan会被自动clamp到0）文件=${f.name} size=${f.length()/1024/1024}MB")
         lastLoadError = null
         return true
@@ -246,6 +247,52 @@ class LlamaJniEngine : LlmEngine {
      *   真实值要看 LlamaJni 日志里 nativeInit n_gpu_layers=… 那行）；
      *   0=CPU-only。给诊断快照做 GPU 加速核对用。 */
     @Volatile var lastUsedGpuLayers: Int? = null
+
+    /** code295: 最近一次成功加载的模型路径（GPU 崩溃自愈重载时用） */
+    @Volatile private var lastModelPath: String? = null
+
+    // =================================================================
+    // code295: GPU(Vulkan) 崩溃自愈 —— 不需要任何开关，全自动。
+    //   背景：魅族20 Adreno 驱动在 llama_decode 里抛 vk::SystemError
+    //   (createComputePipeline ErrorUnknown)，C++ 壳已捕获并转成
+    //   "GPU_BACKEND_CRASH: ..." 的 onError。这里收到后把设备拉黑，
+    //   之后所有加载/推理永久走纯 CPU（重启 App 也生效）。
+    // =================================================================
+    private val gpuPrefs by lazy {
+        App.instance.getSharedPreferences("gpu_health", Context.MODE_PRIVATE)
+    }
+
+    /** 本机 GPU 是否已被拉黑（上次 Vulkan 推理/初始化抛过 C++ 异常） */
+    fun isGpuBlacklisted(): Boolean = gpuPrefs.getBoolean("vulkan_broken", false)
+
+    /** 把 GPU 拉黑并记录原因（诊断页可读 gpu_health 看 vulkan_broken_reason） */
+    private fun markGpuBroken(reason: String) {
+        Log.e(TAG, "GPU 拉黑：$reason")
+        gpuPrefs.edit()
+            .putBoolean("vulkan_broken", true)
+            .putString("vulkan_broken_reason", reason.take(300))
+            .putLong("vulkan_broken_at", System.currentTimeMillis())
+            .apply()
+    }
+
+    /**
+     * chatFlow 入口自愈：GPU 已拉黑且当前还挂着 GPU ctx → 先释放，
+     * 再用纯 CPU(gpuLayers=0) 重新加载同一模型。之后正常走推理流程。
+     */
+    private fun healGpuToCpuIfNeeded() {
+        if (!isGpuBlacklisted()) return
+        val path = lastModelPath ?: return
+        if ((lastUsedGpuLayers ?: 0) == 0) return  // 已经是 CPU ctx，无需自愈
+        Log.w(TAG, "healGpuToCpu: GPU 已拉黑 → 释放 Vulkan ctx，改纯 CPU 重新加载 $path")
+        release()
+        val ok = loadModel(
+            path,
+            nCtx = lastUsedNCtx ?: 4096,
+            nThreads = lastUsedThreads ?: 4,
+            nGpuLayers = 0
+        )
+        Log.i(TAG, "healGpuToCpu: 纯 CPU 重载 ${if (ok) "✅ 成功" else "❌ 失败（$lastLoadError）"}")
+    }
 
     /** 🆕 v1.3.25-perf1: 最近一次 nativeChat 回合的 prefill 模式。
      *  值见 [TokenCallback.onPrefillMode]：BATCH_OK / BATCH_FB / STEPx1。
@@ -293,7 +340,11 @@ class LlamaJniEngine : LlmEngine {
         //   因为下一级同样传 gpuLayers（= 用户原始偏好），如果失败原因疑似 Vulkan 关键词，
         //   自动把 gpuHint 切到 0 再跑后续档位 + 最后补一次 L1 CPU-only 兜底。
         val gpuHintDefault: Int = gpuLayers.coerceAtLeast(-1)
-        var gpuHint: Int = gpuHintDefault
+        // code295: 设备已被拉黑过（上次 Vulkan 抛 C++ 异常）→ 本次加载直接纯 CPU
+        var gpuHint: Int = if (isGpuBlacklisted()) {
+            Log.w(TAG, "loadModelRobust: GPU 已拉黑（vulkan_broken=true）→ 强制 gpuLayers=0 纯 CPU")
+            0
+        } else gpuHintDefault
         val presets: List<Triple</*nCtx*/Int, /*nThreads*/Int, String>> = listOf(
             Triple(4096, 4, "满配(4线程·稳定)"),
             Triple(2048, 4, "L2 标准降级(ctx2048·4线程)"),
@@ -323,6 +374,8 @@ class LlamaJniEngine : LlmEngine {
                     )
                 ) {
                     Log.w(TAG, "loadModelRobust: 检测到疑似 Vulkan 失败 → 关闭 gpuHint（后续档位强制 CPU 兜底）")
+                    // code295: GPU_BACKEND_CRASH 是 C++ 实锤抛异常 → 永久拉黑（重启也走 CPU）
+                    if ("GPU_BACKEND_CRASH" in clue) markGpuBroken(reason)
                     gpuHint = 0
                 }
                 try { Thread.sleep(200) } catch (_: InterruptedException) {}
@@ -378,6 +431,8 @@ class LlamaJniEngine : LlmEngine {
         }
 
         val libOk = ensureLibLoaded()
+        // code295: 上次 Vulkan 推理抛过异常 → 先把 GPU ctx 换成纯 CPU 再继续
+        if (libOk) healGpuToCpuIfNeeded()
         val curCtx = ctx
 
         // ═══════════════════════════════════════════════════════════════
@@ -475,7 +530,13 @@ class LlamaJniEngine : LlmEngine {
                             channel.close()
                             return
                         }
-                        trySend(ChatChunk.Error(RuntimeException(message), message))
+                        // code295: C++ 壳捕获到 Vulkan C++ 异常（vk::SystemError 等）→
+                        //   永久拉黑 GPU，提示用户重发；下一条消息会触发自愈改走纯 CPU。
+                        val finalMsg = if (message.startsWith("GPU_BACKEND_CRASH")) {
+                            markGpuBroken(message)
+                            "⚠️ 检测到你手机的 GPU 驱动与 Vulkan 推理不兼容，已自动切换为纯 CPU 模式（以后不会再闪退）。\n\n请重新发送刚才的消息。"
+                        } else message
+                        trySend(ChatChunk.Error(RuntimeException(message), finalMsg))
                         channel.close()
                     }
                     override fun onPrefillProgress(consumed: Int, total: Int) {

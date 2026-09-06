@@ -29,6 +29,7 @@
 #include <string>
 #include <vector>
 #include <atomic>
+#include <exception>
 
 #include "llama.h"
 
@@ -319,9 +320,11 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 // =============================================================================
 // nativeInit：加载模型 + 创建 ctx（返回 jlong=LlamaState*）
 // =============================================================================
-extern "C" JNIEXPORT jlong JNICALL
-Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
-        JNIEnv* env, jobject /*thiz*/,
+// code295: 函数体拆成 _inner，外层 JNI 壳统一 try/catch。
+//   魅族20 Adreno 驱动在 llama_init_from_model / llama_decode 里可能抛
+//   vk::SystemError(createComputePipeline: ErrorUnknown)，不捕获=SIGABRT 闪退。
+static jlong nativeInit_inner(
+        JNIEnv* env,
         jstring jpath, jint jnCtx, jint jnThreads, jint jGpuLayers) {
 
     std::string path = jstring2std(env, jpath);
@@ -416,21 +419,47 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     return (jlong)st;
 }
 
+// JNI 壳：捕获 inner 抛出的任何 C++ 异常（典型：vk::SystemError），转成 Java 异常返回 ctx=0。
+// 错误带 GPU_BACKEND_CRASH 前缀 → Kotlin 侧据此把 GPU 拉黑并自动改走纯 CPU。
+extern "C" JNIEXPORT jlong JNICALL
+Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
+        JNIEnv* env, jobject /*thiz*/,
+        jstring jpath, jint jnCtx, jint jnThreads, jint jGpuLayers) {
+    try {
+        return nativeInit_inner(env, jpath, jnCtx, jnThreads, jGpuLayers);
+    } catch (const std::exception& e) {
+        LOGE("nativeInit C++ 异常捕获: %s", e.what());
+        throwJava(env, "GPU_BACKEND_CRASH: %s", e.what());
+        return 0L;
+    } catch (...) {
+        LOGE("nativeInit C++ 未知异常捕获");
+        throwJava(env, "GPU_BACKEND_CRASH: unknown native exception in nativeInit");
+        return 0L;
+    }
+}
+
 // =============================================================================
 // nativeRelease：释放 ctx + model
 // =============================================================================
 extern "C" JNIEXPORT void JNICALL
 Java_com_xuedi_coder_model_LlamaJniEngine_nativeRelease(
         JNIEnv*, jobject, jlong jhandle) {
-    auto* st = (LlamaState*)jhandle;
-    if (!st) return;
-    LOGI("nativeRelease: ctx=%p model=%p", st->ctx, st->model);
-    st->cancel.store(true, std::memory_order_relaxed);
-    if (st->ctx)  { llama_free(st->ctx);              st->ctx   = nullptr; }
-    // vocab 随 model 一起释放，不需要单独 free；顺序：先 ctx 后 model
-    if (st->model){ llama_model_free(st->model);      st->model = nullptr; st->vocab = nullptr; }
-    delete st;
-    LOGI("nativeRelease ✅ done");
+    // code295: Vulkan 后端在 llama_free 里也可能抛 C++ 异常 → 捕获防 SIGABRT
+    try {
+        auto* st = (LlamaState*)jhandle;
+        if (!st) return;
+        LOGI("nativeRelease: ctx=%p model=%p", st->ctx, st->model);
+        st->cancel.store(true, std::memory_order_relaxed);
+        if (st->ctx)  { llama_free(st->ctx);              st->ctx   = nullptr; }
+        // vocab 随 model 一起释放，不需要单独 free；顺序：先 ctx 后 model
+        if (st->model){ llama_model_free(st->model);      st->model = nullptr; st->vocab = nullptr; }
+        delete st;
+        LOGI("nativeRelease ✅ done");
+    } catch (const std::exception& e) {
+        LOGE("nativeRelease C++ 异常捕获（已吞）: %s", e.what());
+    } catch (...) {
+        LOGE("nativeRelease C++ 未知异常捕获（已吞）");
+    }
 }
 
 // =============================================================================
@@ -457,9 +486,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChatCancel(
 //      （逐个 token 过 batch，虽然慢但 100% 不崩）
 //   6. gen：batch 只有 last token → decode → argmax → accept → to_piece → onToken
 // =============================================================================
-extern "C" JNIEXPORT void JNICALL
-Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
-        JNIEnv* env, jobject, jlong jhandle,
+// code295: 函数体拆成 _inner，外层 JNI 壳统一 try/catch（捕获 vk::SystemError 防 SIGABRT）。
+static void nativeChat_inner(
+        JNIEnv* env, jlong jhandle,
         jstring jSystem, jstring jUser, jobject jCb) {
 
     auto* st = (LlamaState*)jhandle;
@@ -736,4 +765,22 @@ cleanup:
     if (gCb) tenv->DeleteGlobalRef(gCb);
     LOGI("nativeChat cleanup ✅");
     (void)fullOut;
+}
+
+// JNI 壳：捕获 inner 抛出的任何 C++ 异常（魅族20 Adreno 上 vk::SystemError:
+// createComputePipeline ErrorUnknown 曾直接 SIGABRT 闪退），转成 onError 回调。
+// 错误带 GPU_BACKEND_CRASH 前缀 → Kotlin 侧据此把 GPU 拉黑并自动改走纯 CPU。
+extern "C" JNIEXPORT void JNICALL
+Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
+        JNIEnv* env, jobject /*thiz*/, jlong jhandle,
+        jstring jSystem, jstring jUser, jobject jCb) {
+    try {
+        nativeChat_inner(env, jhandle, jSystem, jUser, jCb);
+    } catch (const std::exception& e) {
+        LOGE("nativeChat C++ 异常捕获: %s", e.what());
+        cb_onError(env, jCb, std::string("GPU_BACKEND_CRASH: ") + e.what());
+    } catch (...) {
+        LOGE("nativeChat C++ 未知异常捕获");
+        cb_onError(env, jCb, std::string("GPU_BACKEND_CRASH: unknown native exception in nativeChat"));
+    }
 }

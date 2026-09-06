@@ -15,6 +15,7 @@ plugins {
 android {
     namespace = "com.xuedi.coder"
     compileSdk = 34
+    buildToolsVersion = "34.0.0"
 
     // ---- M5 NDK：与 workflow build.yml 里安装的版本保持一致 ----
     //      （ubuntu-24.04 Runner 默认不装 NDK，Actions 前一步 sdkmanager --install "ndk;26.1.10909125"）
@@ -30,8 +31,15 @@ android {
         //   code 74 = code 73 + open_app 不再跳应用商店 + @搜索 天气优先 wttr.in（真机4G实测342ms）+ Looper主线程切主
         //   code 77 = code 76 + 快手包名映射 + SearXNG扩大7实例+Bing兜底 + 中文→包名别名解析 + JNI sanitizeUtf8 + collectLatest修复
         //   code 82 = code81 + 自查修复：PLAIN_ACTION 防误伤执行 + userMsg DB 双写竞态 + @搜索不注入 ACTION hint + 搜索失败降级提示
-        versionCode = 82
-        versionName = "1.3.26-code82"
+        //   code 94 = code93 + 修复@github跳浏览器（插件指令跳过ACTION hint）+ 只执行第一个动作标签（防LLM幻觉多标签）+ 修复scroll闪退 + UUID消息ID防重复key
+        //   code 95 = code94 + GitHubToken trim换行符(修Unexpected char 0x0a) + getRoot()用getWindows兜底(修微信dump空/找不到联系人) + 右上角搜索图标坐标兜底
+        //   code 96 = code95 + GitHubToken 过滤所有非ASCII字符(修Unexpected char 0x7528) + executeType 坐标聚焦+剪贴板粘贴兜底(修微信没找到输入框)
+        //   code 97 = code96 + open_app 搜索入口兜底点右上角坐标(修快手抖音搜不到) + GitHub 404 显示URL+响应体诊断 + Token格式校验
+        //   code 98 = code97 + Repo自动拆分owner/repo + Token自动提取ghp_前缀 + 设置页无效token自动清空
+        //   code 99 = code98 + 根治LazyColumn闪退(移除scrollToItem靠reverseLayout+key拼idx防重复key)
+        //   code 100 = code99 + @github 提交代码到dev分支(Contents API手机直推) + 触发构建改dev分支(main停在code62) + QQ/微信禁用自动化
+        versionCode = 100
+        versionName = "1.3.26-code100"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！

@@ -162,7 +162,7 @@ static std::vector<llama_token> tokenize_prompt(const llama_vocab* vocab, const 
 }
 
 // =============================================================================
-// sanitizeUtf8: 截断 std::string 末尾不完整的 UTF-8 continuation bytes
+// sanitizeUtf8: 截断 std::string 末尾不完整的 UTF-8 多字节序列
 // —— llama token output 偶尔会把多字节 CJK 字符切成两段
 //    （比如 "天" = 0xe5 0xa4 0xa9，piece 只给了前 2 字节 0xe5 0xa4），
 //    直接喂 NewStringUTF 会触发 JNI "illegal continuation byte" → SIGABRT 闪退。
@@ -172,52 +172,41 @@ static std::string sanitizeUtf8(const std::string& in) {
     if (in.empty()) return in;
     const unsigned char* p = reinterpret_cast<const unsigned char*>(in.data());
     size_t len = in.size();
-    // 从末尾往前扫，看最后几个字节里有没有不完整的 continuation
-    // UTF-8: 0xxx xxxx=ASCII, 110x xxxx=2字节头, 1110 xxxx=3字节头, 1111 0xxx=4字节头
-    //        10xx xxxx=continuation byte
-    while (len > 0) {
-        unsigned char last = p[len - 1];
-        if ((last & 0x80) == 0x00) {
-            // ASCII 字节，肯定完整，安全
-            break;
-        } else if ((last & 0xC0) == 0x80) {
-            // continuation byte — 往前找 head byte
-            // 最多回退 3 字节（4 字节序列的 head）
-            if (len >= 2 && (p[len - 2] & 0x80) == 0x00) {
-                // 前一个是 ASCII，当前 continuation 没 head → 截断
-                len--; continue;
+
+    // 从末尾往前扫，定位最后一个 UTF-8 序列的起始字节（lead byte）
+    size_t i = len;
+    while (i > 0) {
+        i--;
+        unsigned char c = p[i];
+        if ((c & 0x80) == 0x00) {
+            // ASCII 字节 —— 到此为止全部合法，包含当前字节
+            return std::string(reinterpret_cast<const char*>(p), i + 1);
+        } else if ((c & 0xC0) == 0x80) {
+            // continuation byte (10xx xxxx) —— 继续往前找 lead byte
+            continue;
+        } else {
+            // 找到 lead byte —— 计算它需要几个 continuation byte
+            size_t needed;
+            if ((c & 0xE0) == 0xC0)      needed = 1;  // 2 字节序列
+            else if ((c & 0xF0) == 0xE0) needed = 2;  // 3 字节序列
+            else if ((c & 0xF8) == 0xF0) needed = 3;  // 4 字节序列
+            else {
+                // 非法 lead byte（0xF8+）—— 从这里截断
+                return std::string(reinterpret_cast<const char*>(p), i);
             }
-            if (len >= 2 && (p[len - 2] & 0xC0) == 0x80) {
-                // 前一个也是 continuation — 回退继续找
-                len--; continue;
+            // lead byte 后面实际有几个 continuation byte
+            size_t available = len - i - 1;
+            if (available >= needed) {
+                // 序列完整 —— 整个字符串合法
+                return in;
+            } else {
+                // 序列不完整 —— 从 lead byte 处截断
+                return std::string(reinterpret_cast<const char*>(p), i);
             }
-            if (len >= 2) {
-                unsigned char head = p[len - 2];
-                if ((head & 0xE0) == 0xC0) {
-                    // 2 字节 head — 再加上这个 continuation 就够了 → 完整
-                    len--; break;
-                } else if ((head & 0xF0) == 0xE0) {
-                    // 3 字节 head — 需要 2 个 continuation，现在只有 1 个 → 截断
-                    len--; continue;
-                } else if ((head & 0xF8) == 0xF0) {
-                    // 4 字节 head — 需要 3 个 continuation → 截断
-                    len--; continue;
-                }
-            }
-            len--; continue;
-        } else if ((last & 0xE0) == 0xC0) {
-            // 2 字节 head — 但后面没有 continuation → 截断
-            len--; continue;
-        } else if ((last & 0xF0) == 0xE0) {
-            // 3 字节 head — 缺 2 个 continuation → 截断
-            len--; continue;
-        } else if ((last & 0xF8) == 0xF0) {
-            // 4 字节 head — 缺 3 个 continuation → 截断
-            len--; continue;
         }
-        break;
     }
-    return std::string(reinterpret_cast<const char*>(p), len);
+    // 全是 continuation byte 没有 lead —— 非法，返回空
+    return std::string();
 }
 
 // =============================================================================
@@ -234,9 +223,21 @@ static JNIEnv* getEnvForThread() {
 }
 
 static void cb_onToken(JNIEnv* env, jobject cb, const std::string& piece) {
-    if (!g_midOnToken || !cb) return;
-    jstring jp = env->NewStringUTF(sanitizeUtf8(piece).c_str());
+    if (!g_midOnToken || !cb) {
+        LOGE("cb_onToken SKIP: g_midOnToken=%p cb=%p", g_midOnToken, cb);
+        return;
+    }
+    std::string safe = sanitizeUtf8(piece);
+    LOGI("cb_onToken: piece_len=%zu safe_len=%zu first_byte=0x%02x",
+         piece.size(), safe.size(),
+         piece.empty() ? 0u : (unsigned char)piece[0]);
+    jstring jp = env->NewStringUTF(safe.c_str());
     env->CallVoidMethod(cb, g_midOnToken, jp);
+    if (env->ExceptionCheck()) {
+        env->ExceptionDescribe();
+        env->ExceptionClear();
+        LOGE("cb_onToken: Java onToken 抛出异常（已 clear）");
+    }
     env->DeleteLocalRef(jp);
 }
 
@@ -665,7 +666,18 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         std::string piece = tok_to_piece(st->vocab, last_tok);
         if (!piece.empty()) {
             fullOut += piece;
+            if (step < 5 || step % 20 == 0) {
+                LOGI("gen step=%d tok=%d piece_len=%zu piece_hex=%02x%02x%02x",
+                     step, last_tok, piece.size(),
+                     (unsigned char)piece[0],
+                     piece.size() > 1 ? (unsigned char)piece[1] : 0,
+                     piece.size() > 2 ? (unsigned char)piece[2] : 0);
+            }
             cb_onToken(tenv, gCb, piece);
+        } else {
+            if (step < 5 || step % 20 == 0) {
+                LOGI("gen step=%d tok=%d piece EMPTY (skipping cb_onToken)", step, last_tok);
+            }
         }
 
         // ---- next decode（最后生成的 token 作为 next input）----

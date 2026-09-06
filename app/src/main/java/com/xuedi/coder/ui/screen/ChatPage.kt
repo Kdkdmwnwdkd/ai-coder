@@ -17,6 +17,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -44,7 +45,6 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -76,7 +76,6 @@ import com.xuedi.coder.vm.InfStatus
 @Composable
 fun ChatPage(vm: ChatViewModel) {
     val messages by vm.messages.collectAsStateWithLifecycle()
-    val isTyping by vm.isTyping.collectAsStateWithLifecycle()
     val topics by vm.topics.collectAsStateWithLifecycle()
     val currentTopicId by vm.currentTopicId.collectAsStateWithLifecycle()
     // 🔴 TODO-2 状态条 4 个流：推理状态 / 已生成字数 / 已用秒数 / 失败原因
@@ -98,10 +97,14 @@ fun ChatPage(vm: ChatViewModel) {
         onDispose { vm.cancelInference() }
     }
 
-    LaunchedEffect(messages.size, isTyping) {
-        val idx = (messages.size - 1).coerceAtLeast(0)
-        runCatching { listState.animateScrollToItem(idx) }
-    }
+    // code99: 彻底根治 "entered drag with non-zero pending scroll" 闪退。
+    //   根因：scrollToItem(0) 会在 LazyListState 里留下一个非零 pending scroll，
+    //         若用户在此 pending scroll 被消费前开始拖拽 → onScroll 抛 IllegalStateException。
+    //         之前用 isScrollInProgress / firstVisibleItemIndex 守卫只能缩小时间窗，
+    //         无法消除"检查通过→用户开始拖→scrollToItem 执行"的竞态。
+    //   根治：LazyColumn 已设 reverseLayout=true，新消息（index 0）天然贴底且可见，
+    //         完全不需要程序化 scrollToItem。移除后 pending scroll 永远为 0，闪退不可能发生。
+    //         （用户若已上滑浏览历史，新消息到达时不强行拽回底部——这也是主流聊天 App 的标准行为。）
 
     ModalNavigationDrawer(
         drawerState = drawerState,
@@ -232,15 +235,21 @@ fun ChatPage(vm: ChatViewModel) {
                 }
             }
 
-            // 消息列表
+            // 消息列表（reverseLayout=true + 倒序 items：新消息自然贴底，减少程序化滚动）
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp),
+                reverseLayout = true
             ) {
-                items(messages, key = { it.id }) { msg ->
+                // code99: key 用 "idx_id" 而非单纯 it.id，彻底杜绝 LazyColumn duplicate key 闪退。
+                //   之前：key = { it.id }。正常消息 id 是 UUID 不会撞，但旧版 DB 残留 / 极端情况下
+                //         两条消息 id 相同（如 LLM 重复输出同一 action 标签被当 id）→ IllegalArgumentException。
+                //   现在：拼上 reversed index，即便 id 撞了，key 也唯一。itemsIndexed 的 index 是
+                //         倒序列表的下标（0=最新），稳定且唯一。
+                itemsIndexed(messages.asReversed(), key = { idx, msg -> "${idx}_${msg.id}" }) { _, msg ->
                     val isUser = msg.role == ChatRole.User
                     Row(
                         Modifier
@@ -277,7 +286,7 @@ fun ChatPage(vm: ChatViewModel) {
                                 if (msg.actions.isNotEmpty()) {
                                     Spacer(Modifier.height(8.dp))
                                     LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        items(msg.actions, key = { it.raw }) { act ->
+                                        itemsIndexed(msg.actions, key = { idx, act -> "${msg.id}_act_$idx" }) { _, act ->
                                             OutlinedButton(
                                                 onClick = {
                                                     val res = ActionExecutor.executeAll(ctx, listOf(act))

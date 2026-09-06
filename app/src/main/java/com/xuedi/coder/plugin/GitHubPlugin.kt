@@ -33,11 +33,12 @@ import android.os.Build as AndroidBuild
  * 【code78 新增】GitHub Actions 插件 —— 在手机上直接触发编译、下载 APK、看 Actions 状态。
  *
  * 用法（ChatViewModel 里 @github 触发，或自然语言命中关键词）：
- *   @github 触发编译            → 触发 build.yml 的 workflow_dispatch
+ *   @github 触发编译            → 触发 build.yml 的 workflow_dispatch（dev 分支）
  *   @github 看状态 / 看编译进度   → 拉最新 run 的状态 + 耗时 + 结论
  *   @github 下载APK / 下载最新包   → 下载最新成功 run 的 artifact 到 /Download/
  *   @github 最新commit           → 显示 HEAD sha + message
  *   @github 最近 runs            → 列出最近 5 次 workflow run
+ *   @github 提交 <路径> + 代码     → Contents API 直推 dev 分支，push 自动触发构建（code100）
  *   @github                      → 不带指令 → 自动走 "看状态" 作为默认
  *
  * 依赖：GitHub Personal Access Token（需要 repo + workflow + actions:read 权限），
@@ -68,9 +69,31 @@ class GitHubPlugin(
     override fun onPreSend(input: String): String {
         val m = trigger.matchEntire(input.trim()) ?: return input
         val cmd = m.groupValues[1].trim()
-        // 没配置 → 直接原样透传，让 LLM 自然回应 "请先在设置页填 GitHub Token"
-        if (!tokenStore.isConfigured()) return input
-        // 立刻 return input（非阻塞），后台协程异步调 GitHub API
+        // code94: 没配置 token 时，直接返回空（跳过 LLM），并通过回调提示用户去设置页填 token。
+        //   之前是原样透传 → LLM 把 "@github 看状态" 当成搜索词 → 跳浏览器。
+        if (!tokenStore.isConfigured()) {
+            scope.launch(Dispatchers.Main.immediate) {
+                runCatching {
+                    resultCallback("⚠️ GitHub Token 未配置\n\n请在「设置 → GitHub 编译」填写：\n1. Owner（仓库所有者）\n2. Repo（仓库名）\n3. Workflow ID（如 build.yml）\n4. Personal Access Token（需 repo + workflow 权限）")
+                }
+            }
+            return ""
+        }
+        // code97: 校验 token 格式（ghp_/gho_/ghu_/ghs_/ghr_ 开头，长度≥40）。
+        //   如果过滤后 token 不对（太短或前缀错误），提前提示用户重新填。
+        val t = tokenStore.token
+        val validPrefix = t.startsWith("ghp_") || t.startsWith("gho_") || t.startsWith("ghu_") ||
+                t.startsWith("ghs_") || t.startsWith("ghr_")
+        if (t.length < 40 || !validPrefix) {
+            scope.launch(Dispatchers.Main.immediate) {
+                runCatching {
+                    resultCallback("⚠️ GitHub Token 格式异常\n\n当前 token 长度=${t.length}，前缀=${t.take(4)}\nGitHub Token 应为 ghp_/gho_/ghu_/ghs_/ghr_ 开头的 40 位字符串。\n\n请在「设置 → GitHub 编译」重新粘贴 Token（不要带多余字符）。")
+                }
+            }
+            return ""
+        }
+        // 立刻 return 空字符串（非阻塞），让 chatFlow 跳过 LLM 推理；
+        // 后台协程异步调 GitHub API，结果通过 resultCallback 回传到助手消息。
         scope.launch(Dispatchers.IO + SupervisorJob()) {
             val result = withTimeoutOrNull(60_000L) {
                 runCatching { executeCommand(cmd.ifBlank { "status" }) }
@@ -82,7 +105,7 @@ class GitHubPlugin(
                 }
             }
         }
-        return input
+        return ""
     }
 
     override fun onPostReceive(piece: String): String = piece
@@ -92,6 +115,10 @@ class GitHubPlugin(
     private suspend fun executeCommand(cmd: String): String = withContext(Dispatchers.IO) {
         val c = cmd.lowercase()
         when {
+            // code100: 提交代码 → 走 Contents API 推送到 dev 分支（push 自动触发构建）
+            // 必须在 "commit/提交" 之前判断，否则会被 fetchLatestCommit 抢走
+            c.contains("上传") || c.contains("push代码") ||
+                (c.contains("提交") && looksLikeFileCommit(cmd)) -> commitFile(cmd)
             c.contains("触发") || c.contains("编译") || c.contains("build") || c.contains("run") -> triggerWorkflow()
             c.contains("下载") || c.contains("apk") || c.contains("artifact") -> downloadLatestApk()
             c.contains("commit") || c.contains("提交") -> fetchLatestCommit()
@@ -101,13 +128,21 @@ class GitHubPlugin(
         }
     }
 
+    /** 判断"提交"后面跟的是不是文件路径（含 / 且有代码文件后缀），区分于"@github 最新提交" */
+    private fun looksLikeFileCommit(cmd: String): Boolean {
+        val firstLine = cmd.lines().firstOrNull() ?: return false
+        return firstLine.contains("/") &&
+            Regex("""\.(kt|java|xml|kts|gradle|yml|yaml|json|md|txt|properties|cpp|h|cmake)\b""", RegexOption.IGNORE_CASE)
+                .containsMatchIn(firstLine)
+    }
+
     // ---------- GitHub API 实现 ----------
 
-    /** POST /actions/workflows/{id}/dispatches */
+    /** POST /actions/workflows/{id}/dispatches —— code100: ref 改为 dev（main 停在 code62，活跃开发在 dev） */
     private suspend fun triggerWorkflow(): String {
         sleepHuman(400, 300)  // 🧑‍💻 触发编译前抖一下，避免 GitHub 判自动化
         val body = JSONObject().apply {
-            put("ref", "main")
+            put("ref", "dev")
             put("inputs", JSONObject().put("triggered_by", "AI编手机助手"))
         }.toString().toRequestBody()
         val url = "$baseApi/actions/workflows/${tokenStore.workflowId}/dispatches"
@@ -137,7 +172,17 @@ class GitHubPlugin(
             .header("Accept", "application/vnd.github+json")
             .build()
         http.newCall(req).execute().use { resp ->
-            if (!resp.isSuccessful) return "❌ API 失败：HTTP ${resp.code}"
+            if (!resp.isSuccessful) {
+                val body = resp.body?.string()?.take(400) ?: ""
+                android.util.Log.w("GitHubPlugin", "❌ status 失败: HTTP ${resp.code} url=$url body=$body")
+                val hint = when (resp.code) {
+                    401 -> "\n\n❌ Token 无效或已过期！\n请去 GitHub → Settings → Developer settings → Personal access tokens 重新生成一个（勾 repo + workflow 权限）"
+                    403 -> "\n\n❌ Token 权限不足！需要勾选 repo 和 workflow 权限"
+                    404 -> "\n\n请检查 Owner/Repo 是否正确（${tokenStore.owner}/${tokenStore.repo}）"
+                    else -> ""
+                }
+                return "❌ API 失败：HTTP ${resp.code}\nURL: $url\n响应: $body$hint"
+            }
             val j = JSONObject(resp.body?.string() ?: "{}")
             val runs = j.optJSONArray("workflow_runs") ?: return "ℹ️ 没找到 workflow run（可能仓库还没触发过 Actions）"
             if (runs.length() == 0) return "ℹ️ 仓库还没跑过 Actions"
@@ -212,7 +257,8 @@ class GitHubPlugin(
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
                 if (o.optString("status") == "completed" && o.optString("conclusion") == "success") {
-                    o.optLong("id")
+                    // code100修复: 之前漏了 return@use，id 被丢弃导致永远走 -1L「没找到成功的run」
+                    return@use o.optLong("id")
                 }
             }
             -1L
@@ -307,6 +353,97 @@ class GitHubPlugin(
     }
 
     // ---------- 通知 / Toast ----------
+
+    /**
+     * 【code100 新增】提交代码到 dev 分支 —— GitHub Contents API，无需本地 git。
+     *
+     * 用法（第一行路径，后面跟完整文件内容，支持 ``` 围栏）：
+     *   @github 提交 app/src/main/java/com/xuedi/coder/plugin/GitHubPlugin.kt
+     *   ```kotlin
+     *   package com.xuedi.coder.plugin
+     *   ...
+     *   ```
+     *
+     * 流程：GET 拿当前 sha（存在则需带 sha 更新）→ PUT 上传 base64 内容。
+     * dev 分支有 push 触发器（build.yml on.push.branches 含 dev），提交后自动构建。
+     */
+    private suspend fun commitFile(cmd: String): String = withContext(Dispatchers.IO) {
+        // 1. 解析：第一行提取路径，剩余作为内容
+        val lines = cmd.lines()
+        val firstLine = lines.firstOrNull()?.trim() ?: ""
+        val path = firstLine
+            .replace(Regex("""^[^\s]*?(上传|提交|push代码|push)""", RegexOption.IGNORE_CASE), "")
+            .trim()
+            .trim('`')
+        if (path.isBlank() || !path.contains("/")) {
+            return@withContext "❌ 没识别到文件路径\n\n格式：\n@github 提交 <仓库内路径>\n```\n<完整文件内容>\n```\n\n例：\n@github 提交 app/src/main/java/com/xuedi/coder/vm/ChatViewModel.kt"
+        }
+        var content = lines.drop(1).joinToString("\n").trim()
+        // 剥掉 ```kotlin / ``` 围栏
+        content = content.removePrefix("```").let { s ->
+            val i = s.indexOf('\n')
+            if (content.startsWith("```") && i >= 0) s.substring(i + 1) else s
+        }.removeSuffix("```").trim()
+        if (content.isBlank()) {
+            return@withContext "❌ 文件内容为空\n\n路径已识别：$path\n请把完整文件内容贴在路径下面（可用 ``` 围栏）"
+        }
+        if (content.length > 900_000) {
+            return@withContext "❌ 文件过大（${content.length / 1024}KB，限 900KB）\n大文件请分批或走电脑端提交"
+        }
+
+        sleepHuman(300, 200)
+        val encPath = path.split("/").joinToString("/") { URLEncoder.encode(it, "UTF-8") }
+
+        // 2. GET 拿当前文件 sha（更新已存在文件必须带 sha；404 说明是新文件）
+        val getReq = Request.Builder()
+            .url("$baseApi/contents/$encPath?ref=dev").get()
+            .header("Authorization", authHeader)
+            .header("Accept", "application/vnd.github+json")
+            .build()
+        val existingSha: String? = http.newCall(getReq).execute().use { r ->
+            when {
+                r.isSuccessful -> JSONObject(r.body?.string() ?: "{}").optString("sha").ifBlank { null }
+                r.code == 404 -> null
+                else -> return@withContext "❌ 查询文件失败：HTTP ${r.code}"
+            }
+        }
+
+        // 3. PUT 上传（base64）
+        val b64 = android.util.Base64.encodeToString(content.toByteArray(Charsets.UTF_8), android.util.Base64.NO_WRAP)
+        val putBody = JSONObject().apply {
+            put("message", "📱 手机提交 $path (via AI编程助手)")
+            put("content", b64)
+            put("branch", "dev")
+            if (existingSha != null) put("sha", existingSha)
+        }.toString().toRequestBody()
+        val putReq = Request.Builder()
+            .url("$baseApi/contents/$encPath").put(putBody)
+            .header("Authorization", authHeader)
+            .header("Accept", "application/vnd.github+json")
+            .header("Content-Type", "application/json")
+            .build()
+        http.newCall(putReq).execute().use { r ->
+            if (!r.isSuccessful) {
+                val err = r.body?.string()?.take(300) ?: ""
+                val hint = when (r.code) {
+                    409 -> "\n（409=冲突：文件在你提交前被别人改了，重发一次即可）"
+                    403 -> "\n（403=token 缺 repo 写权限）"
+                    422 -> "\n（422=内容有问题，可能路径不对）"
+                    else -> ""
+                }
+                return@withContext "❌ 提交失败：HTTP ${r.code}$hint\n$err"
+            }
+            val j = JSONObject(r.body?.string() ?: "{}")
+            val commitSha = j.optJSONObject("commit")?.optString("sha")?.take(7) ?: "?"
+            val action = if (existingSha != null) "更新" else "新建"
+            return@withContext """✅ 已${action}并提交到 dev 分支
+  文件: $path
+  大小: ${content.length / 1024}KB
+  commit: $commitSha
+  👉 dev 有 push 触发器，正在自动构建，几分钟后发 @github 看状态"""
+        }
+    }
+
 
     private fun notifyDownloadComplete(apk: File) {
         runCatching {

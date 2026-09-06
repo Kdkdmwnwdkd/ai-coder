@@ -171,7 +171,7 @@ class WebSearchPlugin(
         val contents = contentRe.findAll(html).map { stripHtml(it.groupValues[1]) }.filter { it.isNotBlank() }.toList()
         if (titles.isEmpty()) return null
         val sb = StringBuilder()
-        for (i in titles.indices.take(3)) {
+        for (i in titles.indices.take(5)) {
             val t = titles[i].take(60)
             val c = contents.getOrNull(i)?.take(120) ?: ""
             sb.append("${i + 1}. $t").append(": $c").append("\n")
@@ -233,7 +233,7 @@ class WebSearchPlugin(
         val contentRe = Regex("<(?:p|span|div)[^>]*class=\"[^\"]*(?:content|abstract|text|desc)[^\"]*\"[^>]*>(.*?)</(?:p|span|div)>", RegexOption.DOT_MATCHES_ALL)
         val contents = contentRe.findAll(html).map { stripHtml(it.groupValues[1]) }.filter { it.isNotBlank() }.toList()
         val sb = StringBuilder()
-        for (i in titles.indices.take(3)) {
+        for (i in titles.indices.take(5)) {
             val t = titles[i].take(60)
             val c = contents.getOrNull(i)?.take(120) ?: ""
             sb.append("${i + 1}. $t").append(if (c.isNotBlank()) ": $c" else "").append("\n")
@@ -347,7 +347,7 @@ class WebSearchPlugin(
         // SearXNG JSON 里 items 数组的每个对象都有 title + content（snippet 字段）。
         val titles = titleRegex.findAll(jsonText).map { unescape(it.groupValues[1]) }.filter { it.isNotBlank() }
         val snippets = snippetRegex.findAll(jsonText).map { unescape(it.groupValues[1]) }.filter { it.isNotBlank() }
-        val list = titles.zip(snippets).take(3).toList()
+        val list = titles.zip(snippets).take(5).toList()
         if (list.isEmpty()) return ""
         return list.withIndex().joinToString("\n") { (i, pair) ->
             "${i + 1}. ${pair.first}: ${pair.second.take(140)}"
@@ -368,8 +368,8 @@ class WebSearchPlugin(
     }
 
     private fun buildReport(query: String, result: String): String {
-        return "【联网搜索结果 — $query】\n" +
+        return "【联网搜索结果（实时）— $query】\n" +
             "$result\n" +
-            "（以上结果来自联网搜索 API，仅供 AI 参考。）\n"
+            "（以上是刚刚联网搜索到的实时结果，请直接基于这些内容回答用户问题，不要再说无法联网。）\n"
     }
 }

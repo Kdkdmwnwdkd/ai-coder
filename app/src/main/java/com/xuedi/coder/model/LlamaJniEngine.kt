@@ -2,6 +2,7 @@ package com.xuedi.coder.model
 
 import android.app.ActivityManager
 import android.content.Context
+import android.os.PowerManager
 import android.util.Log
 import com.xuedi.coder.App
 import kotlinx.coroutines.Dispatchers
@@ -10,6 +11,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
@@ -72,6 +74,18 @@ class LlamaJniEngine : LlmEngine {
 
     // ---- ctx handle（由 nativeInit 返回，0 表示未初始化） ----
     @Volatile private var ctx: Long = 0L
+
+    /**
+     * code88: 推理期间持有 PARTIAL_WAKE_LOCK，防止 App 被切后台（如 open_app 打开了别的应用）
+     *   后 CPU 被降频 → prefill 从 ~6s/32token 劣化到 20~50s/32token → 首 token 120s 超时。
+     *   只在 nativeChat 运行期间持有，结束立即释放。
+     */
+    private val wakeLock: PowerManager.WakeLock by lazy {
+        val pm = App.instance.getSystemService(Context.POWER_SERVICE) as PowerManager
+        pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ai-coder:inference").apply {
+            setReferenceCounted(false)
+        }
+    }
 
     /** 上一次 loadModel 失败的原因（给 UI Toast / chatFlow 错误文案用） */
     @Volatile private var lastLoadError: String? = null
@@ -387,6 +401,11 @@ class LlamaJniEngine : LlmEngine {
         if (finalUser != user) {
             Log.i(TAG, "chatFlow: onPreSend 插件链修改输入（${user.length}B → ${finalUser.length}B）")
         }
+        // 插件返回空字符串表示"已接管，不需要 LLM 处理"（如 @github 指令）
+        if (finalUser.isBlank()) {
+            Log.i(TAG, "chatFlow: 插件返回空输入，跳过 LLM 推理")
+            return emptyFlow()
+        }
 
         val libOk = ensureLibLoaded()
         val curCtx = ctx
@@ -457,13 +476,18 @@ class LlamaJniEngine : LlmEngine {
                             Log.w(TAG, "onToken 丢弃：ctx 已变（并发 release/loadModel），旧推理不再回调防 SIGSEGV")
                             return
                         }
-                        firstTokenReceived.set(true)
+                        val isFirst = !firstTokenReceived.getAndSet(true)
+                        if (isFirst) {
+                            Log.i(TAG, "✅ onToken 首 token 到达！piece_len=${piece.length} preview='${piece.take(30)}'")
+                        }
                         // —— 🔴 v1.3.25-stable: 插件 onPostReceive 链（纯 Kotlin，失败不影响主链路，不抛异常）——
                         val filtered = runPostReceive(piece)
                         fullSb.append(filtered)
                         val sendResult = trySend(ChatChunk.Token(text = filtered))
                         if (sendResult.isFailure) {
                             Log.w(TAG, "⚠️ trySend Token 失败: '${filtered.take(20)}' reason=${sendResult.exceptionOrNull()?.message}")
+                        } else if (isFirst) {
+                            Log.i(TAG, "✅ trySend 首 token 成功！已送入 channel，等待 collector 消费")
                         }
                     }
                     override fun onDone(reason: String) {
@@ -496,6 +520,9 @@ class LlamaJniEngine : LlmEngine {
                         Log.i(TAG, "onPrefillMode → $mode（保存到 lastPrefMode 供诊断快照读取）")
                     }
                 }
+                // code88: 推理前获取 PARTIAL_WAKE_LOCK，防止切后台后 CPU 降频导致 prefill 超时
+                runCatching { wakeLock.acquire(10 * 60 * 1000L /*10min 上限，防泄漏*/) }
+                    .onFailure { Log.w(TAG, "wakeLock.acquire 失败: ${it.message}") }
                 val ok = runCatching {
                     nativeChat(curCtx, system, finalUser, cb)
                 }
@@ -543,6 +570,8 @@ class LlamaJniEngine : LlmEngine {
                 // 流被外层 collect 取消：停超时定时器 + 通知 C++ 跳出 decode 循环
                 timeoutJob.cancel()
                 runCatching { nativeChatCancel(curCtx) }
+                // code88: 释放推理 WakeLock
+                runCatching { if (wakeLock.isHeld) wakeLock.release() }
                 // 外层 awaitClose 时 CAS 还原（万一上面的 invokeOnCompletion 没跑，兜底）
                 genRunningFlag.set(false)
             }

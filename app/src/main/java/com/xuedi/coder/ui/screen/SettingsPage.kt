@@ -603,7 +603,16 @@ fun SettingsPage(
         }
         item(key = "gh-card") {
             val ghStore = remember { com.xuedi.coder.plugin.GitHubTokenStore(App.instance) }
-            var ghToken by remember { mutableStateOf(ghStore.token) }
+            // 如果已存的 token 格式不对（不是 ghp_ 开头或长度不对），显示为空让用户重填
+            val savedToken = ghStore.token
+            val tokenValid = savedToken.length >= 40 && (savedToken.startsWith("ghp_") ||
+                    savedToken.startsWith("gho_") || savedToken.startsWith("ghu_") ||
+                    savedToken.startsWith("ghs_") || savedToken.startsWith("ghr_"))
+            var ghToken by remember { mutableStateOf(if (tokenValid) savedToken else "") }
+            if (!tokenValid && savedToken.isNotBlank()) {
+                // 清掉无效的旧 token
+                ghStore.token = ""
+            }
             var ghOwner by remember { mutableStateOf(ghStore.owner) }
             var ghRepo  by remember { mutableStateOf(ghStore.repo) }
             var ghWfId  by remember { mutableStateOf(ghStore.workflowId) }
@@ -1589,6 +1598,7 @@ private suspend fun grabLlamaJniLogcatImpl(): List<String> = withContext(kotlinx
         "-s",
         "LlamaJni:V",
         "LlamaJniEngine:V",
+        "AccessService:V",      // 无障碍服务执行日志（open_app/send_message 等）
         "DEBUG:*",          // 系统崩溃记录（SIGSEGV/tombstone 的开头几行常打在 DEBUG tag）
         "AndroidRuntime:E",
         "ActivityManager:I"

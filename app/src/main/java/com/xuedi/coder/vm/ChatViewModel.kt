@@ -2,6 +2,7 @@ package com.xuedi.coder.vm
 
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import android.util.Log
 import com.xuedi.coder.App
 import com.xuedi.coder.action.ActionExecutor
 import com.xuedi.coder.data.ChatDatabase
@@ -119,15 +120,44 @@ class ChatViewModel : ViewModel() {
      * 才在当前输入前临时 prepend 一行 ACTION 指令（普通闲聊 ~0 token）。
      * 指令内容保持精简（<200 chars），避免 Prefill 劣化。
      */
-    private val ACTION_KEYWORD_RE = Regex("打开|复制|震动|亮度|设置|安装|跳转|启动|粘贴|搜索应用|github|GitHub|编译|下载apk|触发")
+    private val ACTION_KEYWORD_RE = Regex("打开|复制|震动|亮度|设置|安装|跳转|启动|粘贴|搜索|github|GitHub|编译|下载apk|触发|发消息|发送消息|发短信|给.*发")
+
+    /**
+     * code85: 灵活提取 @搜索 查询词。
+     *   "@搜索斗罗大陆"        → "斗罗大陆"
+     *   "@帮我搜索。最新资讯"   → "最新资讯"
+     *   "@搜索  天气"          → "天气"
+     *   "你好"                 → null（不是搜索请求）
+     */
+    private fun extractSearchQuery(raw: String): String? {
+        if (!raw.startsWith("@")) return null
+        val idx = raw.indexOf("搜索")
+        if (idx < 0) return null
+        val after = raw.substring(idx + 2) // 跳过"搜索"二字
+        // 去掉开头的标点/空格
+        val cleaned = after.trimStart(' ', '\t', '。', '.', '，', ',', '：', ':', '！', '!', '？', '?')
+        return cleaned.trim().ifEmpty { null }
+    }
     private val ACTION_DYNAMIC_HINT = run {
-        // 🔥 1.5B 模型只能记住 1-2 个动作格式！多了全乱。
-        //   只保留 open_app 一种格式，AI 最容易学会。
-        //   包名用中文别名表，尽量少 token。
-        """只输出 1 行标签（不要解释）：
-<open_app "包名">
-包名速查：设置=com.android.settings  微信=com.tencent.mm  抖音=com.ss.android.ugc.aweme
-快手=com.smile.gifmaker  B站=tv.danmaku.bili  淘宝=com.taobao.taobao
+        // code99: 应用名不再写死——任意已安装 App 都能用（按应用显示名自动识别包名）。
+        //   提示词去掉"支持的应用名"白名单，避免模型只敢输出列表里的 App。
+        """你只能输出以下三种动作标签之一，绝对不要输出多个标签，不要输出任何其他格式（禁止 sendMessage()、< "xxx" > 等）：
+
+1) 用户说"打开XX"（不搜索）→ 输出：<open_app "XX">
+   示例：打开微信 → <open_app "微信">
+   示例：打开原神 → <open_app "原神">
+
+2) 用户说"打开XX搜索YY"或"搜索XX的YY" → 输出：<search "XX YY">
+   示例：打开抖音搜索斗罗大陆 → <search "抖音 斗罗大陆">
+
+3) 用户说"给XX的YY发消息ZZ" → 输出：<send_message "XX|YY|ZZ">
+   参数格式：应用名|联系人|消息内容，用竖线 | 分隔。
+   示例：给钉钉的吴文艳发消息"你在干嘛" → <send_message "钉钉|吴文艳|你在干嘛">
+   示例：用微博给妈妈发"回家吃饭" → <send_message "微博|妈妈|回家吃饭">
+
+应用名写用户手机上安装的 App 显示名即可（抖音、淘宝、钉钉、微博、原神等任意已安装应用都行）。
+注意：微信和 QQ 出于账号安全已禁用自动化发消息/搜索，遇到这类请求直接告诉用户"请手动发送"，不要输出 send_message 标签。
+只输出 1 个标签，不要解释，不要输出第二个标签。
 """
     }
 
@@ -148,7 +178,8 @@ class ChatViewModel : ViewModel() {
     private val githubTokenStore by lazy { GitHubTokenStore(app.applicationContext) }
     private val githubPlugin by lazy {
         GitHubPlugin(scope = viewModelScope, ctx = app.applicationContext, tokenStore = githubTokenStore) { resultText ->
-            prependToLatestUserMsg(resultText)
+            // code94: 插件结果作为助手回复展示，而非 prepend 到用户消息
+            updateLatestAssistantMsg(resultText)
         }
     }
 
@@ -172,22 +203,37 @@ class ChatViewModel : ViewModel() {
         }
     }
 
+    /**
+     * code94: 更新当前话题最后一条 assistantMsg 的 content（GitHub 插件等异步结果回调用）。
+     * 与 prependToLatestUserMsg 不同：插件结果应作为助手回复展示，而非注入到用户消息里。
+     */
+    private fun updateLatestAssistantMsg(text: String) {
+        val tid = _currentTopicId.value ?: return
+        val list = _messages.value.toMutableList()
+        val idx = list.indexOfLast { it.role == ChatRole.Assistant }
+        if (idx < 0) return
+        val old = list[idx]
+        val updated = old.copy(content = text, pending = false)
+        list[idx] = updated
+        _messages.value = list
+        viewModelScope.launch(Dispatchers.IO) {
+            chatDao.upsert(ChatMsgEntity.from(updated, tid))
+        }
+    }
+
     // ---------- init: 订阅 topics 列表 + 冷启动自动选最近一个话题 + 注册插件 ----------
     init {
-        // 🔥 1.3 注册两个新插件（ToolExecution 声明式占位 / WebSearch 异步 @搜索）
-        //    两个插件的 onPreSend/onPostReceive 都非阻塞 (<1ms)，符合 ChatPlugin 契约。
+        // 🔥 1.3 注册三个内置 runtime 插件（ToolExecution / WebSearch / GitHub）
+        //    三个插件的 onPreSend/onPostReceive 都非阻塞 (<1ms)，符合 ChatPlugin 契约。
         runCatching {
-            // 插件管理：按 ChatPlugin.displayName() 去重注册，避免冷启动多次 init 重入。
-            val pm = app.pluginManager
-            val knownNames = mutableSetOf<String>()
+            val engine = app.llamaEngineRef()
+            // 按 displayName 去重，避免冷启动多次 init 重入导致重复注册
+            val registeredNames = engine.plugins.mapNotNull { it.displayName() }.toMutableSet()
             listOf(toolPlugin, searchPlugin, githubPlugin).forEach { p ->
                 val name = p.displayName()
-                if (name !in knownNames) {
-                    knownNames.add(name)
-                    // 插件没给 PluginManager 暴露 register(p: ChatPlugin)，因为 code 62 baseline
-                    // PluginManager 管的是 assets 场景插件（带 plugin.json / Room 持久化 enabled）。
-                    // 我们这两个是「内置 runtime 插件」，注册进 ChatViewModel 的本地有序列表即可，
-                    // sendMessage/Done 时自己遍历调用（避免改动 PluginManager 接口侵入性）。
+                if (name !in registeredNames) {
+                    registeredNames.add(name)
+                    engine.plugins.add(p)
                 }
             }
         }
@@ -339,7 +385,7 @@ class ChatViewModel : ViewModel() {
             val topicId = _currentTopicId.value ?: createTopic(firstUserMsg = rawContent)
 
             val userMsg = ChatMsg(
-                id = "u_${System.currentTimeMillis()}",
+                id = "u_${UUID.randomUUID()}",
                 role = ChatRole.User,
                 content = rawContent,
                 createdAtMs = System.currentTimeMillis()
@@ -356,8 +402,12 @@ class ChatViewModel : ViewModel() {
             //   · @搜索 关键词 → 同步搜 SearXNG（15s 超时），搜到的 prepend 到 userMsg 里
             //   · 动作关键词 → prepend ACTION_DYNAMIC_HINT（@搜索 消息除外）
             var effectiveInput = rawContent
-            if (rawContent.startsWith("@搜索")) {
-                val query = rawContent.removePrefix("@搜索").trim()
+            // code85: 灵活匹配搜索触发：
+            //   "@搜索xxx"        → query = "xxx"
+            //   "@帮我搜索。最新资讯" → query = "最新资讯"（去掉 @搜索 前的修饰词）
+            val searchQuery = extractSearchQuery(rawContent)
+            if (searchQuery != null) {
+                val query = searchQuery
                 if (query.isNotEmpty()) {
                     _infStatus.value = InfStatus.Preparing
                     _infElapsedMs.value = 0L
@@ -383,7 +433,12 @@ class ChatViewModel : ViewModel() {
                     }
                 }
             }
-            val hitAction = !rawContent.startsWith("@搜索") &&
+            // code94: 插件指令（如 @github）不能 prepend ACTION_DYNAMIC_HINT，
+            //   否则插件 onPreSend 的 ^@github 正则匹配不到，导致 @github 被当成普通搜索走浏览器。
+            //   @搜索 已由上面 searchQuery 分支处理；其他 @xxx 一律视为插件指令，跳过动作提示词。
+            val isPluginCommand = rawContent.startsWith("@") && searchQuery == null
+            val hitAction = searchQuery == null &&
+                !isPluginCommand &&
                 ACTION_KEYWORD_RE.containsMatchIn(rawContent)
             val contentForEngine = if (hitAction) ACTION_DYNAMIC_HINT + effectiveInput else effectiveInput
 
@@ -406,7 +461,7 @@ class ChatViewModel : ViewModel() {
             }
 
             _isTyping.value = true
-            val answerId = "a_${System.currentTimeMillis()}"
+            val answerId = "a_${UUID.randomUUID()}"
             val system = runCatching { app.pluginManager.buildMergedSystemPrompt() }
                 .getOrDefault(BASE_PROMPT)
 
@@ -425,6 +480,9 @@ class ChatViewModel : ViewModel() {
             }
 
             var sb = StringBuilder()
+            // code94: 插件（如 @github）返回空时 chatFlow 返回 emptyFlow，collect 不收到任何 chunk。
+            //   用 receivedAny 标记区分「插件接管」与「正常推理」，避免 assistant 消息永远 pending 空白。
+            var receivedAny = false
             try {
                 // 🔴 致命修复：chatFlow 是 token 串行流，绝对不能用 collectLatest！
                 // 之前：.collectLatest { chunk -> ... }
@@ -433,10 +491,14 @@ class ChatViewModel : ViewModel() {
                 //   → _messages.value.map 还没跑完就被 cancel → 正文累积不到气泡里 → UI 显示空气泡（你截图里的"AI 编程助手"空回复就是这个）。
                 // 现在：.collect { chunk -> ... }，严格串行，一个 token 不丢；处理也很轻（map 一个 list + set 一个 StateFlow value）不会阻塞后续 token。
                 app.llmEngine.chatFlow(system, contentForEngine).collect { chunk ->
+                    receivedAny = true
                     when (chunk) {
                         is ChatChunk.Token -> {
                             // 🔴 TODO-4d 首个 Token → Running
-                            if (_infStatus.value == InfStatus.Preparing) _infStatus.value = InfStatus.Running
+                            if (_infStatus.value == InfStatus.Preparing) {
+                                _infStatus.value = InfStatus.Running
+                                Log.i("ChatVM", "✅ collector 收到首 Token！text_len=${chunk.text.length} preview='${chunk.text.take(30)}'")
+                            }
                             // 🛡️ 防闪退/内存炸：单条回复累积 token 上限 5 万字；再多就丢弃新 token，保证 UI/sb 不 OOM
                             // （之前没限制：极端情况下 sb 无限 append 几 MB 字符串 → LazyColumn 渲染时 kill 进程）
                             if (sb.length < 50000) {
@@ -461,9 +523,20 @@ class ChatViewModel : ViewModel() {
                             //   · extractActions 抹掉正文里所有 <ACTION...> 标签 → cleaned 给用户看；
                             //   · 解析出的 List<ActionTag> → ActionExecutor.executeAll 真正跳转/复制/调亮度。
                             //   执行失败不影响 UI（runCatching 包起来，错误信息塞 Error 气泡里）。
-                            val (cleaned, actions) = ActionExecutor.extractActions(safeFull)
+                            val (cleaned, allActions) = ActionExecutor.extractActions(safeFull)
+                            // code94: 3B 模型经常违规输出多个标签（如发消息时还附带 search "抖音跳舞教程"）。
+                            //   提示词明确要求只输出 1 个标签，这里只取第一个，丢弃多余的幻觉动作。
+                            val actions = if (allActions.size > 1) {
+                                Log.w("ChatVM", "模型输出了 ${allActions.size} 个动作，只执行第一个: ${allActions.first().name}")
+                                allActions.take(1)
+                            } else allActions
                             val safeCleaned = if (cleaned.length > 20000) cleaned.take(20000) + "\n\n...[内容过长]" else cleaned
-                            val finalText = safeCleaned.ifBlank { safeFull }
+                            // code89: 如果解析出了动作标签，模型在标签后面输出的正文基本都是幻觉
+                            //   （3B 模型经常在 <send_message "..."> 后面继续输出 "Human: ..." 之类的垃圾）。
+                            //   动作提示词明确要求"只输出 1 行标签，不要解释"，所以有动作时丢弃正文，
+                            //   只保留动作执行结果提示。
+                            val finalText = if (actions.isNotEmpty()) ""
+                            else safeCleaned.ifBlank { safeFull }
 
                             // 🔥 执行 ACTION（Done 时才调用，<50ms，不会 ANR）
                             val execResult: Pair<Int, String?> = if (actions.isEmpty()) 0 to null
@@ -500,7 +573,7 @@ class ChatViewModel : ViewModel() {
                             _messages.value = _messages.value
                                 .map { m -> if (m.id == answerId) m.copy(pending = false) else m } +
                                 ChatMsg(
-                                    id = "err_${System.currentTimeMillis()}",
+                                    id = "err_${UUID.randomUUID()}",
                                     role = ChatRole.Error,
                                     content = "❌ ${chunk.hint}",
                                     createdAtMs = System.currentTimeMillis()
@@ -525,7 +598,7 @@ class ChatViewModel : ViewModel() {
                 _messages.value = _messages.value
                     .map { m -> if (m.id == answerId) m.copy(pending = false) else m } +
                     ChatMsg(
-                        id = "err_${System.currentTimeMillis()}",
+                        id = "err_${UUID.randomUUID()}",
                         role = ChatRole.Error,
                         content = "❌ 推理崩溃：${t.message ?: t.javaClass.simpleName}",
                         createdAtMs = System.currentTimeMillis()
@@ -538,6 +611,16 @@ class ChatViewModel : ViewModel() {
                 tickerJob.cancel()
                 runCatching { InferenceForegroundService.stop(app) }
                 _isTyping.value = false
+                // code94: 插件接管（emptyFlow）时，给 assistant 消息一个加载提示，等异步结果回调覆盖。
+                if (!receivedAny) {
+                    _messages.value = _messages.value.map { m ->
+                        if (m.id == answerId) m.copy(content = "⏳ 正在执行…", pending = false) else m
+                    }
+                    viewModelScope.launch(Dispatchers.IO) {
+                        val cur = _messages.value.firstOrNull { it.id == answerId } ?: return@launch
+                        chatDao.upsert(ChatMsgEntity.from(cur, topicId))
+                    }
+                }
                 // 兜底：若异常/取消退出时还停留在 Preparing/Running（没机会设终态），清回 Idle
                 val s = _infStatus.value
                 if (s == InfStatus.Preparing || s == InfStatus.Running) _infStatus.value = InfStatus.Idle
@@ -577,7 +660,11 @@ class ChatViewModel : ViewModel() {
         // 通用对话模型（Qwen2.5-Instruct、Phi-3、Yi 等）能在此提示词下既闲聊又写代码。
         const val BASE_PROMPT = "你是一个运行在用户手机本地的 AI 助手。用简体中文回答。" +
             "你可以和用户闲聊、回答知识问题，也可以写代码或解释代码。" +
-            "保持回答简洁友好。" +
-            "用户可能会通过 @搜索 触发联网搜索，搜索结果会以【联网搜索结果】开头的文本块附加在用户消息前，请参考该结果回答。"
+            "保持回答简洁友好。\n\n" +
+            "【联网搜索结果使用规则】\n" +
+            "当用户消息前出现以【联网搜索结果】开头的文本块时，这些内容就是刚从互联网搜索到的实时信息，已经直接提供给你了。" +
+            "你必须直接基于这些搜索结果来回答用户的问题，逐条总结其中的要点。" +
+            "绝对不要说「我无法访问互联网」「我无法获取实时信息」之类的话——搜索结果已经给你了，直接用即可。" +
+            "如果搜索结果内容较少，就如实总结已有内容，不要编造额外信息。"
     }
 }

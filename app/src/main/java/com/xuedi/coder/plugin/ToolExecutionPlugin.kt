@@ -33,5 +33,6 @@ class ToolExecutionPlugin(private val context: Context) : ChatPlugin {
 fun ChatPlugin.displayName(): String = when (this) {
     is ToolExecutionPlugin -> this.name()
     is WebSearchPlugin -> this.name()
+    is GitHubPlugin -> this.name()
     else -> this::class.java.simpleName
 }

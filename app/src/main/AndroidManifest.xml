@@ -15,6 +15,8 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
     <!-- M6 ACTION 标签：震动反馈 -->
     <uses-permission android:name="android.permission.VIBRATE" />
+    <!-- code89: 推理期间持有 PARTIAL_WAKE_LOCK，防止切后台（open_app 打开了别的应用）后 CPU 降频 -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:name=".App"

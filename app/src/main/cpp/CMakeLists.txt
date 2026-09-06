@@ -70,19 +70,55 @@ set(GGML_CPU_ARM_MALI     OFF CACHE BOOL "" FORCE)
 #   · 给 JNI 传编译宏 XUEDI_LLAMA_VULKAN=1/0，llama_jni.cpp 里据此决定
 #     n_gpu_layers 实际允许值（CPU-only 编译即使 Kotlin 传 -1 也会夹到 0，避免零收益）。
 #
-# 🔥 2026-09-03 v1.3.26-gpu1-hotfix1：临时强令 XUEDI_HAS_VULKAN=OFF 再跑一次 Actions。
-#    原因：刚 push 的 tag run(#220) / main run(#219) 35 分钟还 In progress，
-#          正常 build 5min，慢 7× 说明 Vulkan 分支 + glslang shader 生成
-#          在 Actions runner 上第一次拉源码编译时拖到 20+min。
-#    为让方案 C 设置页开关 + App 层预热逻辑先装包验证（这两个不依赖 Vulkan，
-#    且 JNI 里 XUEDI_LLAMA_VULKAN=0 时 n_gpu_layers 100% 被钳到 0，行为 = perf2-thread4），
-#    先出一个 CPU 底包 APK 让用户测 UI。
-#    🔓 以后想启用 Vulkan A/B，把下面一行注释掉，恢复 find_package(Vulkan) 即可。
 # =====================================================
-set(XUEDI_HAS_VULKAN OFF CACHE BOOL "" FORCE)
-# find_package(Vulkan)
-if (0) # if (Vulkan_FOUND)
-    message(STATUS "[xuedi-llama] Vulkan FOUND (include=${Vulkan_INCLUDE_DIRS} libs=${Vulkan_LIBRARIES} glslc=${Vulkan_GLSLC_EXECUTABLE}) → 启用 ggml-vulkan")
+# code278：Vulkan 真启用（撤掉 v1.3.26-gpu1-hotfix1 的临时关闭）。
+#   · find_package(Vulkan)：minSdk=26 ≥ 24，Android NDK sysroot 自带
+#     vulkan/vulkan.h + aarch64 libvulkan.so stub，交叉编译时直接命中；
+#     设备上真正的 libvulkan.so 由 Adreno 驱动提供（骁龙 8 Gen2 必带 Vulkan 1.3）。
+#   · shader 编译靠 HOST 的 glslc（Google shaderc，apt 包名 glslc），
+#     build.yml 已加安装步骤；vulkan-shaders-gen 本体只是个小 C++ 工具（秒级编译）。
+#   · 找不到 Vulkan → GGML_VULKAN=OFF 纯 CPU 构建，行为与之前完全一致（永不阻塞出包）。
+#   · 运行时兜底：设备上 Vulkan 初始化失败 → LlamaJniEngine.loadModelRobust 检测
+#     Vulkan 关键词后自动把 gpuHint 切 0，降级档位强制 CPU；用户也可在设置里关。
+# =====================================================
+# code278-b10819：升级 b5180 → b10819 后，ggml-vulkan/CMakeLists.txt 顶部新增
+#   find_package(SPIRV-Headers CONFIG REQUIRED)（ggml-vulkan.cpp 要
+#   #include <spirv/unified1/spirv.hpp> 做 SPIRV 二进制补丁，b5180 没这段）。
+#   该 find_package 跑在 Android 交叉上下文里，NDK sysroot 没有 SPIRV-Headers，
+#   必须显式指向 HOST 的 Ubuntu spirv-headers 包（build.yml 已 apt 安装）：
+#     · cmake config: /usr/lib/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake
+#     · 头文件:       /usr/include/spirv/unified1/spirv.hpp
+#   注意 llama.cpp 只 find_package 却从不 link SPIRV-Headers::SPIRV-Headers，
+#   所以头文件目录要我们在 add_subdirectory 之后手动补到 ggml-vulkan target。
+#   config / 头文件任一缺失 → 与 Vulkan NOT FOUND 同策略：CPU-only，永不阻塞出包。
+# =====================================================
+set(XUEDI_SPIRV_OK OFF)
+if (Vulkan_FOUND)
+    # NO_CMAKE_FIND_ROOT_PATH：Android toolchain 把 find_* 限制在 sysroot，
+    # 必须显式放开才能搜 HOST 路径（与 ggml detect_host_compiler 同一招）
+    # Ubuntu 24.04 spirv-headers 实际装到 /usr/share/cmake/SPIRV-Headers（沙箱实测），
+    # 其余几个路径是其他发行版/源码安装的常见位置，一并兜底。
+    find_file(XUEDI_SPIRV_HEADERS_CONFIG
+        NAMES SPIRV-HeadersConfig.cmake
+        PATHS /usr/share/cmake/SPIRV-Headers
+              /usr/lib/cmake/SPIRV-Headers
+              /usr/local/lib/cmake/SPIRV-Headers
+              /usr/lib/x86_64-linux-gnu/cmake/SPIRV-Headers
+        NO_CMAKE_FIND_ROOT_PATH)
+    find_path(XUEDI_SPIRV_INCLUDE_DIR
+        NAMES spirv/unified1/spirv.hpp
+        PATHS /usr/include /usr/local/include
+        NO_CMAKE_FIND_ROOT_PATH)
+    if (XUEDI_SPIRV_HEADERS_CONFIG AND XUEDI_SPIRV_INCLUDE_DIR)
+        # 预置 <Pkg>_DIR：find_package 优先吃这个显式路径，不受 sysroot re-root 影响
+        get_filename_component(XUEDI_SPIRV_HEADERS_DIR "${XUEDI_SPIRV_HEADERS_CONFIG}" DIRECTORY)
+        set(SPIRV-Headers_DIR "${XUEDI_SPIRV_HEADERS_DIR}" CACHE PATH "host SPIRV-Headers cmake dir (xuedi)" FORCE)
+        set(XUEDI_SPIRV_OK ON)
+    endif ()
+endif ()
+
+if (Vulkan_FOUND AND XUEDI_SPIRV_OK)
+    message(STATUS "[xuedi-llama] Vulkan FOUND (include=${Vulkan_INCLUDE_DIRS} libs=${Vulkan_LIBRARIES} glslc=${Vulkan_GLSLC_EXECUTABLE}) + SPIRV-Headers(${XUEDI_SPIRV_HEADERS_DIR}) → 启用 ggml-vulkan")
     set(GGML_VULKAN                       ON  CACHE BOOL "" FORCE)
     set(GGML_VULKAN_DEBUG                 OFF CACHE BOOL "" FORCE)
     set(GGML_VULKAN_CHECK_RESULTS         OFF CACHE BOOL "" FORCE)
@@ -93,8 +129,13 @@ if (0) # if (Vulkan_FOUND)
     set(GGML_VULKAN_RUN_TESTS             OFF CACHE BOOL "" FORCE)
     set(XUEDI_HAS_VULKAN ON)
 else ()
-    message(STATUS "[xuedi-llama] Vulkan TEMPORARILY DISABLED by v1.3.26-gpu1-hotfix1 → 保持 CPU-only 构建（= perf2-thread4 底包）")
+    if (Vulkan_FOUND AND NOT XUEDI_SPIRV_OK)
+        message(STATUS "[xuedi-llama] Vulkan 在，但 HOST 缺 spirv-headers（CI 应 apt install spirv-headers）→ CPU-only 构建")
+    else ()
+        message(STATUS "[xuedi-llama] Vulkan NOT FOUND → CPU-only 构建（= perf2-thread4 底包）")
+    endif ()
     set(GGML_VULKAN                       OFF CACHE BOOL "" FORCE)
+    set(XUEDI_HAS_VULKAN OFF)
 endif ()
 
 set(LLAMA_ARM_NEON        ON  CACHE BOOL "" FORCE)
@@ -113,6 +154,14 @@ set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type" FORCE)
 # 会产出 4 个 static lib target：ggml-base、ggml-cpu、ggml、llama
 # =====================================================
 add_subdirectory(${LLAMA_DIR} ${CMAKE_BINARY_DIR}/llama_build)
+
+# code278-b10819: ggml-vulkan.cpp 要 <spirv/unified1/spirv.hpp>，但 llama.cpp 只
+# find_package(SPIRV-Headers) 从不 link 它 → include 目录我们自己补（HOST 头只含
+# spirv/ 子目录纯常量定义，不会污染 Android sysroot 头搜索）。
+if (XUEDI_HAS_VULKAN AND TARGET ggml-vulkan)
+    target_include_directories(ggml-vulkan PRIVATE ${XUEDI_SPIRV_INCLUDE_DIR})
+    message(STATUS "[xuedi-llama] ggml-vulkan 补 SPIRV include: ${XUEDI_SPIRV_INCLUDE_DIR}")
+endif ()
 
 # =====================================================
 # 唯一 JNI 入口：llama_jni.cpp → libxuedi-llama.so

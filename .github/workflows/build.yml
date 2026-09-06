@@ -62,6 +62,18 @@ jobs:
           ls -lh "$ANDROID_HOME/ndk/" 2>/dev/null || true
           ls -lh "$ANDROID_HOME/cmake/" 2>/dev/null || true
 
+      # code278: ggml-vulkan 的 shader 编译靠 HOST 的 glslc（Google shaderc，秒级）；
+      #   没装的话 llama.cpp 的 find_package(Vulkan COMPONENTS glslc REQUIRED) 会 FATAL，
+      #   或者走源码编译 glslang 拖 30+ 分钟（v1.3.26-gpu1 当年就是这么卡死的）。
+      # code278-b10819: b10819 的 ggml-vulkan 新增 find_package(SPIRV-Headers CONFIG REQUIRED)
+      #   + #include <spirv/unified1/spirv.hpp>，apt 包装一次（CMakeLists 里缺它会退 CPU-only）。
+      - name: 安装 glslc + spirv-headers（ggml-vulkan 构建必需）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends glslc spirv-headers
+          which glslc && glslc --version | head -2
+          ls /usr/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake /usr/include/spirv/unified1/spirv.hpp
+
       # =====================================================
       # 🛡️ 解决"每次出新包都要卸载旧版才能装"的根因：签名固定
       # —— 之前每轮 Actions 的 debug keystore 都是 Runner 临时生成的，SHA1 不同 → 覆盖失败。
@@ -203,6 +215,14 @@ jobs:
             "platforms;android-34" \
             "build-tools;34.0.0" \
             2>&1 | tail -n 20 || true
+
+      # code278-b10819: release 也要 Vulkan（debug job 同款步骤，缺了会静默退 CPU-only）
+      - name: 安装 glslc + spirv-headers（ggml-vulkan 构建必需）
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends glslc spirv-headers
+          which glslc && glslc --version | head -2
+          ls /usr/share/cmake/SPIRV-Headers/SPIRV-HeadersConfig.cmake /usr/include/spirv/unified1/spirv.hpp
 
       - name: 准备固定签名 keystore（release fallback 复用 debug keystore）
         env:

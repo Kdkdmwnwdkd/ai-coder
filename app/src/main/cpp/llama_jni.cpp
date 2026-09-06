@@ -38,9 +38,13 @@
 #define LOGE(...)  __android_log_print(ANDROID_LOG_ERROR, XUEDI_LOG_TAG, __VA_ARGS__)
 
 // =============================================================================
-// 全局常量（b5180 魅族 20 踩过的坑，全部硬编码）
+// 全局常量
 // =============================================================================
-static constexpr int   SAFE_N_BATCH    = 1;     // 唯一不崩的 batch 大小（硬证据：fix10 n_batch=1 跑通 1024t）
+static constexpr int   SAFE_N_BATCH    = 1;     // 逐 token decode（生成循环 + prefill 兜底）用的安全 batch
+static constexpr int   CTX_N_BATCH     = 1024;  // code278: b10819 重开批量 prefill——llama_decode 要求 n_tokens ≤ n_batch，
+                                                //   所以 ctx 的逻辑 batch 上限必须 ≥ prefill 上限（下面 PREFILL_BATCH_MAX）
+static constexpr int   CTX_N_UBATCH    = 512;   // 物理 ubatch：llama.cpp 内部按它切分，内存占用适中
+static constexpr int   PREFILL_BATCH_MAX = 1024;// 批量 prefill 单次 token 上限
 static constexpr int   DEFAULT_MAX_GEN = 2048;  // v1.3.25-stable: 800 → 2048，给更长对话留空间
 static constexpr int   EOS_GUARD_STEPS = 32;    // v1.3.25-stable: argmax 采样下"生成 7 token 就 EOS"的根治：前 32 步硬禁 EOS
 static constexpr int   N_KV_MAX_SHIFT  = 0;     // 预留
@@ -75,6 +79,8 @@ struct LlamaState {
     llama_token   bos;
     llama_token   eos;
     int           n_vocab;
+
+    std::string   model_path;   // code278: 批量 prefill 崩溃锁文件路径（<model_path>.batch_bad）要用
 
     // cancel flag 按 ctx 粒度（不搞全局，避免并发 loadModel 互相杀）
     std::atomic<bool> cancel;
@@ -364,21 +370,21 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     LOGI("nativeInit ✅ model loaded。n_vocab=%d n_embd=%d vocab=%p",
          llama_vocab_n_tokens(vocab), llama_model_n_embd(model), (const void*)vocab);
 
-    // ---- 2. llama_init_from_model（cparams.n_batch 强制 SAFE_N_BATCH=1）----
+    // ---- 2. llama_init_from_model（code278: n_batch/n_ubatch 恢复正常值，b10819 批量 prefill 需要）----
     llama_context_params cparams = llama_context_default_params();
     cparams.n_ctx       = (uint32_t)n_ctx;
-    cparams.n_batch     = (uint32_t)SAFE_N_BATCH;   // 🔴 关键：强制 1，不允许 llama.cpp 内部覆盖
-    cparams.n_ubatch    = (uint32_t)SAFE_N_BATCH;
+    cparams.n_batch     = (uint32_t)CTX_N_BATCH;    // 逻辑 batch 上限 ≥ PREFILL_BATCH_MAX
+    cparams.n_ubatch    = (uint32_t)CTX_N_UBATCH;   // 物理切分 512，compute buffer 适中
     cparams.n_threads   = (uint32_t)n_threads;
     cparams.n_threads_batch = (uint32_t)n_threads;
-    // ⚠️ b5180 里 llama_context_params 已经没有 seed 字段：采样无随机性（argmax），不需要
-    cparams.flash_attn  = false;         // 魅族 20 不兼容 flash attn，关
+    // b10819: flash_attn bool 字段已换成 flash_attn_type 枚举
+    cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;  // 魅族 20 不兼容 flash attn，关
     // v1.3.26-gpu1：只有当 n_gpu_layers>0（已经经过 XUEDI_LLAMA_VULKAN 钳制）时才 offload KQV，
     //               避免 CPU-only 构建里把 KV 往不存在的后端推（避免潜在初始化路径）。
     cparams.offload_kqv = (n_gpu_layers > 0);
 
-    LOGI("nativeInit → llama_init_from_model (n_ctx=%u n_batch=%u n_threads=%u n_gpu_layers=%d offload_kqv=%d flash_attn=0)",
-         cparams.n_ctx, cparams.n_batch, cparams.n_threads,
+    LOGI("nativeInit → llama_init_from_model (n_ctx=%u n_batch=%u n_ubatch=%u n_threads=%u n_gpu_layers=%d offload_kqv=%d flash_attn=DISABLED)",
+         cparams.n_ctx, cparams.n_batch, cparams.n_ubatch, cparams.n_threads,
          n_gpu_layers, (int)cparams.offload_kqv);
     llama_context* ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
@@ -401,6 +407,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
     st->bos      = llama_vocab_bos(vocab);
     st->eos      = llama_vocab_eos(vocab);
     st->n_vocab  = llama_vocab_n_tokens(vocab);
+    st->model_path = path;  // code278: 批量 prefill 崩溃锁用
     st->cancel.store(false, std::memory_order_relaxed);
 
     LOGI("nativeInit 完成：bos=%d eos=%d n_vocab=%d n_ctx=%d n_gpu_layers=%d (XUEDI_LLAMA_VULKAN=%d) vocab=%p",
@@ -510,15 +517,15 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     }
 
     // ---- Step 4: 清 KV cache（修"二次对话不吐字"bug）
-    // b5180 新命名：llama_kv_self_clear（旧 llama_kv_cache_clear 仍 deprecated，这里用新命名避免 warning）
-    llama_kv_self_clear(st->ctx);
+    // b10819 新命名：llama_kv_self_clear 已移除 → llama_memory_clear(llama_get_memory(ctx), true)
+    llama_memory_clear(llama_get_memory(st->ctx), true);
     LOGI("nativeChat: kv cache 已清。开始 prefill [%zu tokens]", tokens.size());
 
     // ---- Step 5: Prefill（v1.3.25-perf1：先试批量 llama_decode 一次过，失败回退 SAFE 逐 token）----
-    //   回退保证：只要 llama_decode 返回非 0 → 立即清 KV + 走原来的 n_tokens=1 循环。
-    //   风险隔离：ctx cparams 的 n_batch/n_ubatch 仍保持 SAFE_N_BATCH=1 不变（不碰黑盒），
-    //     我们只在单个 llama_decode 调用里传「更大的 batch 对象」——llama.cpp 内部允许，
-    //     若内部 assertion 失败，ret!=0 → fallback；若是 SIGABRT（极罕见），下版本再屏蔽。
+    //   code278-b10819: ctx cparams 已提升为 n_batch=CTX_N_BATCH(1024)/n_ubatch=CTX_N_UBATCH(512)，
+    //     满足 llama_decode 的 n_tokens ≤ n_batch 硬要求，批量 prefill 合法。
+    //   回退保证：只要 llama_decode 返回非 0 → 立即清 KV + 走原来的 n_tokens=1 循环；
+    //     若真 SIGSEGV → .batch_bad 崩溃锁残留，下次启动永久逐 token（见 5.0 节）。
     llama_batch batch = llama_batch_init(SAFE_N_BATCH, /*embd=*/0, /*n_seq_max=*/1);
     LOGI("nativeChat: SAFE batch created (n_tokens_max=%d, embd=0, n_seq_max=1)", SAFE_N_BATCH);
 
@@ -527,20 +534,28 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
     std::string fullOut;
     llama_token last_tok = 0;  // ✅ 提前声明：避免 prefill 阶段 "goto cleanup" 跨过变量初始化（C++ 编译硬错）
 
-    // ---- 5.0 PREFILL-BATCH 尝试（v1.3.25-perf1）----
-    // 🔴 v1.3.25-perf1-stable (code 59) 结论：
-    //   魅族 20 + Qwen2.5-3B + b5180 上，N=247 一次性 llama_decode 直接 SIGSEGV → ggml_abort，
-    //   llama_decode 内部 assertion 没有走 ret 返回，fallback 逻辑完全来不及执行（实锤证据见诊断包 v1.3.25-perf1 crash 日志）。
-    //   根因：llama_build_attn_rope 在 b5180 批量模式下对 pos 数组 / RoPE 频率基存在硬编码假设，
-    //         与 Qwen2 的 GGUF metadata 不匹配。perf1 阶段永久关批量，
-    //         将来升级到 llama.cpp b5800+ 后，把下面 'false &&' 去掉即可一键重开（=零代码回归）。
+    // ---- 5.0 PREFILL-BATCH 尝试（code278: b5180 → b10819 升级后重开）----
+    //   历史：b5180 CPU 后端批量 decode 在魅族20 SIGSEGV（RoPE 硬编码假设与 Qwen2 不匹配），永久禁用。
+    //   b10819 距 b5180 已 5600+ 个 release，attn/RoPE 路径多次重写；Vulkan 开启时批量直接跑 GPU，绕开 CPU 后端。
+    //   🔒 崩溃自锁保护（核心安全措施）：
+    //     尝试批量前先写锁文件 <model>.batch_bad ——
+    //       · 成功          → 删锁，批量继续可用
+    //       · ret != 0      → 保留锁 + 清 KV + 逐 token 兜底，以后不再尝试
+    //       · 真 SIGSEGV    → 锁残留，下次启动检测到 → 永久逐 token（最多只崩这一次）
     {
         bool batch_ok    = false;
         bool batch_tried = false;  // v1.3.25-perf2 fix: 是否"真的进入过批量尝试分支"。只有 tried+failed 才叫 BATCH_FB。
         const int N = (int)tokens.size();
-        // 🔴 PERM DISABLED: 原条件 (N > 1 && N <= 1024)。保留结构，后续开只要改 false &&。
-        if (false && N > 1 && N <= 1024) {
+        const std::string batchLock = st->model_path + ".batch_bad";
+        const bool batch_locked = access(batchLock.c_str(), F_OK) == 0;
+        if (batch_locked) {
+            LOGI("🔒 PREFILL-BATCH: 检测到批量崩溃锁（%s）→ 永久使用逐 token 安全路径", batchLock.c_str());
+        }
+        if (!batch_locked && N > 1 && N <= PREFILL_BATCH_MAX) {
             batch_tried = true;
+            // 🔒 先写锁再尝试：若接下来 SIGSEGV，锁残留 → 下次启动永久禁用批量
+            FILE* lf = fopen(batchLock.c_str(), "w");
+            if (lf) { fputs("batch prefill crashed once, stay in STEPx1", lf); fclose(lf); }
             LOGI("🔬 PREFILL-BATCH: 尝试一次性 prefill（N=%d tokens）。若 ret!=0 立即 fallback 逐 token", N);
             // 单独构造临时 batch_all（不影响下面的 SAFE batch 生命周期变量，避免 cleanup 双 free）
             llama_batch batch_all = llama_batch_init(N, /*embd=*/0, /*n_seq_max=*/1);
@@ -558,21 +573,22 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
                 if (ret == 0) {
                     n_past   = N;
                     batch_ok = true;
+                    remove(batchLock.c_str());  // 成功 → 解锁
                     LOGI("✅✅ PREFILL-BATCH PASS（%d tokens）。n_past=%d 直接进入 generation", N, n_past);
                     cb_onPrefillMode(tenv, gCb, PREF_MODE_BATCH_OK);
                     cb_onPrefill(tenv, gCb, N, N);
                 } else {
-                    LOGE("❌ PREFILL-BATCH FAIL ret=%d N=%d → 清 KV 并 fallback 逐 token (SAFE_N_BATCH=%d)",
+                    LOGE("❌ PREFILL-BATCH FAIL ret=%d N=%d → 保留崩溃锁 + 清 KV + fallback 逐 token (SAFE_N_BATCH=%d)",
                          ret, N, SAFE_N_BATCH);
                     // 失败必须清 KV：batch_all 可能部分写入了 KV，不清的话逐 token 会 pos 冲突
-                    llama_kv_self_clear(st->ctx);
+                    llama_memory_clear(llama_get_memory(st->ctx), true);
                 }
             } else {
                 LOGE("❌ PREFILL-BATCH: llama_batch_init(%d,0,1) 返回空字段 → 直接 fallback", N);
             }
             llama_batch_free(batch_all);
         } else {
-            LOGI("⏭️  PREFILL-BATCH: N=%d（<=1 或 >1024），跳过批量尝试，直接 STEPx1", N);
+            LOGI("⏭️  PREFILL-BATCH: N=%d（<=1 或 >%d 或已锁），跳过批量尝试，直接 STEPx1", N, PREFILL_BATCH_MAX);
         }
 
         if (!batch_ok) {

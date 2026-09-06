@@ -47,8 +47,6 @@ val bottomNavItems = listOf(NavItem.Chat, NavItem.Plugins, NavItem.Settings, Nav
 @Composable
 fun AppNavHost(
     appScope: CoroutineScope,
-    requestImportModel: () -> Unit,
-    requestImportBackground: () -> Unit,
     chatVm: ChatViewModel = viewModel()
 ) {
     AiCoderTheme {
@@ -133,9 +131,7 @@ fun AppNavHost(
                                     appScope.launch {
                                         runCatching { App.instance.themeStore.setBackgroundAlpha(a) }
                                     }
-                                },
-                                requestImportModel = requestImportModel,
-                                requestImportBackground = requestImportBackground
+                                }
                             )
                         }
                         composable(NavItem.About.route) { AboutPage() }

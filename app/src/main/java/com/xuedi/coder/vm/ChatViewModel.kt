@@ -82,9 +82,6 @@ class ChatViewModel : ViewModel() {
     private val _messages = MutableStateFlow<List<ChatMsg>>(emptyList())
     val messages: StateFlow<List<ChatMsg>> = _messages.asStateFlow()
 
-    private val _isTyping = MutableStateFlow(false)
-    val isTyping: StateFlow<Boolean> = _isTyping.asStateFlow()
-
     // ---------- 推理状态流（TODO-4：防闪退 + UX 状态条）----------
     /** UI 顶部状态条据此渲染（Idle 隐藏 / Preparing 准备中 / Running 回复中 / Failed 失败 / Timeout 启动超时）*/
     private val _infStatus = MutableStateFlow(InfStatus.Idle)
@@ -150,28 +147,8 @@ class ChatViewModel : ViewModel() {
     }
 
     /**
-     * 把文本 prepend 到当前话题最后一条 userMsg 的 content 最前面（联网搜索结果注入用）。
-     * 同时持久化进数据库，重启后搜索结果也保留在历史里。
-     */
-    private fun prependToLatestUserMsg(text: String) {
-        val tid = _currentTopicId.value ?: return
-        val list = _messages.value.toMutableList()
-        val idx = list.indexOfLast { it.role == ChatRole.User }
-        if (idx < 0) return
-        val old = list[idx]
-        // 不重复注入（防止同一 @搜索 因为网络重试/重入注入两次）
-        if (old.content.startsWith(text.take(14))) return
-        val updated = old.copy(content = "$text\n\n${old.content}")
-        list[idx] = updated
-        _messages.value = list
-        viewModelScope.launch(Dispatchers.IO) {
-            chatDao.upsert(ChatMsgEntity.from(updated, tid))
-        }
-    }
-
-    /**
      * code94: 更新当前话题最后一条 assistantMsg 的 content（GitHub 插件等异步结果回调用）。
-     * 与 prependToLatestUserMsg 不同：插件结果应作为助手回复展示，而非注入到用户消息里。
+     * 插件结果作为助手回复展示，而非注入到用户消息里。
      */
     private fun updateLatestAssistantMsg(text: String) {
         val tid = _currentTopicId.value ?: return
@@ -217,7 +194,6 @@ class ChatViewModel : ViewModel() {
                 //   抖动/死循环/ANR）。删除后自动切换逻辑也保留（删除是用户主动操作，切到最近合理）。
                 // 唯一例外：当前 topic 被删了 → 必须切到下一个或新建空话题
                 if (_currentTopicId.value != null && list.none { it.id == _currentTopicId.value }) {
-                    val currentDeletedId = _currentTopicId.value
                     _currentTopicId.value = null
                     _messages.value = emptyList()
                     // 删完空 → 自动建一个新空话题
@@ -226,8 +202,6 @@ class ChatViewModel : ViewModel() {
                     } else {
                         switchTopicInternal(list.first().id)
                     }
-                    // 未使用变量，抑制警告
-                    currentDeletedId ?: Unit
                 }
             }
         }
@@ -258,7 +232,6 @@ class ChatViewModel : ViewModel() {
             // 先取消当前正在跑的推理（避免旧 topic 的 token 流到新 topic）
             runCatching { app.llmEngine.cancel() }
             runCatching { InferenceForegroundService.stop(app) }
-            _isTyping.value = false
             _infStatus.value = InfStatus.Idle
             switchTopicInternal(topicId)
         }
@@ -277,7 +250,6 @@ class ChatViewModel : ViewModel() {
         viewModelScope.launch(Dispatchers.IO) {
             runCatching { app.llmEngine.cancel() }
             runCatching { InferenceForegroundService.stop(app) }
-            _isTyping.value = false
             _infStatus.value = InfStatus.Idle
             createTopic(firstUserMsg = null)
         }
@@ -299,7 +271,6 @@ class ChatViewModel : ViewModel() {
             if (_currentTopicId.value == topicId) {
                 runCatching { app.llmEngine.cancel() }
                 runCatching { InferenceForegroundService.stop(app) }
-                _isTyping.value = false
                 _infStatus.value = InfStatus.Idle
             }
             chatDao.deleteByTopic(topicId)
@@ -408,6 +379,7 @@ class ChatViewModel : ViewModel() {
             _currentTokenCount.value = 0
             _infElapsedMs.value = 0L
             _failMsgFlow.value = null
+            _prefillPercent.value = 0
             val startedAt = System.currentTimeMillis()
             val tickerJob = viewModelScope.launch(Dispatchers.Default) {
                 while (isActive) {
@@ -419,7 +391,6 @@ class ChatViewModel : ViewModel() {
                 }
             }
 
-            _isTyping.value = true
             val answerId = "a_${UUID.randomUUID()}"
             val system = runCatching { app.pluginManager.buildMergedSystemPrompt() }
                 .getOrDefault(BASE_PROMPT)
@@ -485,7 +456,6 @@ class ChatViewModel : ViewModel() {
                                 role = ChatRole.Assistant,
                                 content = safeFull,
                                 createdAtMs = answer.createdAtMs,
-                                actions = emptyList(),
                                 pending = false
                             )
                             _messages.value = _messages.value.map { m ->
@@ -541,7 +511,6 @@ class ChatViewModel : ViewModel() {
             } finally {
                 tickerJob.cancel()
                 runCatching { InferenceForegroundService.stop(app) }
-                _isTyping.value = false
                 // code94: 插件接管（emptyFlow）时，给 assistant 消息一个加载提示，等异步结果回调覆盖。
                 if (!receivedAny) {
                     _messages.value = _messages.value.map { m ->
@@ -562,7 +531,6 @@ class ChatViewModel : ViewModel() {
 
     /** 退出聊天页 / 回桌面时取消推理 + 清 pending + 释放前台服务 */
     fun cancelInference() {
-        _isTyping.value = false
         _infStatus.value = InfStatus.Idle
         viewModelScope.launch(Dispatchers.Default) {
             runCatching { app.llmEngine.cancel() }

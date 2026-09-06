@@ -13,8 +13,3 @@ val Black = Color(0xFF111214)
 val Accent = Color(0xFF2563EB)
 val AccentDim = Color(0xFFE8EFFF)
 val ErrorRed = Color(0xFFB3261E)
-
-val CodeBlockBg = Color(0xFFF1F2F4)
-val CodeBlockText = Color(0xFF1E2430)
-val UserBubbleBg = Color(0xFFEAF0F6)
-val AssistantBubbleBg = White

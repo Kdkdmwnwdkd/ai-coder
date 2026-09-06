@@ -79,6 +79,7 @@ fun ChatPage(vm: ChatViewModel) {
     val tokenCount by vm.currentTokenCount.collectAsStateWithLifecycle()
     val elapsedSec by vm.inferenceElapsedSec.collectAsStateWithLifecycle()
     val failMsg by vm.failMsgFlow.collectAsStateWithLifecycle()
+    val prefillPercent by vm.prefillPercent.collectAsStateWithLifecycle()
     var input by remember { mutableStateOf("") }
     val listState = rememberLazyListState()
     val ctx = LocalContext.current
@@ -288,7 +289,8 @@ fun ChatPage(vm: ChatViewModel) {
                     InfStatus.Preparing -> Triple(
                         MaterialTheme.colorScheme.surfaceVariant,
                         MaterialTheme.colorScheme.onSurfaceVariant,
-                        "正在准备推理…${formatElapsed(elapsedSec)}"
+                        if (prefillPercent > 0) "正在准备推理…$prefillPercent% · ${formatElapsed(elapsedSec)}"
+                        else "正在准备推理…${formatElapsed(elapsedSec)}"
                     )
                     InfStatus.Running -> Triple(
                         MaterialTheme.colorScheme.primary,

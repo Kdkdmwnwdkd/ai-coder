@@ -23,8 +23,6 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyListScope
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BugReport
@@ -49,14 +47,12 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
-import androidx.compose.material3.TextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -85,7 +81,6 @@ import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
 import com.xuedi.coder.theme.ThemeMode
-import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
@@ -106,9 +101,7 @@ fun SettingsPage(
     currentBg: String?,
     currentAlpha: Float,
     setBg: (String?) -> Unit,
-    setAlpha: (Float) -> Unit,
-    requestImportModel: () -> Unit,
-    requestImportBackground: () -> Unit
+    setAlpha: (Float) -> Unit
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -170,7 +163,6 @@ fun SettingsPage(
                 )
             }
             setBg(uri.toString())
-            requestImportBackground()
         }
     }
 
@@ -209,7 +201,6 @@ fun SettingsPage(
                 ).show()
             }
         }
-        requestImportModel()
     }
 
     var alphaLocal: Float by remember(currentAlpha) { mutableFloatStateOf(currentAlpha) }

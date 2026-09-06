@@ -224,9 +224,6 @@ fun SettingsPage(
     // ---- 诊断运行态 ----
     val diagLines = remember { mutableStateListOf<String>() }
     var diagRunning by remember { mutableStateOf(false) }
-    // 🔴 v1.3.11 方案A：模拟模式开关状态（镜像 LlamaJniEngine.forceMockMode，
-    //    用 remember/mutableStateOf 让 Compose 重组；切换时同步回静态变量）
-    var mockMode by remember { mutableStateOf(LlamaJniEngine.forceMockMode) }
     val diagTsFmt = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.CHINA) }
     fun ts() = diagTsFmt.format(Date())
     fun addLog(line: String) { diagLines.add("[${ts()}] $line") }
@@ -297,53 +294,10 @@ fun SettingsPage(
         }
         item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
 
-        // ---- 分组：模拟模式（防闪退兜底）----
-        item(key = "mock-mode-group") {
-            SectionHeader(title = "🧱 模拟模式（防闪退兜底）")
-        }
-        item(key = "mock-mode-card") {
-            OutlinedCard(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 56.dp)
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "启用模拟回复（不跑真模型，防闪退）",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "ON=逐字返回预设回复，绕过 C++ 引擎；OFF=调用真推理",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = mockMode,
-                        onCheckedChange = { newChecked ->
-                            mockMode = newChecked
-                            LlamaJniEngine.forceMockMode = newChecked
-                            val tip = if (newChecked) "已切换到模拟模式" else "已切换到真实推理模式"
-                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                }
-            }
-        }
-
-        // ---- 分组 2.5：推理偏好开关（方案A/C 用户级回退）----
+        // ---- 分组 2.5：推理偏好开关（用户级 GPU 回退）----
+        //  code279: 模拟模式分组已删除（用户要求：要么真推理要么报错，不要假回复）。
         item(key = "perf-prefs-group") {
-            SectionHeader(title = "🧠 推理偏好（默认模型·GPU加速）")
+            SectionHeader(title = "🧠 推理偏好（GPU加速）")
         }
         item(key = "pref-vulkan") {
             val app = App.instance
@@ -399,59 +353,7 @@ fun SettingsPage(
                 }
             }
         }
-        item(key = "pref-fast-15b") {
-            val app = App.instance
-            val (useFast, setUseFast) = remember {
-                mutableStateOf(
-                    runBlocking(Dispatchers.IO) {
-                        runCatching { app.modelPrefs.getUseFast1_5B() }
-                            .getOrDefault(ModelPrefsStore.DEFAULT_USE_FAST_1_5B)
-                    }
-                )
-            }
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 56.dp)
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "默认使用 1.5B 快模式",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "仅在「还没手动选过模型」时生效。ON=默认加载 Qwen2.5-1.5B（Prefill ~11s），OFF=默认 3B（质量更高）。",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = useFast,
-                        onCheckedChange = { checked ->
-                            setUseFast(checked)
-                            (app as? CoroutineScope)?.launch(Dispatchers.IO) {
-                                runCatching { app.modelPrefs.setUseFast1_5B(checked) }
-                            }
-                            val tip = if (checked)
-                                "⚡ 以后未选模型时默认优先 1.5B（下次冷启动生效）"
-                            else
-                                "📚 默认模型改回 3B（下次冷启动生效）"
-                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                }
-            }
-        }
+        // code279: 「默认使用 1.5B 快模式」开关已删除（用户要求），默认模型固定优先 3B。
 
         // ---- 分组 3：推理诊断 ----
         item(key = "diag-group") {
@@ -470,7 +372,7 @@ fun SettingsPage(
                 appendLine("CPU_ABI2：${android.os.Build.CPU_ABI2}（arm64-v8a 必为空）")
                 appendLine()
                 appendLine("═══════════════════════════════════════════")
-                appendLine("当前激活引擎：LlamaJniEngine(b5180 · v1.3.25-fix22 官方最简)；模拟模式=${LlamaJniEngine.forceMockMode}")
+                appendLine("当前激活引擎：LlamaJniEngine(llama.cpp b10819 · code278/279，模拟模式已删除)")
                 appendLine("当前模型：${app.modelManager.lastLoadedPath() ?: "<未加载>"}")
                 appendLine("—— Llama 引擎 ——")
                 val llamaSt = LlamaJniEngine.libStatus()

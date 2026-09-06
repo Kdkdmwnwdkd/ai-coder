@@ -24,7 +24,7 @@ import kotlin.coroutines.CoroutineContext
  * 【v1.3.25-fix22】单引擎版 Application：
  *   · 彻底移除自写 Qwen 推理器（qwen-jni + QwenInferEngine），按用户死命令物理删除所有自写 C++ 推理代码
  *   · 唯一引擎 = LlamaJniEngine（基于官方 llama.cpp b5180）
- *   · 保留 MockLlmEngine fallback（仅运行期 nativeChat 失败时兜底，不替代真推理）
+ *   · code279: MockLlmEngine 已删除（nativeChat 失败直接报 Error，不吐假回复）
  */
 class App : Application(), ImageLoaderFactory, CoroutineScope {
 

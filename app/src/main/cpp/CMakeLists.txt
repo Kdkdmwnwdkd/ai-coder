@@ -111,14 +111,14 @@ if (ANDROID)
         set(_VK_TRIPLE i686-linux-android)
     endif ()
     set(_VK_INC "${CMAKE_SYSROOT}/usr/include")
-    set(_VK_LIB "${CMAKE_SYSROOT}/usr/lib/${_VK_TRIPLE}/${ANDROID_PLATFORM_LEVEL}/libvulkan.so")
-    if (NOT EXISTS "${_VK_LIB}")
-        # API 目录兜底：取该 ABI 下最高 API 版本的 stub
-        file(GLOB _VK_LIBS "${CMAKE_SYSROOT}/usr/lib/${_VK_TRIPLE}/*/libvulkan.so")
-        if (_VK_LIBS)
-            list(SORT _VK_LIBS)
-            list(GET _VK_LIBS -1 _VK_LIB)
-        endif ()
+    # code278-fix6：stub 按 API 分级——≤27 只有 Vulkan 1.0 符号（nm 实测 API26 stub 无
+    # vkGetPhysicalDeviceFeatures2），b10819 vulkan-hpp 直接引用 1.1 符号 → ld.lld undefined。
+    # 必须链接最高 API stub；运行时 Android 函数符号 lazy binding，老设备 loader 版本低
+    # 时 ggml 探测 apiVersion<1.2 自动禁用后端，不会调到缺失符号，安全。
+    file(GLOB _VK_LIBS "${CMAKE_SYSROOT}/usr/lib/${_VK_TRIPLE}/*/libvulkan.so")
+    if (_VK_LIBS)
+        list(SORT _VK_LIBS)
+        list(GET _VK_LIBS -1 _VK_LIB)
     endif ()
     if (EXISTS "${_VK_INC}/vulkan/vulkan.h" AND EXISTS "${_VK_LIB}")
         set(Vulkan_INCLUDE_DIR "${_VK_INC}" CACHE PATH "NDK vulkan headers (xuedi)" FORCE)

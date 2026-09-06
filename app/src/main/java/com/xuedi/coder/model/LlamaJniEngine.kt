@@ -24,7 +24,7 @@ import kotlinx.coroutines.launch
  *  2) 移除了 nativeChat() 的阻塞式调用：因为 C++ 层会在 while(decode) 循环里**反复**回调 Java，
  *     不再是"调用一次返回字符串"的模型。
  *  3) 新增 nativeChatCancel() 支持用户中途取消（C++ 层每次 decode 前判断 g_cancel 原子标志）。
- *  4) 当 JNI 层 native* 方法不存在时（例如 .so 损坏），仍 fallback MockLlmEngine，保证不崩。
+ *  4) code279: Mock 引擎已删除；native 异常时 chatFlow 直接返回 ChatChunk.Error（不静默吐假回复）。
  *
  * 配套 C++ 实现：app/src/main/cpp/llama_jni.cpp。
  *
@@ -43,14 +43,6 @@ class LlamaJniEngine : LlmEngine {
         @Volatile private var libLoaded: Boolean? = null
         /** lib 加载失败时的错误信息（给 SettingsPage / chatFlow 诊断用） */
         @Volatile private var libLoadError: String? = null
-
-        /**
-         * 🔴 v1.3.11 方案A（治标）：强制模拟模式开关。
-         *   true=chatFlow 不调 C++ nativeChat，直接返回 MockLlmEngine 的预设回复流，
-         *   彻底绕过 llama.cpp b4835 arm64 batch 处理 SIGABRT（n_ctx/n_batch 调优均无效）。
-         *   SettingsPage 诊断卡上方 Switch 切换。等方案B（升级 llama.cpp b5179+）后再关。
-         */
-        @Volatile @JvmField var forceMockMode = false
 
         /** 尝试加载 .so；返回 true=已加载可用；false=加载失败。 */
         fun ensureLibLoaded(): Boolean = synchronized(this) {
@@ -95,17 +87,6 @@ class LlamaJniEngine : LlmEngine {
 
     /** 上一次 loadModel 的错误信息（成功时返回 null） */
     fun lastLoadError(): String? = lastLoadError
-
-    // ---- fallback 引擎（只在 nativeChat 运行期失败时兜底，ctx==0 不再 fallback！）----
-    private val fallbackLock = Any()
-    @Volatile private var fallback: MockLlmEngine? = null
-    private fun mkFallbackIfNeed(): MockLlmEngine = fallback
-        ?: synchronized(fallbackLock) {
-            fallback ?: run {
-                Log.w(TAG, "🧱 进入 fallback 模式（nativeChat 运行期失败），回答由 MockLlmEngine 出具占位内容")
-                MockLlmEngine().also { fallback = it }
-            }
-        }
 
     init { ensureLibLoaded() }
 
@@ -386,16 +367,6 @@ class LlamaJniEngine : LlmEngine {
     // =================================================================
 
     override fun chatFlow(system: String, user: String): Flow<ChatChunk> {
-        // ═══════════════════════════════════════════════════════════════
-        // 🔴 v1.3.11 方案A（治标）：forceMockMode=true 时直接返回 MockLlmEngine 的预设回复流，
-        //    彻底绕过 llama.cpp b4835 arm64 batch 处理 SIGABRT（n_ctx/n_batch 调优均无效）。
-        //    SettingsPage 诊断卡上方 Switch 切换。等方案B（升级 llama.cpp b5179+）后再关。
-        // ═══════════════════════════════════════════════════════════════
-        if (forceMockMode) {
-            Log.w(TAG, "🧱 forceMockMode=true → 绕过 C++ nativeChat，返回 MockLlmEngine 预设回复流")
-            return MockLlmEngine().chatFlow(system, user)
-        }
-
         // —— 🔴 v1.3.25-stable: 插件 onPreSend 链（纯 Kotlin，失败不影响主链路）——
         val finalUser = runPreSend(user)
         if (finalUser != user) {
@@ -528,11 +499,13 @@ class LlamaJniEngine : LlmEngine {
                 }
                 if (ok.isFailure) {
                     val t = ok.exceptionOrNull()
-                    Log.e(TAG, "nativeChat 异常：${t?.javaClass?.simpleName} - ${t?.message}；fallback Mock")
-                    // native 抛错（常见：native 方法签名对不上 UnsatisfiedLinkError）
-                    // → 立即 fallback Mock，UI 不空白
+                    Log.e(TAG, "nativeChat 异常：${t?.javaClass?.simpleName} - ${t?.message}")
+                    // code279: Mock 引擎已删除，native 抛错直接回报 Error（常见：签名对不上 UnsatisfiedLinkError）
+                    trySend(ChatChunk.Error(
+                        t ?: RuntimeException("nativeChat failed"),
+                        "JNI 调用失败：${t?.javaClass?.simpleName} - ${t?.message}\n请更新到最新版 APK 后重试。"
+                    ))
                     channel.close()
-                    mkFallbackIfNeed().chatFlow(system, finalUser).collect { send(it) }
                 }
             }
             // 🔴 v1.3.25-fix16: 首 token 超时从 45s 提到 120s
@@ -586,7 +559,6 @@ class LlamaJniEngine : LlmEngine {
             Log.i(TAG, "nativeRelease ctx=$ctx 完成")
         }.onFailure { Log.w(TAG, "nativeRelease 异常：${it.message}") }
         ctx = 0L
-        runCatching { fallback?.release() }
     }
 
     override fun cancel() {
@@ -594,7 +566,6 @@ class LlamaJniEngine : LlmEngine {
         // JNI 端：nativeChatCancel 置原子 flag → C++ while(decode) 下次判断跳出；
         // callbackFlow 的 invokeOnCompletion 会取消 job 并在 awaitClose 后自动关流。
         if (ctx != 0L) runCatching { nativeChatCancel(ctx) }
-        runCatching { fallback?.cancel() }
     }
 
     // =================================================================

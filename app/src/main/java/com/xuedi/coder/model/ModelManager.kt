@@ -52,41 +52,31 @@ class ModelManager(private val ctx: Context) {
     suspend fun getSelected(): ModelEntity? = dao.getSelected()
 
     // ======================================================================
-    // 🆕 v1.3.26-gpu1 方案 C：根据用户偏好路由「默认模型」
+    // 🆕 v1.3.26-gpu1 方案 C：自动路由「默认模型」
     //  —— 当用户还没手动选过模型（dao.getSelected == null）时才生效，
     //     绝不覆盖用户已经明确设置的 selected；如果库里匹配不到合适的模型，
     //     也保持 null，让上游走"请先导入模型"的原有 Toast 流程。
+    //  code279: 1.5B 快模式偏好已删除（用户要求），固定优先 3B。
     // ======================================================================
-    private fun nameMatches1_5B(name: String): Boolean {
-        val n = name.lowercase()
-        return ("1.5b" in n || "1_5b" in n || "1-5b" in n) && "qwen" in n
-    }
     private fun nameMatches3B(name: String): Boolean {
         val n = name.lowercase()
         return n.contains("3b") && !n.contains("1.5b") && !n.contains("1_5b") && !n.contains("1-5b") && "qwen" in n
     }
 
     /**
-     * 方案 C 入口：如果用户没手动选过模型，按偏好自动挑一个 1.5B / 3B 作为启动默认。
+     * 方案 C 入口：如果用户没手动选过模型，自动挑一个 3B 作为启动默认（没有 3B 就用第一个）。
      * 返回 true = 已经自动选中并返回 selected 实体；false = 没选中（没模型/用户手动选过）。
      */
     suspend fun autoSelectInitialByPrefs(): Pair<Boolean, ModelEntity?> {
         val current = dao.getSelected()
         if (current != null) return false to current // 用户已明确选择 → 完全尊重
-        val preferFast = (ctx.applicationContext as? App)?.modelPrefs?.getUseFast1_5B()
-            ?: ModelPrefsStore.DEFAULT_USE_FAST_1_5B
         val all = dao.getAll()
         if (all.isEmpty()) return false to null
-        val target = if (preferFast) {
-            all.firstOrNull { nameMatches1_5B(it.fileName) || nameMatches1_5B(it.displayName) }
-                ?: all.firstOrNull() // 没 1.5B 就随便挑第一个（有啥用啥）
-        } else {
-            all.firstOrNull { nameMatches3B(it.fileName) || nameMatches3B(it.displayName) }
-                ?: all.firstOrNull() // 没 3B 就随便挑第一个
-        }
+        val target = all.firstOrNull { nameMatches3B(it.fileName) || nameMatches3B(it.displayName) }
+            ?: all.firstOrNull() // 没 3B 就随便挑第一个（有啥用啥）
         target ?: return false to null
         dao.selectOnly(target.id)
-        Log.i(TAG, "autoSelectInitialByPrefs: preferFast=$preferFast → 选中 ${target.displayName} id=${target.id}")
+        Log.i(TAG, "autoSelectInitialByPrefs: 选中 ${target.displayName} id=${target.id}")
         return true to target
     }
 

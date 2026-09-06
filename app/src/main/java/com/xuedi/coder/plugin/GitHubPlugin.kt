@@ -39,6 +39,8 @@ import android.os.Build as AndroidBuild
  *   @github 最新commit           → 显示 HEAD sha + message
  *   @github 最近 runs            → 列出最近 5 次 workflow run
  *   @github 提交 <路径> + 代码     → Contents API 直推 dev 分支，push 自动触发构建（code100）
+ *   @github 查看 <路径|链接>      → 只读看文件内容；自己仓库写路径，别的公开仓库粘 github 链接（code277）
+ *   @github 目录 [路径|链接]      → 只读列目录；不填路径列自己仓库根目录（code277）
  *   @github                      → 不带指令 → 自动走 "看状态" 作为默认
  *
  * 依赖：GitHub Personal Access Token（需要 repo + workflow + actions:read 权限），
@@ -123,6 +125,10 @@ class GitHubPlugin(
     private suspend fun executeCommand(cmd: String): String = withContext(Dispatchers.IO) {
         val c = cmd.lowercase()
         when {
+            // code277: 只读查看（看自己仓库 / 粘链接看任意公开仓库）。必须放最前——
+            //   路径里可能含 build/run/apk 等关键字（如 build.gradle.kts），放后面会被触发编译抢走。
+            c.startsWith("查看") || c.startsWith("看代码") || c.startsWith("view") || c.startsWith("cat ") -> viewFile(cmd)
+            c.startsWith("目录") || c.startsWith("列表") || c.startsWith("ls") || c.startsWith("tree") -> listDir(cmd)
             // code100: 提交代码 → 走 Contents API 推送到 dev 分支（push 自动触发构建）
             // 必须在 "commit/提交" 之前判断，否则会被 fetchLatestCommit 抢走
             c.contains("上传") || c.contains("push代码") ||
@@ -361,6 +367,104 @@ class GitHubPlugin(
   时间: $date
   $msg"""
         }
+    }
+
+    // ---------- code277: 只读查看（看自己仓库 / 粘链接看任意公开仓库，绝不写） ----------
+
+    /** 解析目标仓库+路径。支持三种写法：裸路径(自己仓库) / owner/repo:path / github.com 网页链接 */
+    private data class RepoTarget(val owner: String, val repo: String, val ref: String?, val path: String, val link: String)
+
+    private fun parseRepoTarget(cmd: String, verbRe: Regex): RepoTarget? {
+        var arg = cmd.replace(verbRe, "").trim().trim('`', '"', '\'')
+        if (arg.isBlank()) return null
+        // 1) GitHub 网页链接：…/blob/<分支>/<路径> 或 …/tree/<分支>/<路径>
+        Regex("""https?://github\.com/([^/\s]+)/([^/\s]+)/(?:blob|tree)/([^/\s]+)/(\S+)""").find(arg)?.let { m ->
+            val (o, r, b, p) = m.destructured
+            return RepoTarget(o, r.removeSuffix(".git"), b, p, "https://github.com/$o/${r.removeSuffix(".git")}/blob/$b/$p")
+        }
+        // 2) owner/repo:path
+        Regex("""^([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+):(.+)$""").find(arg)?.let { m ->
+            val (o, r, p) = m.destructured
+            return RepoTarget(o, r, null, p.trim(), "https://github.com/$o/$r")
+        }
+        // 3) 裸路径 → 自己仓库，ref=dev（活跃开发分支）
+        val p = arg.split(Regex("""\s+""")).firstOrNull() ?: return null
+        return RepoTarget(tokenStore.owner, tokenStore.repo, "dev", p,
+            "https://github.com/${tokenStore.owner}/${tokenStore.repo}/blob/dev/$p")
+    }
+
+    /** @github 查看 <路径|链接> —— 拉文件内容显示在聊天里（超 3500 字截断） */
+    private suspend fun viewFile(cmd: String): String = withContext(Dispatchers.IO) {
+        val t = parseRepoTarget(cmd, Regex("""^[^\s]*?(查看|看代码|view|cat)""", RegexOption.IGNORE_CASE))
+            ?: return@withContext "❌ 没识别到目标\n\n用法：\n@github 查看 app/build.gradle.kts\n@github 查看 https://github.com/owner/repo/blob/分支/路径"
+        val encPath = t.path.split("/").joinToString("/") { URLEncoder.encode(it, "UTF-8") }
+        val url = "https://api.github.com/repos/${t.owner}/${t.repo}/contents/$encPath" +
+            (t.ref?.let { "?ref=$it" } ?: "")
+        val req = Request.Builder().url(url).get()
+            .header("Authorization", authHeader)
+            // raw accept：文件直接返回原文，目录返回 JSON 数组
+            .header("Accept", "application/vnd.github.raw")
+            .build()
+        http.newCall(req).execute().use { r ->
+            val body = r.body?.string() ?: ""
+            when {
+                r.code == 404 -> return@withContext "❌ 404：文件不存在，或仓库是私有的（私有仓库看不了）\n${t.owner}/${t.repo}/${t.path}"
+                !r.isSuccessful -> return@withContext "❌ 读取失败：HTTP ${r.code}"
+            }
+            val trim = body.trimStart()
+            if (trim.startsWith("[")) {
+                // 是个目录，顺手按目录列出
+                return@withContext formatDirListing(t, body)
+            }
+            val lines = body.lines()
+            val head = "📄 ${t.owner}/${t.repo}:${t.path}${t.ref?.let { "（分支 $it）" } ?: ""} · 共 ${lines.size} 行\n\n"
+            val max = 3500
+            val tail = if (body.length > max) "\n\n…（手机端只显示前 ${max} 字，完整版：\n${t.link}）" else ""
+            return@withContext head + body.take(max) + tail
+        }
+    }
+
+    /** @github 目录 <路径|链接> —— 列目录（不填路径列根目录） */
+    private suspend fun listDir(cmd: String): String = withContext(Dispatchers.IO) {
+        val t = parseRepoTarget(cmd, Regex("""^[^\s]*?(目录|列表|ls|tree)""", RegexOption.IGNORE_CASE))
+            ?: RepoTarget(tokenStore.owner, tokenStore.repo, "dev", "",
+                "https://github.com/${tokenStore.owner}/${tokenStore.repo}/tree/dev")
+        val encPath = t.path.split("/").filter { it.isNotBlank() }.joinToString("/") { URLEncoder.encode(it, "UTF-8") }
+        val url = "https://api.github.com/repos/${t.owner}/${t.repo}/contents/$encPath" +
+            (t.ref?.let { "?ref=$it" } ?: "")
+        val req = Request.Builder().url(url).get()
+            .header("Authorization", authHeader)
+            .header("Accept", "application/vnd.github+json")
+            .build()
+        http.newCall(req).execute().use { r ->
+            val body = r.body?.string() ?: ""
+            when {
+                r.code == 404 -> return@withContext "❌ 404：目录不存在，或仓库是私有的\n${t.owner}/${t.repo}/${t.path}"
+                !r.isSuccessful -> return@withContext "❌ 读取失败：HTTP ${r.code}"
+            }
+            if (body.trimStart().startsWith("{")) {
+                return@withContext "ℹ️ 这是文件不是目录，改用：\n@github 查看 ${t.path}"
+            }
+            return@withContext formatDirListing(t, body)
+        }
+    }
+
+    private fun formatDirListing(t: RepoTarget, jsonArr: String): String {
+        val arr = org.json.JSONArray(jsonArr)
+        if (arr.length() == 0) return "📁 ${t.owner}/${t.repo}/${t.path}（空目录）"
+        val dirs = mutableListOf<String>()
+        val files = mutableListOf<String>()
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            val name = o.optString("name")
+            if (o.optString("type") == "dir") dirs.add("📁 $name/")
+            else files.add("📄 $name (${o.optLong("size") / 1024}KB)")
+        }
+        val sb = StringBuilder("📁 ${t.owner}/${t.repo}/${t.path.ifBlank { "（根目录）" }}${t.ref?.let { " · 分支 $it" } ?: ""}\n\n")
+        (dirs + files).take(60).forEach { sb.append(it).append("\n") }
+        if (dirs.size + files.size > 60) sb.append("… 共 ${dirs.size + files.size} 项，只显示前 60\n")
+        sb.append("\n看文件：@github 查看 ${t.path.ifBlank { "" }}<文件名>")
+        return sb.toString().trimEnd()
     }
 
     // ---------- 通知 / Toast ----------

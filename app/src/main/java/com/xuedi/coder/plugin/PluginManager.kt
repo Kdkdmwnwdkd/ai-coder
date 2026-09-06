@@ -216,3 +216,10 @@ class PluginManager(private val ctx: Context) {
         """.trimIndent()
     }
 }
+
+/** ChatPlugin 接口没声明 displayName，这里补一个扩展方法（原 ToolExecutionPlugin.kt，code277 动作模式删除后挪到此处）。 */
+fun com.xuedi.coder.model.ChatPlugin.displayName(): String = when (this) {
+    is WebSearchPlugin -> this.name()
+    is GitHubPlugin -> this.name()
+    else -> this::class.java.simpleName
+}

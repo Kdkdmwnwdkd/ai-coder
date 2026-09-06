@@ -283,13 +283,14 @@ class GitHubPlugin(
             if (!r.isSuccessful) return "❌ 拿 artifact 列表失败：HTTP ${r.code}"
             val arr = JSONObject(r.body?.string() ?: "{}").optJSONArray("artifacts")
                 ?: return "ℹ️ 这个 run 没有 artifact"
-            // 优先找 .apk 的那个
+            // code102 修复：artifact 名叫 "AI编程助手-debug-apk"，endsWith(".apk") 永远 false，
+            //   兜底拿第一个会拿到 gradle-build-debug-log（zip 里只有日志）→ 改用 contains("apk") 匹配
             for (i in 0 until arr.length()) {
                 val o = arr.getJSONObject(i)
-                if (o.optString("name").endsWith(".apk")) return@use o.optLong("id")
+                if (o.optString("name").contains("apk", ignoreCase = true)) return@use o.optLong("id")
             }
-            // 没有直接叫 apk 的就取第一个
-            if (arr.length() > 0) arr.getJSONObject(0).optLong("id") else -1
+            // 没有 apk artifact 直接报错，不瞎拿（日志 zip 对用户没用）
+            -1L
         }
         if (artifactId < 0) return "ℹ️ 没找到 APK artifact"
 

@@ -695,59 +695,7 @@ fun SettingsPage(
             }
         }
 
-        // ─────────────────────────────────────────────────
-        // 🆕 code78 分组：无障碍系统级操控
-        // ─────────────────────────────────────────────────
-        item(key = "acc-group") {
-            SectionHeader(title = "👁️ 无障碍系统级操控（AI 帮你打开 App 搜索）")
-        }
-        item(key = "acc-card") {
-            val ctx = LocalContext.current
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                shape = RoundedCornerShape(16.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
-                )
-            ) {
-                Column(Modifier.padding(16.dp)) {
-                    Text(
-                        "开启后，AI 能帮你做：\n" +
-                        "  • 打开快手后自动点搜索框输入「斗罗大陆」\n" +
-                        "  • 帮你在聊天框输入一段文字\n" +
-                        "  • 上下滑屏幕、返回、Home\n\n" +
-                        "⚠️  这是 Android 系统级权限，首次必须手动点一下「允许」，之后永久生效。\n" +
-                        "🔒 所有操作都在手机本地执行，不上传任何数据。",
-                        fontSize = 12.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        lineHeight = 18.sp
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Button(
-                            onClick = {
-                                val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                ctx.startActivity(intent)
-                            },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("🔧 去设置里授权无障碍", fontSize = 12.sp)
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                val intent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
-                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                                ctx.startActivity(intent)
-                            },
-                            shape = RoundedCornerShape(12.dp)
-                        ) {
-                            Text("📚 关于权限说明", fontSize = 12.sp)
-                        }
-                    }
-                }
-            }
-        }
+        // code277: 「无障碍系统级操控」分组已随动作模式整体删除
 
         // ---- Build 信息 ----
         item(key = "build-info") {
@@ -1598,7 +1546,6 @@ private suspend fun grabLlamaJniLogcatImpl(): List<String> = withContext(kotlinx
         "-s",
         "LlamaJni:V",
         "LlamaJniEngine:V",
-        "AccessService:V",      // 无障碍服务执行日志（open_app/send_message 等）
         "DEBUG:*",          // 系统崩溃记录（SIGSEGV/tombstone 的开头几行常打在 DEBUG tag）
         "AndroidRuntime:E",
         "ActivityManager:I"

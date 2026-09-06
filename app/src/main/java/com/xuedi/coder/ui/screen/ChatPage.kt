@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -38,7 +37,6 @@ import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalDrawerSheet
 import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -59,9 +57,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import android.widget.Toast
 import kotlinx.coroutines.launch
-import com.xuedi.coder.action.ActionExecutor
 import com.xuedi.coder.data.ChatRole
 import com.xuedi.coder.vm.ChatViewModel
 import com.xuedi.coder.vm.InfStatus
@@ -283,25 +279,7 @@ fun ChatPage(vm: ChatViewModel) {
                                         else            -> MaterialTheme.colorScheme.onSurface
                                     }
                                 )
-                                if (msg.actions.isNotEmpty()) {
-                                    Spacer(Modifier.height(8.dp))
-                                    LazyRow(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                                        itemsIndexed(msg.actions, key = { idx, act -> "${msg.id}_act_$idx" }) { _, act ->
-                                            OutlinedButton(
-                                                onClick = {
-                                                    val res = ActionExecutor.executeAll(ctx, listOf(act))
-                                                    val t = if (res.second == null)
-                                                        "✅ ${ActionExecutor.friendlyName(act.name)}"
-                                                    else
-                                                        "❌ ${res.second}"
-                                                    Toast.makeText(ctx, t, Toast.LENGTH_SHORT).show()
-                                                }
-                                            ) {
-                                                Text(ActionExecutor.friendlyName(act.name), fontSize = 12.sp)
-                                            }
-                                        }
-                                    }
-                                }
+                                // code277: 动作模式已删除，不再有动作按钮行
                             }
                         }
                         if (!isUser) Spacer(Modifier.weight(1f))  // AI 气泡靠左，不贴右

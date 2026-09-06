@@ -463,9 +463,13 @@ class GitHubPlugin(
                 val ch = NotificationChannel("gh_download", "GitHub 下载完成", NotificationManager.IMPORTANCE_LOW)
                 nm.createNotificationChannel(ch)
             }
+            // code274 修复：file:// URI 在 Android 7+ 点开通知直接 FileUriExposedException 闪退，
+            //   改用 FileProvider content://（file_paths.xml 已加 external-path）
+            val uri = androidx.core.content.FileProvider.getUriForFile(
+                ctx, "${ctx.packageName}.fileprovider", apk
+            )
             val intent = Intent(Intent.ACTION_VIEW).apply {
-                val path = android.net.Uri.fromFile(apk)
-                setDataAndType(path, "application/vnd.android.package-archive")
+                setDataAndType(uri, "application/vnd.android.package-archive")
                 addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
                 addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
             }
@@ -473,13 +477,21 @@ class GitHubPlugin(
             val n = NotificationCompat.Builder(ctx, "gh_download")
                 .setSmallIcon(android.R.drawable.stat_sys_download_done)
                 .setContentTitle("APK 下载完成")
-                .setContentText("${apk.name} (${apk.length() / 1024 / 1024}MB)")
+                .setContentText("${apk.name} (${apk.length() / 1024 / 1024}MB) 点我安装")
                 .setContentIntent(pi)
                 .setAutoCancel(true)
                 .build()
             nm.notify(6789, n)
         }
-        Toast.makeText(ctx, "APK 下载完成：${apk.name}", Toast.LENGTH_LONG).show()
+        // code274 修复：本函数在 Dispatchers.IO 线程被调，直接 Toast 会抛
+        //   "Can't toast on a thread that has not called Looper.prepare()"，
+        //   异常被 downloadLatestApk 的 catch 吞成「❌ 下载失败」假象（APK 其实已下好）。
+        //   必须切到主线程弹。
+        android.os.Handler(android.os.Looper.getMainLooper()).post {
+            runCatching {
+                Toast.makeText(ctx, "APK 下载完成：${apk.name}", Toast.LENGTH_LONG).show()
+            }
+        }
     }
 
     /** 🧑‍💻 随机 sleep —— baseMs ± jitterMs */

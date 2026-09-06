@@ -59,6 +59,14 @@ class GitHubPlugin(
         .callTimeout(45, TimeUnit.SECONDS)
         .build()
 
+    // code101: 下载 artifact 专用 client —— 21MB zip 走 api.github.com，4G 下 45s 必超时
+    private val downloadHttp by lazy {
+        http.newBuilder()
+            .readTimeout(180, TimeUnit.SECONDS)
+            .callTimeout(280, TimeUnit.SECONDS)
+            .build()
+    }
+
     private val authHeader: String get() = "Bearer ${tokenStore.token}"
     private val baseApi: String get() = "https://api.github.com/repos/${tokenStore.owner}/${tokenStore.repo}"
 
@@ -95,10 +103,10 @@ class GitHubPlugin(
         // 立刻 return 空字符串（非阻塞），让 chatFlow 跳过 LLM 推理；
         // 后台协程异步调 GitHub API，结果通过 resultCallback 回传到助手消息。
         scope.launch(Dispatchers.IO + SupervisorJob()) {
-            val result = withTimeoutOrNull(60_000L) {
+            val result = withTimeoutOrNull(300_000L) {
                 runCatching { executeCommand(cmd.ifBlank { "status" }) }
                     .getOrElse { "❌ 执行失败：${it.message}" }
-            } ?: "❌ GitHub API 请求超时（60s），检查网络或 token 权限"
+            } ?: "❌ GitHub API 请求超时（300s），检查网络或 token 权限"
             if (result.isNotBlank()) {
                 withContext(Dispatchers.Main.immediate) {
                     runCatching { resultCallback(result) }
@@ -119,10 +127,12 @@ class GitHubPlugin(
             // 必须在 "commit/提交" 之前判断，否则会被 fetchLatestCommit 抢走
             c.contains("上传") || c.contains("push代码") ||
                 (c.contains("提交") && looksLikeFileCommit(cmd)) -> commitFile(cmd)
+            // code101 修复："最近 runs" 的 "runs" 含子串 "run"，必须先判列表再判触发，
+            //   否则 @github 最近 runs 被 contains("run") 抢走去 triggerWorkflow → 422
+            c.contains("list") || c.contains("最近") || c.contains("runs") -> listRecentRuns()
             c.contains("触发") || c.contains("编译") || c.contains("build") || c.contains("run") -> triggerWorkflow()
             c.contains("下载") || c.contains("apk") || c.contains("artifact") -> downloadLatestApk()
             c.contains("commit") || c.contains("提交") -> fetchLatestCommit()
-            c.contains("list") || c.contains("最近") || c.contains("runs") -> listRecentRuns()
             c.contains("状态") || c.contains("进度") || c.contains("status") -> fetchLatestRunStatus()
             else -> fetchLatestRunStatus()  // 默认看状态
         }
@@ -296,7 +306,7 @@ class GitHubPlugin(
 
         try {
             android.util.Log.i("GitHubPlugin", "📥 开始下载 artifact zip → ${tmpZip.absolutePath}")
-            http.newCall(req3).execute().use { resp ->
+            downloadHttp.newCall(req3).execute().use { resp ->
                 if (!resp.isSuccessful) return "❌ 下载失败：HTTP ${resp.code}"
                 resp.body?.byteStream()?.use { stream ->
                     FileOutputStream(tmpZip).use { out -> stream.copyTo(out) }
@@ -385,7 +395,7 @@ class GitHubPlugin(
             if (content.startsWith("```") && i >= 0) s.substring(i + 1) else s
         }.removeSuffix("```").trim()
         if (content.isBlank()) {
-            return@withContext "❌ 文件内容为空\n\n路径已识别：$path\n请把完整文件内容贴在路径下面（可用 ``` 围栏）"
+            return@withContext "❌ 文件内容为空\n\n路径已识别：$path\n\n⚠️ 路径和内容必须写在【同一条消息】里：\n第一行：@github 提交 <路径>\n第二行起：完整文件内容（可用 ``` 围栏）"
         }
         if (content.length > 900_000) {
             return@withContext "❌ 文件过大（${content.length / 1024}KB，限 900KB）\n大文件请分批或走电脑端提交"

@@ -49,6 +49,10 @@ static constexpr int   PREFILL_BATCH_MAX = 1024;// 批量 prefill 单次 token �
 static constexpr int   DEFAULT_MAX_GEN = 2048;  // v1.3.25-stable: 800 → 2048，给更长对话留空间
 static constexpr int   EOS_GUARD_STEPS = 32;    // v1.3.25-stable: argmax 采样下"生成 7 token 就 EOS"的根治：前 32 步硬禁 EOS
 static constexpr int   N_KV_MAX_SHIFT  = 0;     // 预留
+// code297: 批量崩溃锁的"构建标签"——锁内容里带此标签才对当前构建永久生效；
+//   旧构建（如 Vulkan 时代）签发的锁 → 清除一次并重试批量（重试前重新先写带本标签的锁，
+//   若再崩则本构建永久自锁，保护机制不变）。
+static constexpr const char* BATCH_LOCK_TAG = "code297-cpu-novulkan";
 
 // 🔴 v1.3.25-perf1: Prefill 模式 — 给 Java 诊断框 / 日志用（prefMode 字段）
 static constexpr const char* PREF_MODE_STEPBYSTEP = "STEPx1";  // 逐 token 兜底（fallback 或批量未试）
@@ -541,24 +545,37 @@ static void nativeChat_inner(
     //   历史：b5180 CPU 后端批量 decode 在魅族20 SIGSEGV（RoPE 硬编码假设与 Qwen2 不匹配），永久禁用。
     //   b10819 距 b5180 已 5600+ 个 release，attn/RoPE 路径多次重写（code296: Vulkan 已删，批量走 CPU 后端）。
     //   🔒 崩溃自锁保护（核心安全措施）：
-    //     尝试批量前先写锁文件 <model>.batch_bad ——
+    //     尝试批量前先写锁文件 <model>.batch_bad（内容含本构建标签 BATCH_LOCK_TAG）——
     //       · 成功          → 删锁，批量继续可用
-    //       · ret != 0      → 保留锁 + 清 KV + 逐 token 兜底，以后不再尝试
-    //       · 真 SIGSEGV    → 锁残留，下次启动检测到 → 永久逐 token（最多只崩这一次）
+    //       · ret != 0      → 保留锁 + 清 KV + 逐 token 兜底，本构建不再尝试
+    //       · 真 SIGSEGV    → 锁残留，下次启动检测到 → 逐 token（最多只崩这一次）
+    //   code297: 锁认构建标签——旧构建签发的锁视为陈旧，清除后重试一次；
+    //     避免历史崩溃（Vulkan 时代）让新二进制永远跑慢速路径。
     {
         bool batch_ok    = false;
         bool batch_tried = false;  // v1.3.25-perf2 fix: 是否"真的进入过批量尝试分支"。只有 tried+failed 才叫 BATCH_FB。
         const int N = (int)tokens.size();
         const std::string batchLock = st->model_path + ".batch_bad";
-        const bool batch_locked = access(batchLock.c_str(), F_OK) == 0;
+        bool batch_locked = access(batchLock.c_str(), F_OK) == 0;
         if (batch_locked) {
-            LOGI("🔒 PREFILL-BATCH: 检测到批量崩溃锁（%s）→ 永久使用逐 token 安全路径", batchLock.c_str());
+            // code297: 锁认构建标签——只有本构建签发的锁才永久生效；
+            //   旧构建（Vulkan 时代）遗留的锁 → 清除一次，给本构建一次批量重试机会
+            char lockBuf[256] = {0};
+            FILE* rf = fopen(batchLock.c_str(), "r");
+            if (rf) { (void)fread(lockBuf, 1, sizeof(lockBuf) - 1, rf); fclose(rf); }
+            if (strstr(lockBuf, BATCH_LOCK_TAG)) {
+                LOGI("🔒 PREFILL-BATCH: 检测到本构建批量崩溃锁（%s）→ 永久使用逐 token 安全路径", batchLock.c_str());
+            } else {
+                LOGW("🔓 PREFILL-BATCH: 锁来自旧构建（非 %s）→ 清除陈旧锁，本构建获得一次批量重试机会", BATCH_LOCK_TAG);
+                remove(batchLock.c_str());
+                batch_locked = false;
+            }
         }
         if (!batch_locked && N > 1 && N <= PREFILL_BATCH_MAX) {
             batch_tried = true;
             // 🔒 先写锁再尝试：若接下来 SIGSEGV，锁残留 → 下次启动永久禁用批量
             FILE* lf = fopen(batchLock.c_str(), "w");
-            if (lf) { fputs("batch prefill crashed once, stay in STEPx1", lf); fclose(lf); }
+            if (lf) { fprintf(lf, "batch prefill crashed once, stay in STEPx1 [%s]", BATCH_LOCK_TAG); fclose(lf); }
             LOGI("🔬 PREFILL-BATCH: 尝试一次性 prefill（N=%d tokens）。若 ret!=0 立即 fallback 逐 token", N);
             // 单独构造临时 batch_all（不影响下面的 SAFE batch 生命周期变量，避免 cleanup 双 free）
             llama_batch batch_all = llama_batch_init(N, /*embd=*/0, /*n_seq_max=*/1);

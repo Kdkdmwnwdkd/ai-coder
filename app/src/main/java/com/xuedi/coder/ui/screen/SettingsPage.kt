@@ -240,6 +240,17 @@ fun SettingsPage(
             ),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
+        // code300: 统一页标题（与场景页同款：正文色 SemiBold 15sp）
+        item(key = "page-title") {
+            Text(
+                "设置",
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier = Modifier.padding(bottom = 10.dp)
+            )
+        }
+
         // ---- 分组 1：外观与主题 ----
         item(key = "appearance-group") {
             SectionHeader(title = stringResource(R.string.settings_group_appearance))

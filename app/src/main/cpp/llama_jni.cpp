@@ -666,7 +666,10 @@ static void nativeChat_inner(
     // ---- Step 6: GENERATION ----
     // （last_tok 已在 prefill 循环之前声明为 0，避免 goto 跨初始化报错）
     {   // 取 prefill 后最后一个 token 的 logits → argmax → 首个 gen token
-        const float* logits = llama_get_logits_ith(st->ctx, 0);
+        // code298: 索引用 -1（最后一个"输出"token）而非 0（batch 内 token 序号）——
+        //   批量 prefill 只有 batch 最后一个 token（序号 N-1）开了 logits，按序号 0 找必返回空
+        //   （code297 真机报错实证）；STEPx1 单 token batch 下 -1 同样命中唯一输出，两路径通吃。
+        const float* logits = llama_get_logits_ith(st->ctx, -1);
         if (!logits) {
             cb_onError(tenv, gCb, "generation: llama_get_logits_ith 返回空（prefill 最后一个 logits=0？）");
             goto cleanup;
@@ -738,7 +741,8 @@ static void nativeChat_inner(
         // ---- argmax ----
         // EOS guard: 前 EOS_GUARD_STEPS 步（包含 step=0）硬禁 EOS token
         const bool under_eos_guard = (step + 1) < EOS_GUARD_STEPS; // +1 因为这里采样的是"下一步"token
-        const float* logits = llama_get_logits_ith(st->ctx, 0);
+        // code298: 同上一处——用 -1 取最后一个输出 token，与批量/逐 token prefill 都兼容
+        const float* logits = llama_get_logits_ith(st->ctx, -1);
         if (!logits) {
             cb_onError(tenv, gCb, "generation: logits_ith 返回空");
             goto cleanup;

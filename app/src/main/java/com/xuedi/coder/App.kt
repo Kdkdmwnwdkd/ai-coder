@@ -61,8 +61,9 @@ class App : Application(), ImageLoaderFactory, CoroutineScope {
         appScope.launch(Dispatchers.Default) {
             val llamaSt = LlamaJniEngine.libStatus()
             Log.i(TAG, "预热: Llama lib status: loaded=${llamaSt.first} err=${llamaSt.second}")
-            // 🆕 v1.3.26-gpu1 方案 C：如果用户从没手动选过模型，按【快模式默认 1.5B】偏好
-            // 自动在 Room 里 set selected。只在 selected==null 时生效，不覆盖用户明确选择。
+            // 🆕 v1.3.26-gpu1 方案 C：如果用户从没手动选过模型，自动在 Room 里
+            // set selected（固定优先 3B；code279 已删 1.5B 快模式偏好）。
+            // 只在 selected==null 时生效，不覆盖用户明确选择。
             runCatching {
                 val (autoselected, _) = modelManager.autoSelectInitialByPrefs()
                 if (autoselected) Log.i(TAG, "预热: 已按偏好自动选中初始模型")

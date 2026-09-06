@@ -44,8 +44,7 @@ android {
         //   · 重开批量 prefill：b5180 CPU 批量 decode 的 SIGSEGV 路径已被上游重写，
         //     JNI 侧带 .batch_bad 崩溃锁自锁保护（成功删锁 / ret!=0 保锁+逐token / 真崩只崩一次）。
         //   · KV API 换 llama_memory_*、flash_attn 换枚举（JNI 已适配，宿主机语法冒烟通过）。
-        //   · ggml-vulkan 新增 SPIRV-Headers 硬依赖 → CMakeLists 显式给 _DIR + 补 include，
-        //     build.yml apt 加 spirv-headers（缺了按老策略退 CPU-only，不阻塞出包）。
+        //   · code296: Vulkan/ggml-vulkan 已按用户要求彻底删除，永远纯 CPU 构建。
         val ciVersion = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 100
         versionCode = ciVersion
         versionName = "1.3.26-code$ciVersion"

@@ -191,12 +191,8 @@ class ModelManager(private val ctx: Context) {
             //   现在 LlamaJniEngine.loadModelRobust 会在内部依次尝试：
             //   (4096,4) → (2048,2) → (1280,2) → (768,1)，并把最终档位写进 robustLastLevel。
             //
-            // code289: 「允许 Vulkan 加速」用户开关已删除。
-            //   固定 gpuLayers = -1（请求全 offload，C++ 端再按编译期/运行期 clamp，
-            //   Vulkan 不可用或加载失败时自动降回 CPU，无需用户干预）。
-            val gpuLayers = -1
-            (eng as? LlamaJniEngine)?.loadModelRobust(m.filePath, gpuLayers)
-                ?: eng.loadModelRobust(m.filePath)
+            // code296: Vulkan 已彻底删除，永远纯 CPU 加载。
+            eng.loadModelRobust(m.filePath)
         }.getOrDefault(false)
 
         val ctx = eng.currentCtx()

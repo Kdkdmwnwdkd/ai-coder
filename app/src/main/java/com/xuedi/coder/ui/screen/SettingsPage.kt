@@ -143,7 +143,6 @@ fun SettingsPage(
             lastLoadedPath = app.modelManager.lastLoadedPath(),
             lastThreads = eng.lastUsedThreads,
             lastNCtx = eng.lastUsedNCtx,
-            lastGpuLayers = eng.lastUsedGpuLayers,
             prefMode = eng.lastPrefMode
         )
     }.getOrDefault(
@@ -155,7 +154,6 @@ fun SettingsPage(
             lastLoadedPath = null,
             lastThreads = null,
             lastNCtx = null,
-            lastGpuLayers = null,
             prefMode = null
         )
     )
@@ -290,7 +288,7 @@ fun SettingsPage(
         item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
 
         // code279: 模拟模式/1.5B快模式开关已删除（用户要求）；
-        // code289: 「允许 Vulkan GPU 加速」开关也删除——固定请求 GPU 全卸载，失败自动回退 CPU。
+        // code296: Vulkan GPU 加速已从代码里彻底删除（不再只是删开关）。
 
         // ---- 分组 3：推理诊断 ----
         item(key = "diag-group") {
@@ -1135,9 +1133,6 @@ private data class LoadDiagSnapshot(
     // null = 模型尚未成功加载过。
     val lastThreads: Int?,
     val lastNCtx: Int?,
-    // 🆕 v1.3.26-gpu1: 最近一次 loadModel 请求的 gpuLayers（-1=全 offload，0=CPU，
-    // 真实值由 C++ 端 clamp 后写进日志 nativeInit n_gpu_layers=…）。
-    val lastGpuLayers: Int?,
     // 🆕 v1.3.25-perf1: 最近一次推理回合的 prefill 模式。
     // BATCH_OK = 批量提交成功；BATCH_FB = 批量失败回退逐 token；STEPx1 = 直接走逐 token。
     // null = 尚未跑过推理。
@@ -1426,15 +1421,7 @@ private suspend fun runDiagnosticImpl(
     }
     addLog("③ 引擎状态: $ctxStr  lastLoadErr=${engineSnapshot.lastLoadError?:"(无)"}")
     // 🆕 v1.3.25-perf1: 运行参数透明化，测 4/6/8 线程 & batch prefill 时一眼看到"这次到底用了啥参数"
-    // v1.3.26-gpu1: 新增 gpuLayers 显示（-1=请求全 offload，0=CPU；真机实际卸载层数看 LlamaJni 日志行 nativeInit n_gpu_layers=…）
-    val gpuLayersDisplay = engineSnapshot.lastGpuLayers?.let {
-        when (it) {
-            -1 -> "请求全卸载(-1)（C++端根据编译/Vulkan驱动clamp，真数见LlamaJni日志）"
-            0  -> "CPU-only(0)"
-            else -> "${it}层"
-        }
-    } ?: "(未加载)"
-    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  gpuLayers=$gpuLayersDisplay  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}")
+    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}")
 
     // ---- 2. 模型存在性 ----
     if (selectedModel == null) {

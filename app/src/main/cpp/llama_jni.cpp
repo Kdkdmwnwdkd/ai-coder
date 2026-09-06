@@ -12,7 +12,7 @@
  *        prefill (batch.size=1, one token per decode) → while(gen)
  *
  * JNI 方法签名严格匹配 Kotlin 侧 LlamaJniEngine 的 4 个 external fun：
- *   nativeInit(modelPath, nCtx, nThreads, nGpuLayers) → jlong ctx
+ *   nativeInit(modelPath, nCtx, nThreads) → jlong ctx
  *   nativeRelease(ctx)
  *   nativeChat(ctx, system, user, TokenCallback obj)   // 阻塞 while 循环，回调 onToken/onDone/onError
  *   nativeChatCancel(ctx)
@@ -76,7 +76,6 @@ struct LlamaState {
     const llama_vocab* vocab;  // b5180 新增：从 llama_model_get_vocab() 取，生命周期和 model 绑定
     int           n_ctx;
     int           n_threads;
-    int           n_gpu_layers;   // v1.3.26-gpu1：真实卸载层数（0=CPU，>0=Vulkan，Qwen2.5-3B 最多36层，传-1/99都会被model层上限夹）
     llama_token   bos;
     llama_token   eos;
     int           n_vocab;
@@ -87,7 +86,7 @@ struct LlamaState {
     std::atomic<bool> cancel;
 
     LlamaState() : model(nullptr), ctx(nullptr), vocab(nullptr), n_ctx(0), n_threads(4),
-                   n_gpu_layers(0), bos(0), eos(0), n_vocab(0), cancel(false) {}
+                   bos(0), eos(0), n_vocab(0), cancel(false) {}
 };
 
 // =============================================================================
@@ -320,35 +319,19 @@ JNIEXPORT jint JNI_OnLoad(JavaVM* vm, void* reserved) {
 // =============================================================================
 // nativeInit：加载模型 + 创建 ctx（返回 jlong=LlamaState*）
 // =============================================================================
-// code295: 函数体拆成 _inner，外层 JNI 壳统一 try/catch。
-//   魅族20 Adreno 驱动在 llama_init_from_model / llama_decode 里可能抛
-//   vk::SystemError(createComputePipeline: ErrorUnknown)，不捕获=SIGABRT 闪退。
+// code295: 函数体拆成 _inner，外层 JNI 壳统一 try/catch（防 SIGABRT 闪退）。
 static jlong nativeInit_inner(
         JNIEnv* env,
-        jstring jpath, jint jnCtx, jint jnThreads, jint jGpuLayers) {
+        jstring jpath, jint jnCtx, jint jnThreads) {
 
     std::string path = jstring2std(env, jpath);
     int n_ctx    = jnCtx    > 64 ? (int)jnCtx    : 512;
     int n_threads= jnThreads> 0  ? (int)jnThreads: 4;
-    // ---- v1.3.26-gpu1 n_gpu_layers 裁剪（严格编译期双保险）----
-    //   Kotlin 约定：<0 = 全卸载；我们夹到 99（任何模型都不可能超过 99 层）。
-    //   llama_model_load_from_file 内部再根据"模型实际层数"做上限夹，我们这里只做粗略合法值。
-    //   关键：编译期没开 Vulkan(XUEDI_LLAMA_VULKAN=0) 时，强制 0 —— 即使 Kotlin 传 -1，
-    //        也不会让 b5180 走任何 GPU 路径，绝对不影响 CPU 底包稳定性。
-    int n_gpu_layers = (int)jGpuLayers;
-#if XUEDI_LLAMA_VULKAN
-    if (n_gpu_layers < 0) n_gpu_layers = 99;  // -1 / 任何负值 = “全 offload”
-    if (n_gpu_layers > 128) n_gpu_layers = 128;
-#else
-    if (n_gpu_layers != 0) {
-        LOGI("nativeInit: 编译未启用 Vulkan (XUEDI_LLAMA_VULKAN=0)，"
-             "jGpuLayers=%d → 强制 0（保持纯 CPU 底包不变）", n_gpu_layers);
-        n_gpu_layers = 0;
-    }
-#endif
+    // code296: Vulkan 已彻底删除 —— n_gpu_layers 恒为 llama 默认值 0（纯 CPU），
+    //          JNI 签名同步去掉 jGpuLayers 参数。
 
-    LOGI("nativeInit: path=%s n_ctx=%d n_threads=%d n_gpu_layers=%d (XUEDI_LLAMA_VULKAN=%d)",
-         path.c_str(), n_ctx, n_threads, n_gpu_layers, (int)XUEDI_LLAMA_VULKAN);
+    LOGI("nativeInit: path=%s n_ctx=%d n_threads=%d (纯 CPU 构建)",
+         path.c_str(), n_ctx, n_threads);
 
     if (path.empty() || access(path.c_str(), R_OK) != 0) {
         throwJava(env, "模型文件不可读：%s (access R_OK 失败)", path.c_str());
@@ -356,11 +339,8 @@ static jlong nativeInit_inner(
     }
 
     // ---- 1. llama_model_load_from_file（只传 mparams 基础参数，RoPE 让官方自动识别）----
-    llama_model_params mparams = llama_model_default_params();
-    // v1.3.26-gpu1: 真正启用 n_gpu_layers（由上面的编译期/运行时双 clamp 保证安全）
-    mparams.n_gpu_layers = (int32_t)n_gpu_layers;
-    LOGI("nativeInit → llama_model_load_from_file (%s) (n_gpu_layers=%d)",
-         path.c_str(), (int)mparams.n_gpu_layers);
+    llama_model_params mparams = llama_model_default_params();  // code296: n_gpu_layers 默认 0 = 纯 CPU
+    LOGI("nativeInit → llama_model_load_from_file (%s)", path.c_str());
     // —— b5180 新命名：llama_model_load_from_file / llama_model_free
     llama_model* model = llama_model_load_from_file(path.c_str(), mparams);
     if (!model) {
@@ -382,13 +362,11 @@ static jlong nativeInit_inner(
     cparams.n_threads_batch = (uint32_t)n_threads;
     // b10819: flash_attn bool 字段已换成 flash_attn_type 枚举
     cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;  // 魅族 20 不兼容 flash attn，关
-    // v1.3.26-gpu1：只有当 n_gpu_layers>0（已经经过 XUEDI_LLAMA_VULKAN 钳制）时才 offload KQV，
-    //               避免 CPU-only 构建里把 KV 往不存在的后端推（避免潜在初始化路径）。
-    cparams.offload_kqv = (n_gpu_layers > 0);
+    // code296: 纯 CPU 构建 —— 显式关掉 KQV offload（默认 true 是给 GPU 后端用的）
+    cparams.offload_kqv = false;
 
-    LOGI("nativeInit → llama_init_from_model (n_ctx=%u n_batch=%u n_ubatch=%u n_threads=%u n_gpu_layers=%d offload_kqv=%d flash_attn=DISABLED)",
-         cparams.n_ctx, cparams.n_batch, cparams.n_ubatch, cparams.n_threads,
-         n_gpu_layers, (int)cparams.offload_kqv);
+    LOGI("nativeInit → llama_init_from_model (n_ctx=%u n_batch=%u n_ubatch=%u n_threads=%u flash_attn=DISABLED)",
+         cparams.n_ctx, cparams.n_batch, cparams.n_ubatch, cparams.n_threads);
     llama_context* ctx = llama_init_from_model(model, cparams);
     if (!ctx) {
         llama_model_free(model);
@@ -406,34 +384,31 @@ static jlong nativeInit_inner(
     st->vocab    = vocab;
     st->n_ctx    = (int)llama_n_ctx(ctx);
     st->n_threads= n_threads;
-    st->n_gpu_layers = n_gpu_layers;
     st->bos      = llama_vocab_bos(vocab);
     st->eos      = llama_vocab_eos(vocab);
     st->n_vocab  = llama_vocab_n_tokens(vocab);
     st->model_path = path;  // code278: 批量 prefill 崩溃锁用
     st->cancel.store(false, std::memory_order_relaxed);
 
-    LOGI("nativeInit 完成：bos=%d eos=%d n_vocab=%d n_ctx=%d n_gpu_layers=%d (XUEDI_LLAMA_VULKAN=%d) vocab=%p",
-         st->bos, st->eos, st->n_vocab, st->n_ctx,
-         st->n_gpu_layers, (int)XUEDI_LLAMA_VULKAN, (const void*)st->vocab);
+    LOGI("nativeInit 完成：bos=%d eos=%d n_vocab=%d n_ctx=%d vocab=%p",
+         st->bos, st->eos, st->n_vocab, st->n_ctx, (const void*)st->vocab);
     return (jlong)st;
 }
 
-// JNI 壳：捕获 inner 抛出的任何 C++ 异常（典型：vk::SystemError），转成 Java 异常返回 ctx=0。
-// 错误带 GPU_BACKEND_CRASH 前缀 → Kotlin 侧据此把 GPU 拉黑并自动改走纯 CPU。
+// JNI 壳：捕获 inner 抛出的任何 C++ 异常，转成 Java 异常返回 ctx=0（防 SIGABRT 闪退）。
 extern "C" JNIEXPORT jlong JNICALL
 Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
         JNIEnv* env, jobject /*thiz*/,
-        jstring jpath, jint jnCtx, jint jnThreads, jint jGpuLayers) {
+        jstring jpath, jint jnCtx, jint jnThreads) {
     try {
-        return nativeInit_inner(env, jpath, jnCtx, jnThreads, jGpuLayers);
+        return nativeInit_inner(env, jpath, jnCtx, jnThreads);
     } catch (const std::exception& e) {
         LOGE("nativeInit C++ 异常捕获: %s", e.what());
-        throwJava(env, "GPU_BACKEND_CRASH: %s", e.what());
+        throwJava(env, "nativeInit C++ 异常: %s", e.what());
         return 0L;
     } catch (...) {
         LOGE("nativeInit C++ 未知异常捕获");
-        throwJava(env, "GPU_BACKEND_CRASH: unknown native exception in nativeInit");
+        throwJava(env, "nativeInit C++ 未知异常");
         return 0L;
     }
 }
@@ -444,7 +419,7 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeInit(
 extern "C" JNIEXPORT void JNICALL
 Java_com_xuedi_coder_model_LlamaJniEngine_nativeRelease(
         JNIEnv*, jobject, jlong jhandle) {
-    // code295: Vulkan 后端在 llama_free 里也可能抛 C++ 异常 → 捕获防 SIGABRT
+    // code295: llama_free 里也可能抛 C++ 异常 → 捕获防 SIGABRT
     try {
         auto* st = (LlamaState*)jhandle;
         if (!st) return;
@@ -507,8 +482,7 @@ static void nativeChat_inner(
     std::string system = jstring2std(env, jSystem);
     std::string user   = jstring2std(env, jUser);
     if (system.empty()) system = "你是一个聪明、简洁、专业的AI编程助手，用中文回答用户的问题。";
-    LOGI("nativeChat runtime: n_threads=%d n_gpu_layers=%d (XUEDI_LLAMA_VULKAN=%d)",
-         st->n_threads, st->n_gpu_layers, (int)XUEDI_LLAMA_VULKAN);
+    LOGI("nativeChat runtime: n_threads=%d (纯 CPU)", st->n_threads);
 
     // ---- Step 1: ChatML 拼接 ----
     char prompt_buf[1 << 15];   // 32KB，983 token × 30byte ≈ 30KB 够
@@ -565,7 +539,7 @@ static void nativeChat_inner(
 
     // ---- 5.0 PREFILL-BATCH 尝试（code278: b5180 → b10819 升级后重开）----
     //   历史：b5180 CPU 后端批量 decode 在魅族20 SIGSEGV（RoPE 硬编码假设与 Qwen2 不匹配），永久禁用。
-    //   b10819 距 b5180 已 5600+ 个 release，attn/RoPE 路径多次重写；Vulkan 开启时批量直接跑 GPU，绕开 CPU 后端。
+    //   b10819 距 b5180 已 5600+ 个 release，attn/RoPE 路径多次重写（code296: Vulkan 已删，批量走 CPU 后端）。
     //   🔒 崩溃自锁保护（核心安全措施）：
     //     尝试批量前先写锁文件 <model>.batch_bad ——
     //       · 成功          → 删锁，批量继续可用
@@ -767,9 +741,7 @@ cleanup:
     (void)fullOut;
 }
 
-// JNI 壳：捕获 inner 抛出的任何 C++ 异常（魅族20 Adreno 上 vk::SystemError:
-// createComputePipeline ErrorUnknown 曾直接 SIGABRT 闪退），转成 onError 回调。
-// 错误带 GPU_BACKEND_CRASH 前缀 → Kotlin 侧据此把 GPU 拉黑并自动改走纯 CPU。
+// JNI 壳：捕获 inner 抛出的任何 C++ 异常，转成 onError 回调（防 SIGABRT 闪退）。
 extern "C" JNIEXPORT void JNICALL
 Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         JNIEnv* env, jobject /*thiz*/, jlong jhandle,
@@ -778,9 +750,9 @@ Java_com_xuedi_coder_model_LlamaJniEngine_nativeChat(
         nativeChat_inner(env, jhandle, jSystem, jUser, jCb);
     } catch (const std::exception& e) {
         LOGE("nativeChat C++ 异常捕获: %s", e.what());
-        cb_onError(env, jCb, std::string("GPU_BACKEND_CRASH: ") + e.what());
+        cb_onError(env, jCb, std::string("nativeChat C++ 异常: ") + e.what());
     } catch (...) {
         LOGE("nativeChat C++ 未知异常捕获");
-        cb_onError(env, jCb, std::string("GPU_BACKEND_CRASH: unknown native exception in nativeChat"));
+        cb_onError(env, jCb, std::string("nativeChat C++ 未知异常"));
     }
 }

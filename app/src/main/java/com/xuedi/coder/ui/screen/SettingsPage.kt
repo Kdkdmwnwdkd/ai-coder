@@ -56,7 +56,6 @@ import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -85,13 +84,9 @@ import com.xuedi.coder.data.ModelEntity
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
-import com.xuedi.coder.model.ModelPrefsStore
 import com.xuedi.coder.theme.ThemeMode
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.res.stringResource
@@ -294,70 +289,12 @@ fun SettingsPage(
         }
         item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
 
-        // ---- 分组 2.5：推理偏好开关（用户级 GPU 回退）----
-        //  code279: 模拟模式分组已删除（用户要求：要么真推理要么报错，不要假回复）。
-        item(key = "perf-prefs-group") {
-            SectionHeader(title = "🧠 推理偏好（GPU加速）")
-        }
-        item(key = "pref-vulkan") {
-            val app = App.instance
-            // 读一次当前值做 Compose state；异步写回 ModelPrefs DataStore
-            val (useVulkan, setUseVulkan) = remember {
-                mutableStateOf(
-                    runBlocking(Dispatchers.IO) {
-                        runCatching { app.modelPrefs.getUseVulkanAccel() }
-                            .getOrDefault(ModelPrefsStore.DEFAULT_USE_VULKAN)
-                    }
-                )
-            }
-            Card(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 16.dp),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .defaultMinSize(minHeight = 56.dp)
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Text(
-                            text = "允许 Vulkan GPU 加速",
-                            fontSize = 14.sp,
-                            color = MaterialTheme.colorScheme.onSurface
-                        )
-                        Text(
-                            text = "ON=尝试把模型层卸载到 Adreno GPU（OFF=强制CPU，最稳定回退）。加载失败时会自动降回CPU。",
-                            fontSize = 11.sp,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
-                    }
-                    Switch(
-                        checked = useVulkan,
-                        onCheckedChange = { checked ->
-                            setUseVulkan(checked)
-                            (app as? CoroutineScope)?.launch(Dispatchers.IO) {
-                                runCatching { app.modelPrefs.setUseVulkanAccel(checked) }
-                            }
-                            val tip = if (checked)
-                                "✅ 已开启 Vulkan（重新加载模型生效，失败自动CPU兜底）"
-                            else
-                                "🛡️ 已切换到纯 CPU（下一次加载模型生效）"
-                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
-                        }
-                    )
-                }
-            }
-        }
-        // code279: 「默认使用 1.5B 快模式」开关已删除（用户要求），默认模型固定优先 3B。
+        // code279: 模拟模式/1.5B快模式开关已删除（用户要求）；
+        // code289: 「允许 Vulkan GPU 加速」开关也删除——固定请求 GPU 全卸载，失败自动回退 CPU。
 
         // ---- 分组 3：推理诊断 ----
         item(key = "diag-group") {
-            SectionHeader(title = "🔍 推理诊断（闪退 / 没输出时点这里）")
+            SectionHeader(title = "诊断与排障")
         }
         // 🔴 v1.3.25-fix13: 把完整诊断包生成逻辑抽成 lambda，分享和复制都复用
         val buildDiagReport: () -> String = {
@@ -372,7 +309,7 @@ fun SettingsPage(
                 appendLine("CPU_ABI2：${android.os.Build.CPU_ABI2}（arm64-v8a 必为空）")
                 appendLine()
                 appendLine("═══════════════════════════════════════════")
-                appendLine("当前激活引擎：LlamaJniEngine(llama.cpp b10819 · code278/279，模拟模式已删除)")
+                appendLine("当前激活引擎：LlamaJniEngine(llama.cpp b10819)")
                 appendLine("当前模型：${app.modelManager.lastLoadedPath() ?: "<未加载>"}")
                 appendLine("—— Llama 引擎 ——")
                 val llamaSt = LlamaJniEngine.libStatus()
@@ -501,7 +438,7 @@ fun SettingsPage(
         // 🆕 code78 分组：GitHub Actions 自动编译
         // ─────────────────────────────────────────────────
         item(key = "gh-group") {
-            SectionHeader(title = "🐙 GitHub Actions 自动编译（让 AI 帮你跑编译）")
+            SectionHeader(title = "GitHub Actions 自动编译")
         }
         item(key = "gh-card") {
             val ghStore = remember { com.xuedi.coder.plugin.GitHubTokenStore(App.instance) }
@@ -580,7 +517,7 @@ fun SettingsPage(
                         Button(
                             onClick = {
                                 val ok = ghStore.isConfigured()
-                                Toast.makeText(ctx, if (ok) "✅ 已保存，去聊天页 @github 触发编译吧" else "⚠️ 还没填完 4 项", Toast.LENGTH_LONG).show()
+                                Toast.makeText(ctx, if (ok) "已保存，去聊天页发 @github 触发编译" else "还没填完 4 项", Toast.LENGTH_LONG).show()
                             },
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(
@@ -590,7 +527,7 @@ fun SettingsPage(
                                     else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         ) {
-                            Text(if (configured) "✅ 已就绪" else "⚠️ 待配置", fontSize = 11.sp)
+                            Text(if (configured) "已就绪" else "待配置", fontSize = 11.sp)
                         }
                     }
                 }
@@ -1330,7 +1267,7 @@ private fun DiagnosticCard(
                 ) {
                     Icon(Icons.Outlined.ReceiptLong, null)
                     Spacer(Modifier.width(2.dp))
-                    Text("📥抓日志", fontSize = 10.5.sp)
+                    Text("抓日志", fontSize = 11.sp)
                 }
                 OutlinedButton(
                     onClick = onShareAll,
@@ -1341,7 +1278,7 @@ private fun DiagnosticCard(
                 ) {
                     Icon(Icons.Outlined.IosShare, null)
                     Spacer(Modifier.width(2.dp))
-                    Text("📤分享包", fontSize = 10.5.sp)
+                    Text("分享", fontSize = 11.sp)
                 }
                 FilledTonalButton(
                     onClick = onCopyAll,
@@ -1352,7 +1289,7 @@ private fun DiagnosticCard(
                 ) {
                     Icon(Icons.Outlined.ContentCopy, null)
                     Spacer(Modifier.width(2.dp))
-                    Text("📋复制包", fontSize = 10.5.sp)
+                    Text("复制", fontSize = 11.sp)
                 }
             }
 

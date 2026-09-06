@@ -274,9 +274,8 @@ class LlamaJniEngine : LlmEngine {
      *   · 想临时关 Vulkan，把下面 gpuLayersDefault=-1 改成 0（忽略 GPU hint，强制 CPU）。
      */
     fun loadModelRobust(ggufAbsolutePath: String): Boolean {
-        // v1.3.26-gpu1：默认 gpuLayersDefault=-1 = 请求全 offload；
-        // 用户级开关由【设置 → 允许Vulkan加速】通过调用 loadModelRobust(path, gpuLayers=0) 走
-        // 另一个重载；这里保持最激进默认，由外层先读偏好再路由。
+        // code289：用户开关已删，固定 gpuLayersDefault=-1 = 请求全 offload，
+        // Vulkan 不可用时由 C++/驱动自动回退 CPU。
         val gpuLayersDefault = -1
         return loadModelRobust(ggufAbsolutePath, gpuLayers = gpuLayersDefault)
     }

@@ -9,4 +9,6 @@
     <color name="x_accent">#FF5C7C9A</color>
     <color name="x_accent_dim">#FFDCE3EB</color>
     <color name="x_transparent">#00000000</color>
+    <!-- 应用图标背景（与图标前景图的深蓝底色一致） -->
+    <color name="ic_launcher_bg">#FF0E314C</color>
 </resources>

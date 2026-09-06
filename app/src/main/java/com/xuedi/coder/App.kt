@@ -8,7 +8,6 @@ import coil.util.DebugLogger
 import com.xuedi.coder.model.LlamaJniEngine
 import com.xuedi.coder.model.LlmEngine
 import com.xuedi.coder.model.ModelManager
-import com.xuedi.coder.model.ModelPrefsStore
 import com.xuedi.coder.plugin.PluginManager
 import com.xuedi.coder.theme.ThemeStore
 import com.xuedi.coder.ui.screen.UiBackground
@@ -31,11 +30,10 @@ class App : Application(), ImageLoaderFactory, CoroutineScope {
     override val coroutineContext: CoroutineContext = SupervisorJob() + Dispatchers.IO
     val appScope: CoroutineScope get() = this
 
-    // ---- 管理层四件套 + 推理偏好 ----
+    // ---- 管理层四件套 ----
     val themeStore: ThemeStore by lazy { ThemeStore(this) }
     val pluginManager: PluginManager by lazy { PluginManager(this) }
     val modelManager: ModelManager by lazy { ModelManager(this) }
-    val modelPrefs: ModelPrefsStore by lazy { ModelPrefsStore(this) }
 
     private val llamaEngine: LlamaJniEngine by lazy { LlamaJniEngine() }
 

@@ -35,12 +35,13 @@ fun WorkDetailScreen(
     onOutlineClick: () -> Unit,
     onAgentConfigClick: () -> Unit
 ) {
+    val context = androidx.compose.ui.platform.LocalContext.current
     val viewModel: WorkDetailViewModel = viewModel(
         factory = object : ViewModelProvider.Factory {
             @Suppress("UNCHECKED_CAST")
             override fun <T : ViewModel> create(modelClass: Class<T>): T {
                 return WorkDetailViewModel(
-                    androidx.compose.ui.platform.LocalContext.current.applicationContext as android.app.Application,
+                    context.applicationContext as android.app.Application,
                     workId
                 ) as T
             }

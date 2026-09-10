@@ -11,6 +11,7 @@ import com.novelseek.ultra.data.repository.WorkRepository
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
 
 class WorkDetailViewModel(application: Application, private val workId: Long) : AndroidViewModel(application) {

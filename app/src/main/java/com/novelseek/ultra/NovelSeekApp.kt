@@ -1,98 +1,96 @@
 package com.novelseek.ultra
 
 import androidx.compose.runtime.Composable
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-import androidx.navigation.toRoute
+import androidx.navigation.navArgument
 import com.novelseek.ultra.ui.screen.*
-import kotlinx.serialization.Serializable
-
-@Serializable
-object HomeRoute
-
-@Serializable
-data class WorkDetailRoute(val workId: Long)
-
-@Serializable
-data class ChapterEditRoute(val chapterId: Long, val workId: Long)
-
-@Serializable
-data class CharacterListRoute(val workId: Long)
-
-@Serializable
-data class WorldListRoute(val workId: Long)
-
-@Serializable
-data class OutlineEditRoute(val workId: Long)
-
-@Serializable
-object SettingsRoute
-
-@Serializable
-data class AgentConfigRoute(val workId: Long)
 
 @Composable
 fun NovelSeekApp() {
     val navController = rememberNavController()
 
-    NavHost(navController = navController, startDestination = HomeRoute) {
-        composable<HomeRoute> {
+    NavHost(navController = navController, startDestination = "home") {
+        composable("home") {
             HomeScreen(
-                onWorkClick = { navController.navigate(WorkDetailRoute(it)) },
-                onSettingsClick = { navController.navigate(SettingsRoute) }
+                onWorkClick = { navController.navigate("work_detail/$it") },
+                onSettingsClick = { navController.navigate("settings") }
             )
         }
-        composable<WorkDetailRoute> { backStackEntry ->
-            val route = backStackEntry.toRoute<WorkDetailRoute>()
+        composable(
+            "work_detail/{workId}",
+            arguments = listOf(navArgument("workId") { type = NavType.LongType })
+        ) { backStackEntry ->
+            val workId = backStackEntry.arguments?.getLong("workId") ?: 0L
             WorkDetailScreen(
-                workId = route.workId,
+                workId = workId,
                 onBack = { navController.popBackStack() },
                 onChapterClick = { chapterId ->
-                    navController.navigate(ChapterEditRoute(chapterId, route.workId))
+                    navController.navigate("chapter_edit/$chapterId/$workId")
                 },
-                onCharactersClick = { navController.navigate(CharacterListRoute(route.workId)) },
-                onWorldClick = { navController.navigate(WorldListRoute(route.workId)) },
-                onOutlineClick = { navController.navigate(OutlineEditRoute(route.workId)) },
-                onAgentConfigClick = { navController.navigate(AgentConfigRoute(route.workId)) }
+                onCharactersClick = { navController.navigate("characters/$workId") },
+                onWorldClick = { navController.navigate("world/$workId") },
+                onOutlineClick = { navController.navigate("outline/$workId") },
+                onAgentConfigClick = { navController.navigate("agent/$workId") }
             )
         }
-        composable<ChapterEditRoute> { backStackEntry ->
-            val route = backStackEntry.toRoute<ChapterEditRoute>()
+        composable(
+            "chapter_edit/{chapterId}/{workId}",
+            arguments = listOf(
+                navArgument("chapterId") { type = NavType.LongType },
+                navArgument("workId") { type = NavType.LongType }
+            )
+        ) { backStackEntry ->
+            val chapterId = backStackEntry.arguments?.getLong("chapterId") ?: 0L
+            val workId = backStackEntry.arguments?.getLong("workId") ?: 0L
             ChapterEditScreen(
-                chapterId = route.chapterId,
-                workId = route.workId,
+                chapterId = chapterId,
+                workId = workId,
                 onBack = { navController.popBackStack() }
             )
         }
-        composable<CharacterListRoute> { backStackEntry ->
-            val route = backStackEntry.toRoute<CharacterListRoute>()
+        composable(
+            "characters/{workId}",
+            arguments = listOf(navArgument("workId") { type = NavType.LongType })
+        ) { backStackEntry ->
+            val workId = backStackEntry.arguments?.getLong("workId") ?: 0L
             CharacterListScreen(
-                workId = route.workId,
+                workId = workId,
                 onBack = { navController.popBackStack() }
             )
         }
-        composable<WorldListRoute> { backStackEntry ->
-            val route = backStackEntry.toRoute<WorldListRoute>()
+        composable(
+            "world/{workId}",
+            arguments = listOf(navArgument("workId") { type = NavType.LongType })
+        ) { backStackEntry ->
+            val workId = backStackEntry.arguments?.getLong("workId") ?: 0L
             WorldListScreen(
-                workId = route.workId,
+                workId = workId,
                 onBack = { navController.popBackStack() }
             )
         }
-        composable<OutlineEditRoute> { backStackEntry ->
-            val route = backStackEntry.toRoute<OutlineEditRoute>()
+        composable(
+            "outline/{workId}",
+            arguments = listOf(navArgument("workId") { type = NavType.LongType })
+        ) { backStackEntry ->
+            val workId = backStackEntry.arguments?.getLong("workId") ?: 0L
             OutlineEditScreen(
-                workId = route.workId,
+                workId = workId,
                 onBack = { navController.popBackStack() }
             )
         }
-        composable<SettingsRoute> {
+        composable("settings") {
             SettingsScreen(onBack = { navController.popBackStack() })
         }
-        composable<AgentConfigRoute> { backStackEntry ->
-            val route = backStackEntry.toRoute<AgentConfigRoute>()
+        composable(
+            "agent/{workId}",
+            arguments = listOf(navArgument("workId") { type = NavType.LongType })
+        ) { backStackEntry ->
+            val workId = backStackEntry.arguments?.getLong("workId") ?: 0L
             AgentConfigScreen(
-                workId = route.workId,
+                workId = workId,
                 onBack = { navController.popBackStack() }
             )
         }

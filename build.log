@@ -4638,3 +4638,162 @@ Execution failed for task ':app:processDebugResources'.
 BUILD FAILED in 4m 8s
 20 actionable tasks: 20 executed
 Some of the file system contents retained in the virtual file system are on file systems that Gradle doesn't support watching. The relevant state was discarded to ensure changes to these locations are properly detected. You can override this by explicitly enabling file system watching.
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.7/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+Warning: SDK processing. This version only understands SDK XML versions up to 3 but an SDK XML file of version 4 was encountered. This can happen if you use versions of Android Studio and the command-line tools that were released at different times.
+> Task :app:preBuild UP-TO-DATE
+> Task :app:preDebugBuild UP-TO-DATE
+> Task :app:mergeDebugNativeDebugMetadata NO-SOURCE
+> Task :app:checkKotlinGradlePluginConfigurationErrors
+> Task :app:checkDebugAarMetadata UP-TO-DATE
+> Task :app:generateDebugResValues UP-TO-DATE
+> Task :app:mapDebugSourceSetPaths
+> Task :app:generateDebugResources
+> Task :app:packageDebugResources
+> Task :app:mergeDebugResources
+> Task :app:createDebugCompatibleScreenManifests UP-TO-DATE
+> Task :app:extractDeepLinksDebug UP-TO-DATE
+> Task :app:parseDebugLocalResources
+
+> Task :app:processDebugMainManifest
+package="com.novelseek.ultra" found in source AndroidManifest.xml: /home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/AndroidManifest.xml.
+Setting the namespace via the package attribute in the source AndroidManifest.xml is no longer supported, and the value is ignored.
+Recommendation: remove package="com.novelseek.ultra" from the source AndroidManifest.xml: /home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/AndroidManifest.xml.
+
+> Task :app:processDebugManifest
+> Task :app:javaPreCompileDebug UP-TO-DATE
+> Task :app:processDebugManifestForPackage
+> Task :app:mergeDebugShaders UP-TO-DATE
+> Task :app:compileDebugShaders NO-SOURCE
+> Task :app:generateDebugAssets UP-TO-DATE
+> Task :app:mergeDebugAssets UP-TO-DATE
+> Task :app:compressDebugAssets UP-TO-DATE
+> Task :app:desugarDebugFileDependencies UP-TO-DATE
+> Task :app:checkDebugDuplicateClasses UP-TO-DATE
+> Task :app:processDebugResources
+> Task :app:mergeExtDexDebug
+> Task :app:kspDebugKotlin
+> Task :app:mergeLibDexDebug
+> Task :app:mergeDebugJniLibFolders
+> Task :app:mergeDebugNativeLibs NO-SOURCE
+> Task :app:stripDebugDebugSymbols NO-SOURCE
+> Task :app:validateSigningDebug
+> Task :app:writeDebugAppMetadata
+> Task :app:writeDebugSigningConfigVersions
+
+> Task :app:compileDebugKotlin FAILED
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:7:28 Unresolved reference: toRoute
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:39:63 Type mismatch: inferred type is HomeRoute but String was expected
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:40:9 No value passed for parameter 'route'
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:40:19 No type arguments expected for fun NavGraphBuilder.composable(route: String, arguments: List<NamedNavArgument> = ..., deepLinks: List<NavDeepLink> = ..., enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., content: AnimatedContentScope.(NavBackStackEntry) -> Unit): Unit
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:42:47 None of the following functions can be called with the arguments supplied: 
+public open fun navigate(deepLink: Uri): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(request: NavDeepLinkRequest): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(directions: NavDirections): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(resId: Int): Unit defined in androidx.navigation.NavHostController
+public final fun navigate(route: String, navOptions: NavOptions? = ..., navigatorExtras: Navigator.Extras? = ...): Unit defined in androidx.navigation.NavHostController
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:43:51 None of the following functions can be called with the arguments supplied: 
+public open fun navigate(deepLink: Uri): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(request: NavDeepLinkRequest): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(directions: NavDirections): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(resId: Int): Unit defined in androidx.navigation.NavHostController
+public final fun navigate(route: String, navOptions: NavOptions? = ..., navigatorExtras: Navigator.Extras? = ...): Unit defined in androidx.navigation.NavHostController
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:46:9 No value passed for parameter 'route'
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:46:19 No type arguments expected for fun NavGraphBuilder.composable(route: String, arguments: List<NamedNavArgument> = ..., deepLinks: List<NavDeepLink> = ..., enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., content: AnimatedContentScope.(NavBackStackEntry) -> Unit): Unit
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:47:40 Unresolved reference: toRoute
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:52:35 None of the following functions can be called with the arguments supplied: 
+public open fun navigate(deepLink: Uri): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(request: NavDeepLinkRequest): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(directions: NavDirections): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(resId: Int): Unit defined in androidx.navigation.NavHostController
+public final fun navigate(route: String, navOptions: NavOptions? = ..., navigatorExtras: Navigator.Extras? = ...): Unit defined in androidx.navigation.NavHostController
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:54:53 None of the following functions can be called with the arguments supplied: 
+public open fun navigate(deepLink: Uri): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(request: NavDeepLinkRequest): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(directions: NavDirections): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(resId: Int): Unit defined in androidx.navigation.NavHostController
+public final fun navigate(route: String, navOptions: NavOptions? = ..., navigatorExtras: Navigator.Extras? = ...): Unit defined in androidx.navigation.NavHostController
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:55:48 None of the following functions can be called with the arguments supplied: 
+public open fun navigate(deepLink: Uri): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(request: NavDeepLinkRequest): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(directions: NavDirections): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(resId: Int): Unit defined in androidx.navigation.NavHostController
+public final fun navigate(route: String, navOptions: NavOptions? = ..., navigatorExtras: Navigator.Extras? = ...): Unit defined in androidx.navigation.NavHostController
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:56:50 None of the following functions can be called with the arguments supplied: 
+public open fun navigate(deepLink: Uri): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(request: NavDeepLinkRequest): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(directions: NavDirections): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(resId: Int): Unit defined in androidx.navigation.NavHostController
+public final fun navigate(route: String, navOptions: NavOptions? = ..., navigatorExtras: Navigator.Extras? = ...): Unit defined in androidx.navigation.NavHostController
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:57:54 None of the following functions can be called with the arguments supplied: 
+public open fun navigate(deepLink: Uri): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(request: NavDeepLinkRequest): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(directions: NavDirections): Unit defined in androidx.navigation.NavHostController
+public open fun navigate(resId: Int): Unit defined in androidx.navigation.NavHostController
+public final fun navigate(route: String, navOptions: NavOptions? = ..., navigatorExtras: Navigator.Extras? = ...): Unit defined in androidx.navigation.NavHostController
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:60:9 No value passed for parameter 'route'
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:60:19 No type arguments expected for fun NavGraphBuilder.composable(route: String, arguments: List<NamedNavArgument> = ..., deepLinks: List<NavDeepLink> = ..., enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., content: AnimatedContentScope.(NavBackStackEntry) -> Unit): Unit
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:61:40 Unresolved reference: toRoute
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:68:9 No value passed for parameter 'route'
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:68:19 No type arguments expected for fun NavGraphBuilder.composable(route: String, arguments: List<NamedNavArgument> = ..., deepLinks: List<NavDeepLink> = ..., enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., content: AnimatedContentScope.(NavBackStackEntry) -> Unit): Unit
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:69:40 Unresolved reference: toRoute
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:75:9 No value passed for parameter 'route'
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:75:19 No type arguments expected for fun NavGraphBuilder.composable(route: String, arguments: List<NamedNavArgument> = ..., deepLinks: List<NavDeepLink> = ..., enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., content: AnimatedContentScope.(NavBackStackEntry) -> Unit): Unit
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:76:40 Unresolved reference: toRoute
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:82:9 No value passed for parameter 'route'
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:82:19 No type arguments expected for fun NavGraphBuilder.composable(route: String, arguments: List<NamedNavArgument> = ..., deepLinks: List<NavDeepLink> = ..., enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., content: AnimatedContentScope.(NavBackStackEntry) -> Unit): Unit
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:83:40 Unresolved reference: toRoute
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:89:9 No value passed for parameter 'route'
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:89:19 No type arguments expected for fun NavGraphBuilder.composable(route: String, arguments: List<NamedNavArgument> = ..., deepLinks: List<NavDeepLink> = ..., enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., content: AnimatedContentScope.(NavBackStackEntry) -> Unit): Unit
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:92:9 No value passed for parameter 'route'
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:92:19 No type arguments expected for fun NavGraphBuilder.composable(route: String, arguments: List<NamedNavArgument> = ..., deepLinks: List<NavDeepLink> = ..., enterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., exitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., popEnterTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> EnterTransition?)? = ..., popExitTransition: (AnimatedContentTransitionScope<NavBackStackEntry>.() -> ExitTransition?)? = ..., content: AnimatedContentScope.(NavBackStackEntry) -> Unit): Unit
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/NovelSeekApp.kt:93:40 Unresolved reference: toRoute
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:126:13 The API of this layout is experimental and is likely to change in the future.
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:255:62 Unresolved reference: 看见
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:255:62 Unsupported [literal prefixes and suffixes]
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:263:120 Unresolved reference: 逆天
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:263:120 Unsupported [literal prefixes and suffixes]
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:263:124 Unsupported [literal prefixes and suffixes]
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:264:96 Unresolved reference: 震惊
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:264:96 Unsupported [literal prefixes and suffixes]
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/AgentConfigScreen.kt:264:100 Unsupported [literal prefixes and suffixes]
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/ChapterEditScreen.kt:225:14 Unresolved reference: clickable
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/WorkDetailScreen.kt:41:42 Functions which invoke @Composable functions must be marked with the @Composable annotation
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/screen/WorkDetailScreen.kt:43:63 @Composable invocations can only happen from the context of a @Composable function
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/viewmodel/WorkDetailViewModel.kt:20:59 Unresolved reference. None of the following candidates is applicable because of receiver type mismatch: 
+public inline fun <T, R> Array<out TypeVariable(T)>.map(transform: (TypeVariable(T)) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> BooleanArray.map(transform: (Boolean) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> ByteArray.map(transform: (Byte) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> CharArray.map(transform: (Char) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> CharSequence.map(transform: (Char) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.text
+public inline fun <R> DoubleArray.map(transform: (Double) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> FloatArray.map(transform: (Float) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> IntArray.map(transform: (Int) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> LongArray.map(transform: (Long) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R, T> Result<TypeVariable(T)>.map(transform: (value: TypeVariable(T)) -> TypeVariable(R)): Result<TypeVariable(R)> defined in kotlin
+public inline fun <R> ShortArray.map(transform: (Short) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> UByteArray.map(transform: (UByte) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> UIntArray.map(transform: (UInt) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> ULongArray.map(transform: (ULong) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <R> UShortArray.map(transform: (UShort) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <T, R> Iterable<TypeVariable(T)>.map(transform: (TypeVariable(T)) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public inline fun <K, V, R> Map<out TypeVariable(K), TypeVariable(V)>.map(transform: (Map.Entry<TypeVariable(K), TypeVariable(V)>) -> TypeVariable(R)): List<TypeVariable(R)> defined in kotlin.collections
+public fun <T, R> Sequence<TypeVariable(T)>.map(transform: (TypeVariable(T)) -> TypeVariable(R)): Sequence<TypeVariable(R)> defined in kotlin.sequences
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/viewmodel/WorkDetailViewModel.kt:20:65 Cannot infer a type for this parameter. Please specify it explicitly.
+e: file:///home/work/dumate/38de3a359c754da5801d140c2e404f0f/workspace/ses_gffe5f74c56b80ffeEC2z3n6Op3yk0K/NovelSeekUltra/app/src/main/java/com/novelseek/ultra/ui/viewmodel/WorkDetailViewModel.kt:20:85 Unresolved reference: it
+
+FAILURE: Build failed with an exception.
+
+* What went wrong:
+Execution failed for task ':app:compileDebugKotlin'.
+> A failure occurred while executing org.jetbrains.kotlin.compilerRunner.GradleCompilerRunnerWithWorkers$GradleKotlinCompilerWorkAction
+   > Compilation error. See log for more details
+
+* Try:
+> Run with --stacktrace option to get the stack trace.
+> Run with --info or --debug option to get more log output.
+> Run with --scan to get full insights.
+> Get more help at https://help.gradle.org.
+
+BUILD FAILED in 3m 48s
+28 actionable tasks: 18 executed, 10 up-to-date

@@ -1,6 +1,7 @@
 package com.novelseek.ultra.ui.screen
 
 import android.app.Application
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
@@ -17,7 +18,7 @@ import com.novelseek.ultra.ui.theme.Accent
 import com.novelseek.ultra.ui.theme.OnBackground
 import com.novelseek.ultra.ui.viewmodel.AgentConfigViewModel
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalLayoutApi::class)
 @Composable
 fun AgentConfigScreen(
     workId: Long,
@@ -252,7 +253,7 @@ enum class WritingStylePreset(
 
     URBAN_ROMANCE(
         styleDescription = "细腻温婉的都市言情风格。多用感官描写（视觉、听觉、触觉），注重人物内心独白和情绪流动。对话自然口语化，避免过于书面化。场景切换平滑，节奏舒缓。",
-        continuePrompt = "请根据前文继续创作一段都市言情内容。注意：1）多用感官描写，让读者能"看见"场景；2）人物对话要自然口语化，像真实生活中那样；3）适当加入内心独白，展现人物情感变化；4）不要堆砌华丽辞藻，保持简洁细腻；5）情节推进要有生活气息，避免狗血套路。",
+        continuePrompt = "请根据前文继续创作一段都市言情内容。注意：1）多用感官描写，让读者能\u201c看见\u201d场景；2）人物对话要自然口语化，像真实生活中那样；3）适当加入内心独白，展现人物情感变化；4）不要堆砌华丽辞藻，保持简洁细腻；5）情节推进要有生活气息，避免狗血套路。",
         polishPrompt = "请润色以下文字，使其更符合都市言情的细腻风格。要求：1）增加感官细节描写；2）优化对话，让它更自然口语化；3）适当加入人物内心活动；4）去除生硬的过渡句和模板化表达；5）保持语言简洁，不要过度修饰。",
         expandPrompt = "请扩写以下内容，增加细节描写。重点增加：1）环境氛围描写（光线、气味、声音）；2）人物的表情和微动作；3）内心独白和心理活动；4）对话中的潜台词和停顿。注意不要过度堆砌形容词，保持克制和真实感。",
         ideaPrompt = "请基于以下背景信息，提供几个都市言情类的创意灵感。要求：1）情节设计要贴近现实生活，有代入感；2）冲突要自然合理，不要为虐而虐；3）人物关系发展要有层次，不要一见钟情就万事大吉；4）建议要具体可操作，方便直接展开创作。"
@@ -260,8 +261,8 @@ enum class WritingStylePreset(
 
     XIANXIA(
         styleDescription = "古典大气的玄幻修仙风格。文笔苍劲有力，善用意象和典故。场景描写有层次感（远景—中景—近景），动作戏干脆利落。人物对话带有古风韵味但不过度文言。世界观设定严谨，前后一致。",
-        continuePrompt = "请续写一段玄幻修仙内容。要求：1）保持古典大气的文风，善用意象；2）动作描写要干脆利落，有画面感；3）场景描写有层次，先远景再近景；4）对话带古风韵味但 readable；5）不要堆砌"逆天""绝世"等浮夸词汇；6）力量体系要自洽，不要突然越级。",
-        polishPrompt = "请润色这段玄幻修仙文字。要求：1）优化场景描写的层次感；2）精简动作描写，去掉冗余副词；3）对话适当加入古风韵味但保持可读；4）去除模板化的"震惊""瞳孔收缩"等套路描写；5）增强画面感和沉浸感。",
+        continuePrompt = "请续写一段玄幻修仙内容。要求：1）保持古典大气的文风，善用意象；2）动作描写要干脆利落，有画面感；3）场景描写有层次，先远景再近景；4）对话带古风韵味但 readable；5）不要堆砌\u201c逆天\u201d\u201c绝世\u201d等浮夸词汇；6）力量体系要自洽，不要突然越级。",
+        polishPrompt = "请润色这段玄幻修仙文字。要求：1）优化场景描写的层次感；2）精简动作描写，去掉冗余副词；3）对话适当加入古风韵味但保持可读；4）去除模板化的\u201c震惊\u201d\u201c瞳孔收缩\u201d等套路描写；5）增强画面感和沉浸感。",
         expandPrompt = "请扩写这段玄幻内容，重点增加：1）修炼体系的细节描写（灵气流转、功法运行）；2）战斗场景的空间感和节奏感；3）法宝/功法的独特设定描述；4）环境氛围（天象、地势、灵气浓度）。注意保持设定严谨，前后一致。",
         ideaPrompt = "请提供玄幻修仙类的创意灵感。要求：1）修炼体系要有创新点，不要照搬常见套路；2）世界观设定要有独特之处；3）人物动机要合理，不要为了升级而升级；4）情节设计要有张有弛，不要一味打怪升级。"
     ),

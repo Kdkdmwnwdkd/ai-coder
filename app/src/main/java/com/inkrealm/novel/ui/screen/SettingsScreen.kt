@@ -8,10 +8,12 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.inkrealm.novel.data.model.UserSettings
 import com.inkrealm.novel.ui.theme.OnBackgroundLight
+import com.inkrealm.novel.ui.theme.OnSurfaceVariant
 import com.inkrealm.novel.ui.theme.PrimaryLight
 import com.inkrealm.novel.ui.viewmodel.SettingsViewModel
 

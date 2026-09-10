@@ -3,6 +3,8 @@ package com.inkrealm.novel.ui.screen
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -15,6 +17,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.unit.dp
 import com.inkrealm.novel.ui.theme.OnBackgroundLight
 import com.inkrealm.novel.ui.theme.PrimaryLight
+import com.inkrealm.novel.ui.theme.OnSurfaceVariant
 import com.inkrealm.novel.ui.theme.SurfaceVariant
 
 @OptIn(ExperimentalMaterial3Api::class)

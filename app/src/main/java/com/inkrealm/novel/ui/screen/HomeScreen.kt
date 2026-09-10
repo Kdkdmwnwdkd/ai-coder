@@ -13,7 +13,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.MenuBook
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Robot
+import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.ShortText
 import androidx.compose.material3.*
@@ -34,6 +34,7 @@ import com.inkrealm.novel.ui.viewmodel.HomeViewModel
 import java.text.SimpleDateFormat
 import java.util.*
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     selectedTab: String,
@@ -80,7 +81,7 @@ fun HomeScreen(
                     onClick = { onTabChange("long"); tabType = WorkType.LONG }
                 )
                 NavigationBarItem(
-                    icon = { Icon(Icons.Default.Robot, contentDescription = "AI") },
+                    icon = { Icon(Icons.Default.Psychology, contentDescription = "AI") },
                     label = { Text("AI") },
                     selected = selectedTab == "agent",
                     onClick = { onTabChange("agent"); onAgentClick() }

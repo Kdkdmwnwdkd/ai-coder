@@ -23,6 +23,7 @@ import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.inkrealm.novel.service.AiService
 import com.inkrealm.novel.ui.theme.OnBackgroundLight
+import com.inkrealm.novel.ui.theme.OnSurfaceVariant
 import com.inkrealm.novel.ui.theme.PrimaryLight
 import com.inkrealm.novel.ui.theme.SurfaceVariant
 import com.inkrealm.novel.ui.viewmodel.ChapterEditViewModel

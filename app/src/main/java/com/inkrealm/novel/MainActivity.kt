@@ -9,7 +9,11 @@ import com.inkrealm.novel.ui.theme.InkRealmTheme
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        enableEdgeToEdge()
+        try {
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
+                enableEdgeToEdge()
+            }
+        } catch (_: Exception) { }
         setContent {
             InkRealmTheme {
                 InkRealmApp()

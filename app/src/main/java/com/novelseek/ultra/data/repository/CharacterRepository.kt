@@ -1,0 +1,15 @@
+package com.novelseek.ultra.data.repository
+
+import com.novelseek.ultra.data.dao.CharacterDao
+import com.novelseek.ultra.data.model.Character
+import kotlinx.coroutines.flow.Flow
+
+class CharacterRepository(private val characterDao: CharacterDao) {
+    fun getByWorkId(workId: Long): Flow<List<Character>> = characterDao.getByWorkId(workId)
+
+    suspend fun insert(character: Character): Long = characterDao.insert(character)
+
+    suspend fun update(character: Character) = characterDao.update(character)
+
+    suspend fun delete(character: Character) = characterDao.delete(character)
+}

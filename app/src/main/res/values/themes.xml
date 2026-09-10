@@ -1,0 +1,7 @@
+<resources>
+    <style name="Theme.InkRealm" parent="android:Theme.Material.NoActionBar">
+        <item name="android:statusBarColor">#FFF5F3FF</item>
+        <item name="android:navigationBarColor">#FFF5F3FF</item>
+        <item name="android:windowBackground">#FFF5F3FF</item>
+    </style>
+</resources>

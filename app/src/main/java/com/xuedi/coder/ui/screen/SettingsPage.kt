@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListScope
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.BugReport
@@ -47,12 +49,15 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.TextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedCard
 import androidx.compose.material3.OutlinedIconButton
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
+import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -77,11 +82,17 @@ import com.xuedi.coder.App
 import com.xuedi.coder.BuildConfig
 import com.xuedi.coder.R
 import com.xuedi.coder.data.ModelEntity
+import com.xuedi.coder.model.ApiConfigStore
 import com.xuedi.coder.model.ChatChunk
 import com.xuedi.coder.model.LlamaEngineHolder
 import com.xuedi.coder.model.LlamaJniEngine
+import com.xuedi.coder.model.ModelPrefsStore
 import com.xuedi.coder.theme.ThemeMode
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withContext
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.res.stringResource
@@ -101,7 +112,9 @@ fun SettingsPage(
     currentBg: String?,
     currentAlpha: Float,
     setBg: (String?) -> Unit,
-    setAlpha: (Float) -> Unit
+    setAlpha: (Float) -> Unit,
+    requestImportModel: () -> Unit,
+    requestImportBackground: () -> Unit
 ) {
     val ctx = LocalContext.current
     val scope = rememberCoroutineScope()
@@ -136,6 +149,7 @@ fun SettingsPage(
             lastLoadedPath = app.modelManager.lastLoadedPath(),
             lastThreads = eng.lastUsedThreads,
             lastNCtx = eng.lastUsedNCtx,
+            lastGpuLayers = eng.lastUsedGpuLayers,
             prefMode = eng.lastPrefMode
         )
     }.getOrDefault(
@@ -147,6 +161,7 @@ fun SettingsPage(
             lastLoadedPath = null,
             lastThreads = null,
             lastNCtx = null,
+            lastGpuLayers = null,
             prefMode = null
         )
     )
@@ -163,6 +178,7 @@ fun SettingsPage(
                 )
             }
             setBg(uri.toString())
+            requestImportBackground()
         }
     }
 
@@ -201,6 +217,7 @@ fun SettingsPage(
                 ).show()
             }
         }
+        requestImportModel()
     }
 
     var alphaLocal: Float by remember(currentAlpha) { mutableFloatStateOf(currentAlpha) }
@@ -208,6 +225,9 @@ fun SettingsPage(
     // ---- 诊断运行态 ----
     val diagLines = remember { mutableStateListOf<String>() }
     var diagRunning by remember { mutableStateOf(false) }
+    // 🔴 v1.3.11 方案A：模拟模式开关状态（镜像 LlamaJniEngine.forceMockMode，
+    //    用 remember/mutableStateOf 让 Compose 重组；切换时同步回静态变量）
+    var mockMode by remember { mutableStateOf(LlamaJniEngine.forceMockMode) }
     val diagTsFmt = remember { SimpleDateFormat("HH:mm:ss.SSS", Locale.CHINA) }
     fun ts() = diagTsFmt.format(Date())
     fun addLog(line: String) { diagLines.add("[${ts()}] $line") }
@@ -231,17 +251,6 @@ fun SettingsPage(
             ),
         verticalArrangement = Arrangement.spacedBy(0.dp)
     ) {
-        // code300: 统一页标题（与场景页同款：正文色 SemiBold 15sp）
-        item(key = "page-title") {
-            Text(
-                "设置",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.onSurface,
-                modifier = Modifier.padding(bottom = 10.dp)
-            )
-        }
-
         // ---- 分组 1：外观与主题 ----
         item(key = "appearance-group") {
             SectionHeader(title = stringResource(R.string.settings_group_appearance))
@@ -289,12 +298,165 @@ fun SettingsPage(
         }
         item(key = "spacer2") { Spacer(Modifier.height(18.dp)) }
 
-        // code279: 模拟模式/1.5B快模式开关已删除（用户要求）；
-        // code296: Vulkan GPU 加速已从代码里彻底删除（不再只是删开关）。
+        // ---- 分组：模拟模式（防闪退兜底）----
+        item(key = "mock-mode-group") {
+            SectionHeader(title = "🧱 模拟模式（防闪退兜底）")
+        }
+        item(key = "mock-mode-card") {
+            OutlinedCard(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 56.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "启用模拟回复（不跑真模型，防闪退）",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "ON=逐字返回预设回复，绕过 C++ 引擎；OFF=调用真推理",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = mockMode,
+                        onCheckedChange = { newChecked ->
+                            mockMode = newChecked
+                            LlamaJniEngine.forceMockMode = newChecked
+                            val tip = if (newChecked) "已切换到模拟模式" else "已切换到真实推理模式"
+                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
+            }
+        }
+
+        // ---- 分组 2.5：推理偏好开关（方案A/C 用户级回退）----
+        item(key = "perf-prefs-group") {
+            SectionHeader(title = "🧠 推理偏好（默认模型·GPU加速）")
+        }
+        item(key = "pref-vulkan") {
+            val app = App.instance
+            // 读一次当前值做 Compose state；异步写回 ModelPrefs DataStore
+            val (useVulkan, setUseVulkan) = remember {
+                mutableStateOf(
+                    runBlocking(Dispatchers.IO) {
+                        runCatching { app.modelPrefs.getUseVulkanAccel() }
+                            .getOrDefault(ModelPrefsStore.DEFAULT_USE_VULKAN)
+                    }
+                )
+            }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 56.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "允许 Vulkan GPU 加速",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "ON=尝试把模型层卸载到 Adreno GPU（OFF=强制CPU，最稳定回退）。加载失败时会自动降回CPU。",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = useVulkan,
+                        onCheckedChange = { checked ->
+                            setUseVulkan(checked)
+                            (app as? CoroutineScope)?.launch(Dispatchers.IO) {
+                                runCatching { app.modelPrefs.setUseVulkanAccel(checked) }
+                            }
+                            val tip = if (checked)
+                                "✅ 已开启 Vulkan（重新加载模型生效，失败自动CPU兜底）"
+                            else
+                                "🛡️ 已切换到纯 CPU（下一次加载模型生效）"
+                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
+            }
+        }
+        item(key = "pref-fast-15b") {
+            val app = App.instance
+            val (useFast, setUseFast) = remember {
+                mutableStateOf(
+                    runBlocking(Dispatchers.IO) {
+                        runCatching { app.modelPrefs.getUseFast1_5B() }
+                            .getOrDefault(ModelPrefsStore.DEFAULT_USE_FAST_1_5B)
+                    }
+                )
+            }
+            Card(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = 16.dp),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .defaultMinSize(minHeight = 56.dp)
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text(
+                            text = "默认使用 1.5B 快模式",
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "仅在「还没手动选过模型」时生效。ON=默认加载 Qwen2.5-1.5B（Prefill ~11s），OFF=默认 3B（质量更高）。",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                    Switch(
+                        checked = useFast,
+                        onCheckedChange = { checked ->
+                            setUseFast(checked)
+                            (app as? CoroutineScope)?.launch(Dispatchers.IO) {
+                                runCatching { app.modelPrefs.setUseFast1_5B(checked) }
+                            }
+                            val tip = if (checked)
+                                "⚡ 以后未选模型时默认优先 1.5B（下次冷启动生效）"
+                            else
+                                "📚 默认模型改回 3B（下次冷启动生效）"
+                            Toast.makeText(ctx, tip, Toast.LENGTH_SHORT).show()
+                        }
+                    )
+                }
+            }
+        }
 
         // ---- 分组 3：推理诊断 ----
         item(key = "diag-group") {
-            SectionHeader(title = "诊断与排障")
+            SectionHeader(title = "🔍 推理诊断（闪退 / 没输出时点这里）")
         }
         // 🔴 v1.3.25-fix13: 把完整诊断包生成逻辑抽成 lambda，分享和复制都复用
         val buildDiagReport: () -> String = {
@@ -309,7 +471,7 @@ fun SettingsPage(
                 appendLine("CPU_ABI2：${android.os.Build.CPU_ABI2}（arm64-v8a 必为空）")
                 appendLine()
                 appendLine("═══════════════════════════════════════════")
-                appendLine("当前激活引擎：LlamaJniEngine(llama.cpp b10819)")
+                appendLine("当前激活引擎：LlamaJniEngine(b5180 · v1.3.25-fix22 官方最简)；模拟模式=${LlamaJniEngine.forceMockMode}")
                 appendLine("当前模型：${app.modelManager.lastLoadedPath() ?: "<未加载>"}")
                 appendLine("—— Llama 引擎 ——")
                 val llamaSt = LlamaJniEngine.libStatus()
@@ -438,7 +600,7 @@ fun SettingsPage(
         // 🆕 code78 分组：GitHub Actions 自动编译
         // ─────────────────────────────────────────────────
         item(key = "gh-group") {
-            SectionHeader(title = "GitHub Actions 自动编译")
+            SectionHeader(title = "🐙 GitHub Actions 自动编译（让 AI 帮你跑编译）")
         }
         item(key = "gh-card") {
             val ghStore = remember { com.xuedi.coder.plugin.GitHubTokenStore(App.instance) }
@@ -461,7 +623,7 @@ fun SettingsPage(
                 modifier = Modifier.fillMaxWidth(),
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.88f)
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
                 )
             ) {
                 Column(Modifier.padding(16.dp)) {
@@ -517,7 +679,7 @@ fun SettingsPage(
                         Button(
                             onClick = {
                                 val ok = ghStore.isConfigured()
-                                Toast.makeText(ctx, if (ok) "已保存，去聊天页发 @github 触发编译" else "还没填完 4 项", Toast.LENGTH_LONG).show()
+                                Toast.makeText(ctx, if (ok) "✅ 已保存，去聊天页 @github 触发编译吧" else "⚠️ 还没填完 4 项", Toast.LENGTH_LONG).show()
                             },
                             shape = RoundedCornerShape(12.dp),
                             colors = ButtonDefaults.buttonColors(
@@ -527,14 +689,178 @@ fun SettingsPage(
                                     else MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         ) {
-                            Text(if (configured) "已就绪" else "待配置", fontSize = 11.sp)
+                            Text(if (configured) "✅ 已就绪" else "⚠️ 待配置", fontSize = 11.sp)
                         }
                     }
                 }
             }
         }
 
-        // code277: 「无障碍系统级操控」分组已随动作模式整体删除
+        // ─────────────────────────────────────────────────
+        // code308 分组：云端 AI API 配置
+        // ─────────────────────────────────────────────────
+        item(key = "api-group") {
+            SectionHeader(title = "☁️ 云端 AI API（替代本地推理）")
+        }
+        item(key = "api-card") {
+            val apiStore = remember { com.xuedi.coder.model.ApiConfigStore(App.instance) }
+            var apiEnabled by remember { mutableStateOf(apiStore.enabled) }
+            var baseUrl by remember { mutableStateOf(apiStore.baseUrl.removeSuffix("/")) }
+            var apiKey by remember { mutableStateOf(apiStore.apiKey) }
+            var model by remember { mutableStateOf(apiStore.model) }
+            var temp by remember { mutableFloatStateOf(apiStore.temperature) }
+            val ctx = LocalContext.current
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
+                )
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text("启用 API 模式", fontSize = 14.sp, fontWeight = FontWeight.Medium)
+                        Switch(
+                            checked = apiEnabled,
+                            onCheckedChange = {
+                                apiEnabled = it
+                                apiStore.enabled = it
+                                Toast.makeText(
+                                    ctx,
+                                    if (it) "✅ API 模式已启用" else "✅ 已切换回本地推理",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        )
+                    }
+                    Spacer(Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = baseUrl,
+                        onValueChange = { baseUrl = it },
+                        label = { Text("API 基础地址", fontSize = 12.sp) },
+                        placeholder = { Text("如 https://api.openai.com/v1") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = apiKey,
+                        onValueChange = { apiKey = it },
+                        label = { Text("API Key", fontSize = 12.sp) },
+                        placeholder = { Text("sk-... 或你的 Access Token") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    OutlinedTextField(
+                        value = model,
+                        onValueChange = { model = it },
+                        label = { Text("模型名称", fontSize = 12.sp) },
+                        placeholder = { Text("如 gpt-3.5-turbo / qwen-turbo / deepseek-chat") },
+                        modifier = Modifier.fillMaxWidth(),
+                        singleLine = true
+                    )
+                    Spacer(Modifier.height(8.dp))
+
+                    Text("Temperature: ${"%.1f".format(temp)}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Slider(
+                        value = temp,
+                        onValueChange = { temp = it },
+                        valueRange = 0.0f..2.0f,
+                        steps = 19
+                    )
+
+                    Spacer(Modifier.height(12.dp))
+                    Button(
+                        onClick = {
+                            apiStore.baseUrl = baseUrl
+                            apiStore.apiKey = apiKey
+                            apiStore.model = model
+                            apiStore.temperature = temp
+                            Toast.makeText(ctx, "✅ API 配置已保存", Toast.LENGTH_SHORT).show()
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Text("保存配置")
+                    }
+
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        "常用平台地址：\n" +
+                        "百度千帆: https://qianfan.baidubce.com/v2\n" +
+                        "阿里通义: https://dashscope.aliyuncs.com/compatible-mode/v1\n" +
+                        "硅基流动: https://api.siliconflow.cn/v1\n" +
+                        "DeepSeek: https://api.deepseek.com/v1\n" +
+                        "智谱 AI:  https://open.bigmodel.cn/api/paas/v4",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
+                        lineHeight = 16.sp
+                    )
+                }
+            }
+        }
+
+        // ─────────────────────────────────────────────────
+        // 🆕 code78 分组：无障碍系统级操控
+        // ─────────────────────────────────────────────────
+        item(key = "acc-group") {
+            SectionHeader(title = "👁️ 无障碍系统级操控（AI 帮你打开 App 搜索）")
+        }
+        item(key = "acc-card") {
+            val ctx = LocalContext.current
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                colors = CardDefaults.cardColors(
+                    containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.92f)
+                )
+            ) {
+                Column(Modifier.padding(16.dp)) {
+                    Text(
+                        "开启后，AI 能帮你做：\n" +
+                        "  • 打开快手后自动点搜索框输入「斗罗大陆」\n" +
+                        "  • 帮你在聊天框输入一段文字\n" +
+                        "  • 上下滑屏幕、返回、Home\n\n" +
+                        "⚠️  这是 Android 系统级权限，首次必须手动点一下「允许」，之后永久生效。\n" +
+                        "🔒 所有操作都在手机本地执行，不上传任何数据。",
+                        fontSize = 12.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        lineHeight = 18.sp
+                    )
+                    Spacer(Modifier.height(12.dp))
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(
+                            onClick = {
+                                val intent = Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                ctx.startActivity(intent)
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("🔧 去设置里授权无障碍", fontSize = 12.sp)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                val intent = Intent(android.provider.Settings.ACTION_SECURITY_SETTINGS)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                ctx.startActivity(intent)
+                            },
+                            shape = RoundedCornerShape(12.dp)
+                        ) {
+                            Text("📚 关于权限说明", fontSize = 12.sp)
+                        }
+                    }
+                }
+            }
+        }
 
         // ---- Build 信息 ----
         item(key = "build-info") {
@@ -555,12 +881,11 @@ fun SettingsPage(
 // ===================================================================
 @Composable
 private fun SectionHeader(title: String) {
-    // code300: 分组标题改灰色小字（预览版设计），不再用蓝色
     Text(
         text = title,
         fontSize = 13.sp,
         fontWeight = FontWeight.SemiBold,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        color = MaterialTheme.colorScheme.primary,
         modifier = Modifier.padding(start = 2.dp, bottom = 6.dp, top = 2.dp),
         letterSpacing = 0.5.sp
     )
@@ -589,7 +914,7 @@ private fun AppearanceCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
         )
     ) {
         Column(Modifier.padding(14.dp)) {
@@ -746,7 +1071,7 @@ private fun ModelsCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
         )
     ) {
         Column(Modifier.padding(14.dp)) {
@@ -1136,6 +1461,9 @@ private data class LoadDiagSnapshot(
     // null = 模型尚未成功加载过。
     val lastThreads: Int?,
     val lastNCtx: Int?,
+    // 🆕 v1.3.26-gpu1: 最近一次 loadModel 请求的 gpuLayers（-1=全 offload，0=CPU，
+    // 真实值由 C++ 端 clamp 后写进日志 nativeInit n_gpu_layers=…）。
+    val lastGpuLayers: Int?,
     // 🆕 v1.3.25-perf1: 最近一次推理回合的 prefill 模式。
     // BATCH_OK = 批量提交成功；BATCH_FB = 批量失败回退逐 token；STEPx1 = 直接走逐 token。
     // null = 尚未跑过推理。
@@ -1197,7 +1525,7 @@ private fun DiagnosticCard(
         modifier = Modifier.fillMaxWidth(),
         shape = RoundedCornerShape(18.dp),
         colors = CardDefaults.cardColors(
-            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.86f)
+            containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.9f)
         )
     ) {
         Column(Modifier.padding(14.dp)) {
@@ -1265,7 +1593,7 @@ private fun DiagnosticCard(
                 ) {
                     Icon(Icons.Outlined.ReceiptLong, null)
                     Spacer(Modifier.width(2.dp))
-                    Text("抓日志", fontSize = 11.sp)
+                    Text("📥抓日志", fontSize = 10.5.sp)
                 }
                 OutlinedButton(
                     onClick = onShareAll,
@@ -1276,7 +1604,7 @@ private fun DiagnosticCard(
                 ) {
                     Icon(Icons.Outlined.IosShare, null)
                     Spacer(Modifier.width(2.dp))
-                    Text("分享", fontSize = 11.sp)
+                    Text("📤分享包", fontSize = 10.5.sp)
                 }
                 FilledTonalButton(
                     onClick = onCopyAll,
@@ -1287,7 +1615,7 @@ private fun DiagnosticCard(
                 ) {
                     Icon(Icons.Outlined.ContentCopy, null)
                     Spacer(Modifier.width(2.dp))
-                    Text("复制", fontSize = 11.sp)
+                    Text("📋复制包", fontSize = 10.5.sp)
                 }
             }
 
@@ -1383,6 +1711,7 @@ private suspend fun grabLlamaJniLogcatImpl(): List<String> = withContext(kotlinx
         "-s",
         "LlamaJni:V",
         "LlamaJniEngine:V",
+        "AccessService:V",      // 无障碍服务执行日志（open_app/send_message 等）
         "DEBUG:*",          // 系统崩溃记录（SIGSEGV/tombstone 的开头几行常打在 DEBUG tag）
         "AndroidRuntime:E",
         "ActivityManager:I"
@@ -1424,7 +1753,15 @@ private suspend fun runDiagnosticImpl(
     }
     addLog("③ 引擎状态: $ctxStr  lastLoadErr=${engineSnapshot.lastLoadError?:"(无)"}")
     // 🆕 v1.3.25-perf1: 运行参数透明化，测 4/6/8 线程 & batch prefill 时一眼看到"这次到底用了啥参数"
-    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}")
+    // v1.3.26-gpu1: 新增 gpuLayers 显示（-1=请求全 offload，0=CPU；真机实际卸载层数看 LlamaJni 日志行 nativeInit n_gpu_layers=…）
+    val gpuLayersDisplay = engineSnapshot.lastGpuLayers?.let {
+        when (it) {
+            -1 -> "请求全卸载(-1)（C++端根据编译/Vulkan驱动clamp，真数见LlamaJni日志）"
+            0  -> "CPU-only(0)"
+            else -> "${it}层"
+        }
+    } ?: "(未加载)"
+    addLog("③+ 运行参数: threads=${engineSnapshot.lastThreads?:"(未加载)"}  nCtx=${engineSnapshot.lastNCtx?:"(未加载)"}  gpuLayers=$gpuLayersDisplay  prefMode=${engineSnapshot.prefMode?:"(尚未推理)"}")
 
     // ---- 2. 模型存在性 ----
     if (selectedModel == null) {

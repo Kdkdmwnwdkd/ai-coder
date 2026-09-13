@@ -38,16 +38,8 @@ android {
         //   code 98 = code97 + Repo自动拆分owner/repo + Token自动提取ghp_前缀 + 设置页无效token自动清空
         //   code 99 = code98 + 根治LazyColumn闪退(移除scrollToItem靠reverseLayout+key拼idx防重复key)
         //   code 100 = code99 + @github 提交代码到dev分支(Contents API手机直推) + 触发构建改dev分支(main停在code62) + QQ/微信禁用自动化
-        // code101: 版本号改 CI 自动注入 —— GITHUB_RUN_NUMBER 每次构建唯一递增，
-        //   诊断包/关于页直接显示 code<构建号>，一眼分清装的是哪次出的包（本地构建回落 100）。
-        // code278: llama.cpp b5180 → b10819（2026-09-05 官方最新 release）。
-        //   · 重开批量 prefill：b5180 CPU 批量 decode 的 SIGSEGV 路径已被上游重写，
-        //     JNI 侧带 .batch_bad 崩溃锁自锁保护（成功删锁 / ret!=0 保锁+逐token / 真崩只崩一次）。
-        //   · KV API 换 llama_memory_*、flash_attn 换枚举（JNI 已适配，宿主机语法冒烟通过）。
-        //   · code296: Vulkan/ggml-vulkan 已按用户要求彻底删除，永远纯 CPU 构建。
-        val ciVersion = System.getenv("GITHUB_RUN_NUMBER")?.toIntOrNull() ?: 100
-        versionCode = ciVersion
-        versionName = "1.3.26-code$ciVersion"
+        versionCode = 308
+        versionName = "1.3.26-code308"
         // v1.3.25-fix17: 【Llama SIGABRT 根因！】
         //   崩溃日志：nativeChat: ✂️ 手动插 BOS → CRASH CAUGHT SIGABRT
         //   prefill 的 "⏳ prefill #0" 日志从未出现 → 崩溃在 llama_batch_init + 循环首步！
@@ -377,21 +369,14 @@ tasks.register("ensureLlamaCppSource") {
     val marker = File(llamaDir, "CMakeLists.txt")
     outputs.upToDateWhen { marker.exists() && marker.length() > 40_000 }  // b4812 CMakeLists.txt 60KB+
     doLast {
-        // code278: b5180 → b10819（重开批量 prefill：b5180 CPU 批量 RoPE SIGSEGV 已在后续版本重写，
-        //   且 b10819 的 KV API 换成 llama_memory_*、flash_attn 换枚举，llama_jni.cpp 已同步适配）。
-        //   崩溃自锁保护见 llama_jni.cpp 5.0 节。
-        val TAG = "b10819"
-        val stamp = File(llamaDir, ".xuedi_src_tag")
-        if (marker.exists() && marker.length() > 40_000 &&
-            stamp.exists() && stamp.readText().trim() == TAG) return@doLast
-        if (llamaDir.exists()) {
-            println("[ensureLlamaCppSource] 检测到旧版本 llama.cpp 源码，先清理再下载 $TAG")
-            llamaDir.deleteRecursively()
-        }
+        if (marker.exists() && marker.length() > 40_000) return@doLast
         cppDir.mkdirs()
         // NOTE: 用 llama.cpp 官方真实存在的 release tag，而不是 short hash。
         //      同时直接写最终组织 ggml-org（ggerganov/llama.cpp 已迁移到 ggml-org/llama.cpp，
         //      archive 路由经过 301 时偶尔会把路径拼成 404）。codeload 直链比 github.com archive 稳定。
+        // 🔴 v1.3.12 方案B：b4835 → b5180。b5180 含 arm64 多 batch 修复（b4835 prefill 第2
+        //    batch 切换 SIGABRT）。C API 源码级兼容，llama_jni.cpp 零改动。
+        val TAG = "b5180"
         val URLS = listOf(
             "https://codeload.github.com/ggml-org/llama.cpp/tar.gz/refs/tags/$TAG",
             "https://github.com/ggml-org/llama.cpp/archive/refs/tags/$TAG.tar.gz",

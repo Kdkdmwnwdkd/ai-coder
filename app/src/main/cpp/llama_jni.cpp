@@ -365,7 +365,7 @@ static jlong nativeInit_inner(
     cparams.n_threads   = (uint32_t)n_threads;
     cparams.n_threads_batch = (uint32_t)n_threads;
     // b10819: flash_attn bool 字段已换成 flash_attn_type 枚举
-    cparams.flash_attn_type = LLAMA_FLASH_ATTN_TYPE_DISABLED;  // 魅族 20 不兼容 flash attn，关
+    cparams.flash_attn = false;  // 魅族 20 不兼容 flash attn，关  // 魅族 20 不兼容 flash attn，关
     // code296: 纯 CPU 构建 —— 显式关掉 KQV offload（默认 true 是给 GPU 后端用的）
     cparams.offload_kqv = false;
 
@@ -525,7 +525,7 @@ static void nativeChat_inner(
 
     // ---- Step 4: 清 KV cache（修"二次对话不吐字"bug）
     // b10819 新命名：llama_kv_self_clear 已移除 → llama_memory_clear(llama_get_memory(ctx), true)
-    llama_memory_clear(llama_get_memory(st->ctx), true);
+    llama_kv_self_clear(st->ctx);
     LOGI("nativeChat: kv cache 已清。开始 prefill [%zu tokens]", tokens.size());
 
     // ---- Step 5: Prefill（v1.3.25-perf1：先试批量 llama_decode 一次过，失败回退 SAFE 逐 token）----
@@ -601,7 +601,7 @@ static void nativeChat_inner(
                     LOGE("❌ PREFILL-BATCH FAIL ret=%d N=%d → 保留崩溃锁 + 清 KV + fallback 逐 token (SAFE_N_BATCH=%d)",
                          ret, N, SAFE_N_BATCH);
                     // 失败必须清 KV：batch_all 可能部分写入了 KV，不清的话逐 token 会 pos 冲突
-                    llama_memory_clear(llama_get_memory(st->ctx), true);
+                    llama_kv_self_clear(st->ctx);
                 }
             } else {
                 LOGE("❌ PREFILL-BATCH: llama_batch_init(%d,0,1) 返回空字段 → 直接 fallback", N);
